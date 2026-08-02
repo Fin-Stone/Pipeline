@@ -1,0 +1,31 @@
+# Real financial data. Never committed, never read by agents.
+# See docs/development-rules.md Rule 2.
+uploads/prod/**
+
+# Operator-supplied redacted samples. The folder is tracked, its contents are not.
+uploads/dummy/**
+!uploads/dummy/.gitkeep
+
+# Runtime data surfaces. Originals live in the content-addressed store on disk,
+# not in git.
+data/inbox/**
+data/store/**
+data/quarantine/**
+!data/inbox/README.md
+!data/store/README.md
+!data/quarantine/README.md
+
+# Secrets and environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
