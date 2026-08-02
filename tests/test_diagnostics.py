@@ -142,7 +142,7 @@ class TestRedactionCoversEveryReportPath:
         original = cli.load_config
         cli.load_config = lambda: config
         try:
-            cmd_report(type("Args", (), {"redact": True})())
+            cmd_report(type("Args", (), {"redact": True, "out": None})())
             out = capsys.readouterr().out
         finally:
             cli.load_config = original

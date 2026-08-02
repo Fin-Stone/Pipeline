@@ -232,10 +232,22 @@ Statements are financial documents. Asking for one in order to debug a parser is
 privacy problem and a slow loop, so **every failure is reportable as text**:
 
 ```
-finstone doctor <path>            parse one document and explain the result
-finstone doctor <path> --redact   the same, with descriptions and references masked
-finstone report                   render every quarantined document as a report
+finstone doctor <path> [--redact]   parse one document and explain the result
+finstone report [--redact] [--out]  render every quarantined document
 ```
+
+A run prints three lines and writes the detail to a file:
+
+```
+processed 74: 63 imported, 11 quarantined; 1091 transaction(s) inserted
+  failures: 11 validation_failed
+  report:   data/reports/20260802-230517-failures.txt
+```
+
+That file is **redacted by default** — the whole point is that it can be handed to someone
+without handing over the statements. Per-document logging is off unless `-v` is passed:
+every failure is already in its reason file and in the report, and two stderr lines per
+failure buried the one number that mattered.
 
 `doctor` touches no database. On success it prints every account, every parsed transaction
 and the reconciliation arithmetic. On failure it prints the offending line, how that line

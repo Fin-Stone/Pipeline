@@ -187,6 +187,67 @@ def _hints(difference, accounts, account_name, redact) -> list[str]:
     return hints
 
 
+def render_reason(payload: dict, *, redact: bool = False) -> str:
+    """Render one quarantine reason file as a readable report.
+
+    Shared by `finstone report` and by the report file a run writes, so the
+    two can never drift into describing the same failure differently.
+    """
+    detail = payload.get("detail", {})
+    name = payload.get("source_relpath") or payload.get("sha256", "")
+    failure_class = payload.get("failure_class")
+
+    if failure_class == "validation_failed":
+        return reconciliation_report(
+            filename=name,
+            sha256=payload.get("sha256", ""),
+            adapter=detail.get("adapter"),
+            failures=detail.get("failures", []),
+            accounts=detail.get("accounts"),
+            redact=redact,
+        )
+
+    if failure_class in ("unknown_layout", "ambiguous_layout"):
+        out = [RULE, "UNROUTABLE" if failure_class == "unknown_layout" else "AMBIGUOUS LAYOUT", RULE]
+        out.append(f"file        {describe(name, redact)}")
+        out.append(f"layout      {detail.get('fingerprint')}")
+        out.append(f"producer    {detail.get('producer') or '(none)'}")
+        out.append(f"            normalised: {detail.get('producer_normalised') or '(none)'}")
+
+        if detail.get("candidates"):
+            out.append("\nWhat each adapter required and did not find:")
+            for candidate in detail["candidates"]:
+                out.append(f"  {candidate['adapter']}  (expects producer {candidate['expects_producer']})")
+                for missing in candidate.get("missing", []):
+                    out.append(f"    missing line  {describe(missing, redact)}")
+
+        if detail.get("label_lines"):
+            out.append("\nHeader lines this document carries:")
+            for label in detail["label_lines"]:
+                out.append(f"    {describe(label, redact)}")
+
+        out.append("\nTo add an adapter, pick the lines above that are the bank's own words —")
+        out.append("never the customer's — and declare them as its LayoutSignature.")
+        out.append(RULE)
+        return "\n".join(out)
+
+    context = detail.get("context", {})
+    neighbourhood = Neighbourhood(
+        lines=tuple((n["page"], n["y"], n["text"]) for n in detail.get("neighbourhood", [])),
+        highlight_y=context.get("y"),
+    )
+    return parse_failure_report(
+        filename=name,
+        sha256=payload.get("sha256", ""),
+        message=payload.get("message", ""),
+        adapter=detail.get("adapter"),
+        fingerprint=detail.get("fingerprint"),
+        context=context,
+        neighbourhood=neighbourhood,
+        redact=redact,
+    )
+
+
 def build_neighbourhood(document, page: int | None, y: float | None, *, span: int = 6) -> Neighbourhood:
     """Lines around a position, as context for the report."""
     if page is None or y is None:

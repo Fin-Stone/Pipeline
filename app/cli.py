@@ -10,6 +10,8 @@ import argparse
 import json
 import logging
 import sys
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 from .config import PROFILE_DUMMY, PROFILES, ConfigError, load_config
@@ -23,11 +25,19 @@ from .storage.factory import build_blob_store, build_notifier, build_repository
 
 
 def _configure_logging(verbose: bool) -> None:
+    """Quiet by default.
+
+    A run over a few dozen statements used to emit two stderr lines per
+    failure, burying the one number that matters. Every failure is already
+    recorded in its reason file and rendered into the run's report, so the
+    log adds nothing at the terminal. `-v` brings it back.
+    """
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+    logging.getLogger("finstone").setLevel(logging.DEBUG if verbose else logging.ERROR + 1)
 
 
 def cmd_stage(args) -> int:
@@ -57,7 +67,7 @@ def cmd_ingest(args) -> int:
         )
     finally:
         repository.close()
-    _print_summary(summary)
+    _print_summary(summary, config)
     return 0
 
 
@@ -78,23 +88,73 @@ def cmd_run(args) -> int:
         )
     finally:
         repository.close()
-    _print_summary(summary)
+    _print_summary(summary, config)
     return 0
 
 
-def _print_summary(summary) -> None:
+def _print_summary(summary, config=None) -> None:
+    """Three lines: what happened, what failed, where the detail is.
+
+    Anything longer gets skimmed. The per-document detail lives in the report
+    file, which is the thing worth sending on.
+    """
     if summary.processed == 0:
         print("nothing to ingest: the inbox is empty for this profile")
         return
-    print(
-        f"processed {summary.processed}: {summary.imported} imported, "
-        f"{summary.unverified} imported-unverified, {summary.duplicates} already imported, "
-        f"{summary.quarantined} quarantined; {summary.txns_inserted} transaction(s) inserted"
+
+    parts = [f"{summary.imported} imported"]
+    if summary.unverified:
+        parts.append(f"{summary.unverified} unverified")
+    if summary.duplicates:
+        parts.append(f"{summary.duplicates} already imported")
+    if summary.quarantined:
+        parts.append(f"{summary.quarantined} quarantined")
+    print(f"processed {summary.processed}: {', '.join(parts)}; "
+          f"{summary.txns_inserted} transaction(s) inserted")
+
+    if not summary.quarantined:
+        return
+
+    reasons = Counter(o.reason or "unknown" for o in summary.outcomes if o.status == "quarantined")
+    print("  failures: " + ", ".join(f"{count} {reason}" for reason, count in reasons.most_common()))
+
+    if config is not None:
+        written = _write_run_report(config, summary)
+        if written is not None:
+            print(f"  report:   {written}")
+
+
+def _write_run_report(config, summary) -> Path | None:
+    """Write this run's failures to a file, redacted and ready to send.
+
+    Redacted by default: the whole point is that it can be handed to someone
+    without handing over the statements.
+    """
+    from .pipeline import diagnostics
+    from .pipeline.quarantine import REASON_SUFFIX
+
+    digests = [o.sha256 for o in summary.outcomes if o.status == "quarantined"]
+    blocks = []
+    for digest in digests:
+        reason_file = config.quarantine_dir / f"{digest}{REASON_SUFFIX}"
+        if not reason_file.exists():
+            continue
+        payload = json.loads(reason_file.read_text(encoding="utf-8"))
+        blocks.append(diagnostics.render_reason(payload, redact=True))
+
+    if not blocks:
+        return None
+
+    config.reports_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = config.reports_dir / f"{stamp}-failures.txt"
+    header = (
+        f"finstone failure report  {datetime.now().isoformat(timespec='seconds')}\n"
+        f"{len(blocks)} of {summary.processed} documents failed.\n"
+        "Redacted: letters masked, digits kept. Safe to send as-is.\n\n"
     )
-    for outcome in summary.outcomes:
-        if outcome.status == "quarantined":
-            note = " (already known)" if outcome.reason == "already_quarantined" else f"  ({outcome.reason})"
-            print(f"  quarantined  {Path(outcome.path).name}{note}")
+    target.write_text(header + "\n\n".join(blocks) + "\n", encoding="utf-8")
+    return target
 
 
 def cmd_fingerprint(args) -> int:
@@ -179,7 +239,7 @@ def cmd_reparse(args) -> int:
     if summary.processed == 0:
         print("nothing to reparse")
         return 0
-    _print_summary(summary)
+    _print_summary(summary, config)
     return 0
 
 
@@ -336,64 +396,22 @@ def cmd_report(args) -> int:
         print("quarantine is empty")
         return 0
 
-    for reason_file in reasons:
-        payload = json.loads(reason_file.read_text(encoding="utf-8"))
-        detail = payload.get("detail", {})
-        name = payload.get("source_relpath") or reason_file.name
-        failure_class = payload.get("failure_class")
+    blocks = [
+        diagnostics.render_reason(
+            json.loads(reason_file.read_text(encoding="utf-8")), redact=args.redact
+        )
+        for reason_file in reasons
+    ]
 
-        if failure_class == "validation_failed":
-            print(diagnostics.reconciliation_report(
-                filename=name,
-                sha256=payload["sha256"],
-                adapter=detail.get("adapter"),
-                failures=detail.get("failures", []),
-                accounts=detail.get("accounts"),
-                redact=args.redact,
-            ))
-        elif failure_class in ("unknown_layout", "ambiguous_layout"):
-            print(diagnostics.RULE)
-            print("UNROUTABLE" if failure_class == "unknown_layout" else "AMBIGUOUS LAYOUT")
-            print(diagnostics.RULE)
-            print(f"file        {diagnostics.describe(name, args.redact)}")
-            print(f"layout      {detail.get('fingerprint')}")
-            print(f"producer    {detail.get('producer') or '(none)'}")
-            print(f"            normalised: {detail.get('producer_normalised') or '(none)'}")
+    separator = "\n\n"
+    if args.out:
+        target = Path(args.out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(separator.join(blocks) + "\n", encoding="utf-8")
+        print(f"{len(blocks)} failure(s) written to {target}")
+        return 0
 
-            candidates = detail.get("candidates") or []
-            if candidates:
-                print("\nWhat each adapter required and did not find:")
-                for candidate in candidates:
-                    print(f"  {candidate['adapter']}  (expects producer {candidate['expects_producer']})")
-                    for missing in candidate.get("missing", []):
-                        print(f"    missing line  {diagnostics.describe(missing, args.redact)}")
-
-            labels = detail.get("label_lines") or []
-            if labels:
-                print("\nHeader lines this document carries:")
-                for label in labels:
-                    print(f"    {diagnostics.describe(label, args.redact)}")
-
-            print("\nTo add an adapter, pick the lines above that are the bank's own words —")
-            print("never the customer's — and declare them as its LayoutSignature.")
-            print(diagnostics.RULE)
-        else:
-            context = detail.get("context", {})
-            neighbourhood = diagnostics.Neighbourhood(
-                lines=tuple((n["page"], n["y"], n["text"]) for n in detail.get("neighbourhood", [])),
-                highlight_y=context.get("y"),
-            )
-            print(diagnostics.parse_failure_report(
-                filename=name,
-                sha256=payload["sha256"],
-                message=payload.get("message", ""),
-                adapter=detail.get("adapter"),
-                fingerprint=detail.get("fingerprint"),
-                context=context,
-                neighbourhood=neighbourhood,
-                redact=args.redact,
-            ))
-        print()
+    print(separator.join(blocks))
     return 0
 
 
@@ -451,6 +469,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("report", help="render every quarantined document as a readable report")
     p.add_argument("--redact", action="store_true", help="mask descriptions and references")
+    p.add_argument("--out", help="write to a file instead of stdout")
     p.set_defaults(func=cmd_report)
 
     return parser

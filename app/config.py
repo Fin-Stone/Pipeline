@@ -60,6 +60,11 @@ class Config:
     def quarantine_dir(self) -> Path:
         return self.data_dir / "quarantine"
 
+    @property
+    def reports_dir(self) -> Path:
+        """Where a run leaves a shareable write-up of its failures."""
+        return self.data_dir / "reports"
+
     def uploads_for(self, profile: str) -> Path:
         if profile not in PROFILES:
             raise ConfigError(f"unknown profile {profile!r}; expected one of {PROFILES}")

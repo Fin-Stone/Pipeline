@@ -426,6 +426,32 @@ class TestValidation:
         checks = {f.check for f in validate(doc, amount_ceiling_minor=10**9).failures}
         assert "date_monotonicity" in checks
 
+    def test_ordering_by_transaction_date_is_accepted(self):
+        """Card statements are ordered by transaction date, so posting dates
+        legitimately go backwards: bought 29 Sep, posted 3 Oct; bought 30 Sep,
+        posted 2 Oct. Requiring monotonic posting dates rejected eleven real
+        statements that reconciled to the cent."""
+        txns = (
+            ParsedTxn(posted_date=date(2024, 6, 3), value_date=date(2024, 5, 29),
+                      amount_minor=0, currency="SGD", description_raw="a"),
+            ParsedTxn(posted_date=date(2024, 6, 2), value_date=date(2024, 5, 30),
+                      amount_minor=0, currency="SGD", description_raw="b"),
+        )
+        doc = self._document(list(txns), 0, 0)
+        result = validate(doc, amount_ceiling_minor=10**9)
+        assert "date_monotonicity" not in {f.check for f in result.failures}
+
+    def test_disorder_in_both_orderings_still_fails(self):
+        """Loosening the check must not disable it."""
+        txns = (
+            ParsedTxn(posted_date=date(2024, 6, 10), value_date=date(2024, 6, 10),
+                      amount_minor=0, currency="SGD", description_raw="a"),
+            ParsedTxn(posted_date=date(2024, 6, 3), value_date=date(2024, 6, 3),
+                      amount_minor=0, currency="SGD", description_raw="b"),
+        )
+        doc = self._document(list(txns), 0, 0)
+        assert "date_monotonicity" in {f.check for f in validate(doc, amount_ceiling_minor=10**9).failures}
+
 
 class TestRegistry:
     """Routing matches on the header lines an adapter declares, not on an

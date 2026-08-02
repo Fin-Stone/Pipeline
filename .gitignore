@@ -11,6 +11,7 @@ uploads/dummy/**
 data/inbox/**
 data/store/**
 data/quarantine/**
+data/reports/**
 data/*.db
 data/*.db-journal
 data/*.sqlite3

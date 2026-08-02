@@ -116,15 +116,31 @@ def _secondary_checks(account, document, name, amount_ceiling_minor) -> list[Fai
             },
         ))
 
-    dates = [t.posted_date for t in account.txns]
-    if dates != sorted(dates):
-        first_break = next(
-            (i for i in range(1, len(dates)) if dates[i] < dates[i - 1]), None
-        )
+    # Rows must be in order by *one* of the dates the statement prints, not
+    # necessarily the posting date.
+    #
+    # Card statements that carry both a transaction and a posting date are
+    # ordered by the transaction date, so posting dates legitimately go
+    # backwards: something bought on 29 Sep can post on 3 October while
+    # something bought on 30 Sep posts on the 2nd. Requiring monotonic posting
+    # dates rejected eleven statements that reconciled to the cent — the check
+    # was wrong, not the documents.
+    #
+    # The point of the check is to notice rows read out of sequence, which
+    # would mean the table was misread. Ordering by either printed date
+    # satisfies that.
+    orderings = {"posted_date": [t.posted_date for t in account.txns]}
+    if all(t.value_date is not None for t in account.txns) and account.txns:
+        orderings["value_date"] = [t.value_date for t in account.txns]
+
+    if not any(dates == sorted(dates) for dates in orderings.values()):
+        dates = orderings["posted_date"]
+        first_break = next((i for i in range(1, len(dates)) if dates[i] < dates[i - 1]), None)
         failures.append(Failure(
             account=name,
             check="date_monotonicity",
             detail={
+                "checked": sorted(orderings),
                 "first_out_of_order_index": first_break,
                 "at": dates[first_break].isoformat() if first_break is not None else None,
             },

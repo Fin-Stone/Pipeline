@@ -477,7 +477,7 @@ def _quarantine(
         sha256=digest,
         reason=str(reason_path),
     )
-    log.warning("quarantined %s (%s): %s", relpath, failure_class, message)
+    log.debug("quarantined %s (%s): %s", relpath, failure_class, message)
     return IngestOutcome(
         sha256=digest,
         path=str(path),
