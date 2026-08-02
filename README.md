@@ -12,9 +12,22 @@ Keep the system as one coherent runtime with one shared data model and one boots
 
 ## Status
 
-**Phase 1 — data ingestion and storage — is designed but not yet implemented.** The design
-of record is [docs/ingestion.md](docs/ingestion.md); the implementation lands as a separate
-change set against it. The repository currently contains documentation and layout only.
+**Phase 1 — data ingestion and storage — is implemented.** Statements dropped into
+`uploads/` are staged, hashed into an immutable content-addressed store, routed to an adapter
+by layout fingerprint, validated against the statement's own opening and closing balances,
+and written to Postgres. Anything that fails is quarantined with a readable reason and the
+run continues.
+
+Trust Bank savings and credit card statements parse and reconcile end to end. DBS, MariBank
+and OCBC quarantine as unknown layouts until their adapters are written — the designed
+behaviour, not a gap. See [docs/ingestion.md](docs/ingestion.md).
+
+```
+finstone run --profile dummy      stage and ingest
+finstone status                   ledger and quarantine counts
+finstone doctor <path>            parse one document and explain the result
+finstone report                   why every quarantined document failed
+```
 
 ## Repo shape
 
@@ -43,14 +56,17 @@ automated retrieval — write into it directly.
 
 ## Development rules
 
-Two rules bind every contributor, human or agent. Both are stated in full in
+Three rules bind every contributor, human or agent. All are stated in full in
 [docs/development-rules.md](docs/development-rules.md) and summarised in
 [AGENTS.md](AGENTS.md):
 
 1. **Decouple by default, up to a 20% performance ceiling.** Implementation choices sit
    behind a seam unless the abstraction costs 20% or more. Anything measured above 15% must
-   be flagged with a real number.
+   be flagged with a real number. Measured as of Phase 1: the database seam is **2.4% of
+   per-document time**, because PDF parsing dominates by roughly forty to one.
 2. **`uploads/prod/` is off-limits to agents.** Real financial data. Use `uploads/dummy/`.
+3. **Build for portability, and for more than one owner.** One command to install, no
+   host-specific assumptions, and nothing that makes a future tenant scope harder to add.
 
 ## Documentation
 
@@ -63,16 +79,24 @@ Two rules bind every contributor, human or agent. Both are stated in full in
 
 ## One-command uptake path
 
-*Planned — ships with the Phase 1 implementation.*
+```
+./bootstrap.ps1        # Windows
+./bootstrap.sh         # everywhere else
+```
 
-The repo will expose a single root entrypoint that:
+The entrypoint prepares `infra/env/.env` from the template, creates the runtime
+directories, starts Postgres and the pipeline runtime, applies migrations, and verifies the
+health surface. **There is deliberately no `Makefile`** — `make` is not installed on the
+target host, and a documented command that does not run is worse than no command at all.
 
-1. prepares environment and secrets templates
-2. starts the services
-3. applies migrations
-4. verifies the health surface
+To work on the pipeline directly instead of in the container:
 
-That entrypoint will be `bootstrap.ps1` on Windows or `bootstrap.sh` elsewhere, both thin
-wrappers over `docker compose`. **There is deliberately no `Makefile`** — `make` is not
-installed on the target host, and a documented command that does not run is worse than no
-command at all.
+```
+python -m venv .venv && .venv/Scripts/pip install -e ".[dev]"
+.venv/Scripts/python -m pytest              # SQLite; set TEST_DATABASE_URL to add Postgres
+.venv/Scripts/python -m app.cli run --profile dummy
+```
+
+Note that the container pins Python 3.12: `pdfplumber` and `psycopg` wheel availability on
+3.14 is still patchy, and the parser is the part of this system least worth debugging
+against a moving toolchain.

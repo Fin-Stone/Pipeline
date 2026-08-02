@@ -1,0 +1,30 @@
+[project]
+name = "finstone"
+version = "0.1.0"
+description = "Self-hosted finance pipeline: statement ingestion, parsing and storage"
+requires-python = ">=3.11"
+dependencies = [
+    "SQLAlchemy>=2.0",
+    "alembic>=1.13",
+    "pdfplumber>=0.11",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+finstone = "app.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "requires_dummy: needs operator-supplied documents in uploads/dummy/ (skipped when absent)",
+]

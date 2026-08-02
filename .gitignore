@@ -11,6 +11,9 @@ uploads/dummy/**
 data/inbox/**
 data/store/**
 data/quarantine/**
+data/*.db
+data/*.db-journal
+data/*.sqlite3
 !data/inbox/README.md
 !data/store/README.md
 !data/quarantine/README.md

@@ -1,0 +1,51 @@
+# Core stack: Postgres plus the pipeline runtime.
+#
+# The image is pgvector/pgvector rather than plain postgres so the later
+# k-NN categorisation phase needs no image change. The extension is not
+# created yet — Phase 1 has no vector columns, and adding one would break the
+# SQLite test run that keeps the database seam honest.
+
+name: finstone
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-finstone}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/env/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-finstone}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finstone} -d ${POSTGRES_DB:-finstone}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-finstone}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-finstone}
+      FINSTONE_DATA_DIR: /srv/finstone/data
+      FINSTONE_UPLOADS_DIR: /srv/finstone/uploads
+      # Deliberately absent: FINSTONE_ALLOW_PROD. Processing real data must be
+      # an explicit act. See docs/development-rules.md Rule 2.
+    volumes:
+      - ../../data:/srv/finstone/data
+      # uploads is mounted read-only: the pipeline copies out of it and must
+      # never write to the operator's folder.
+      - ../../uploads:/srv/finstone/uploads:ro
+    # Applies migrations, then idles so `docker compose exec app finstone ...`
+    # is the working surface.
+    command: ["sh", "-c", "alembic upgrade head && echo 'migrations applied; container idle' && sleep infinity"]
+
+volumes:
+  db_data:

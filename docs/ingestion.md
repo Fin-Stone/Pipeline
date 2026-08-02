@@ -1,18 +1,35 @@
-# Phase 1 — Ingestion and Storage Design
+# Phase 1 — Ingestion and Storage
 
-**Status: design of record. Not yet implemented.**
-
-This document is the specification the Phase 1 implementation will be built against. It is
-written before the code so the design can be reviewed on its own terms. Anything marked
-*planned* does not exist yet.
+**Status: implemented.** The flow described here runs end to end. Trust Bank savings and
+credit card statements import and reconcile; every other institution quarantines as an
+unknown layout until its adapter is written.
 
 Scope is steps 1–5 of the build order in
 [finance-pipeline-architecture.md](../finance-pipeline-architecture.md) §11: schema and
-migrations, the content-addressed store and watched folder, one CSV adapter end to end, the
-balance-reconciliation validator, and the PDF adapter with its fingerprint registry.
+migrations, the content-addressed store and watched folder, one adapter end to end, the
+balance-reconciliation validator, and the fingerprint registry.
+
+**PDF-first, not CSV-first.** The build order anticipated a CSV adapter as the easiest
+starting point, but every document the operator actually has is a PDF. The CSV path is
+deferred until a CSV source exists; the extension allowlist already accepts one.
 
 Out of scope: categorisation, beneficiary, recurrence detection, dashboards, IMAP fetch, and
 every form of automated retrieval.
+
+## What the corpus turned out to be
+
+Findings from the 11 documents in `uploads/dummy`, all verified by inspection:
+
+- **All are digital PDFs with real text layers.** No OCR tier is needed. One issuer stores
+  its page objects in an `/ObjStm`, which makes a naive scan report zero fonts; it is not
+  scanned.
+- **Three are encrypted, and all three are owner-restricted rather than user-password
+  protected** — they open with an empty password. Support for a configured password exists
+  anyway (`FINSTONE_PDF_PASSWORD_<INSTITUTION>`) because e-statements delivered by email
+  often do require one.
+- **One document can carry several accounts.** A Trust savings statement contains one
+  "pocket" per sub-account, each with its own opening and closing balance.
+- **Cards and deposits reconcile differently**, and transaction dates carry no year.
 
 ---
 
@@ -124,14 +141,30 @@ which adapter version produced the existing rows.
 
 ## 4. Fingerprinting and the adapter registry
 
-One adapter per `(institution, doc_type, layout_version)`, routed by fingerprint, exactly as
-described in architecture §2.3.
+One adapter per `(institution, doc_type, layout_version)`, routed by fingerprint.
 
-**CSV:** `sha1(normalised header row + delimiter + column count)`.
+**The fingerprint is `sha1` over the producer, the creator, the page size, and the
+digit-free lines in the top 35% of page 1.** Architecture §2.3 suggested header text plus
+column x-positions; both were measured against the real corpus and rejected:
 
-**PDF:** `sha1(normalise(page 1 header text) + column x-positions + producer metadata)`.
-Column positions come from `pdfplumber`'s word-level x/y output, so a layout change that
-moves a column is a different fingerprint.
+- **Column x-positions are not stable.** A Trust savings statement renders one summary row
+  per pocket, so adding a pocket shifts the geometry without changing the layout.
+- **Raw page-1 text is not stable either** — it contains the balances themselves, so every
+  month is a new fingerprint.
+- **Whole-page digit-free text is still not stable**, because statements whose transaction
+  descriptions render on their own line leak those descriptions into the label set.
+
+Filtering to digit-free lines removes everything carrying data (amounts, dates, account
+numbers, addresses, page numbers all contain digits), and banding to the header removes
+transaction text. Measured over the corpus, that took Trust card statements from two
+fingerprints to one and MariBank savings from two to one, with no collisions between
+institutions — eight distinct fingerprints across eleven documents, exactly one per
+`(institution, doc_type)` except one issuer whose layout genuinely changed between 2025 and
+2026.
+
+A new digit-free header line — a new marketing strapline — will produce a new fingerprint
+and quarantine the document. That is the intended loud, boring failure, and the registry
+maps many fingerprints onto one adapter so registering the variant is a one-line change.
 
 ### Unknown fingerprint is a loud, boring failure
 
@@ -155,6 +188,41 @@ Additive. No refactor, no changes to pipeline code.
 **There are currently zero registered real-bank layouts.** Until redacted samples exist,
 every real statement will quarantine on step 3 of `ingest` — which is the designed and
 correct behaviour, not a bug.
+
+### Debugging a failure without the statement
+
+Statements are financial documents. Asking for one in order to debug a parser is both a
+privacy problem and a slow loop, so **every failure is reportable as text**:
+
+```
+finstone doctor <path>            parse one document and explain the result
+finstone doctor <path> --redact   the same, with descriptions and references masked
+finstone report                   render every quarantined document as a report
+```
+
+`doctor` touches no database. On success it prints every account, every parsed transaction
+and the reconciliation arithmetic. On failure it prints the offending line, how that line
+was split into columns, and the lines around it — enough to tell a column-band problem from
+a value-reading problem at a glance.
+
+For a reconciliation failure it prints the arithmetic rather than a verdict, because the
+difference between expected and stated is usually exactly one transaction:
+
+```
+  opening balance                       100,000.00
+  + sum of 3 parsed transactions           -242.41
+  = expected closing                    100,000.00
+  statement says closing                100,000.00
+                                    --------------
+  difference                               -120.00
+
+  A parsed transaction matches the difference exactly:
+    2026-01-20  Netflix subscription        -120.00
+  That row is most likely counted twice, or carries the wrong sign.
+```
+
+`--redact` masks letters and keeps digits, because amounts are the evidence and merchant
+names are not. Use it when pasting a failure from a real statement.
 
 ### The CSV adapter contract
 
@@ -184,9 +252,28 @@ and it is worth restating: this single check catches dropped rows, duplicated ro
 errors, misread OCR digits and column misalignment, and it is worth more than any amount of
 parser cleverness.
 
+### One formula, both statement types
+
+`amount_minor` is **signed by its effect on the account balance as the statement presents
+it**: money in is positive, money out is negative. A card purchase is negative; a payment to
+the card is positive. Card statements are stored with `opening = −previous_outstanding` and
+`closing = −current_outstanding`.
+
+That collapses deposit and card statements into a single check:
+
 ```
-opening_balance + Σ(credits) − Σ(debits) == closing_balance
+opening_balance_minor + Σ(amount_minor) == closing_balance_minor
 ```
+
+A savings statement reconciles as `100,000.00 + (−242.41) = 100,000.00`; a card statement
+reconciles as `−4.24 + (−2.35) = −6.59`, which is the statement's own
+`4.24 + 561.35 − 559.00 = 6.59` with the sign flipped. Adapters normalise into this
+convention at their boundary, so nothing downstream needs to know which formula the
+institution printed.
+
+A useful side effect: a wrong sign inference produces a loud reconciliation failure rather
+than silent corruption. That is why the convention can be applied to an issuer's edge cases
+without having to be certain in advance.
 
 If this does not reconcile **to the cent**, the entire document is rejected. Not the bad
 row — the document. Partial imports produce a ledger that looks fine and is wrong.
@@ -241,10 +328,22 @@ a worse trade.
 
 ### Account resolution
 
-Accounts are upserted on `(institution, account_ref_masked, currency)`, derived from the
-document header. **If an adapter cannot determine the account, the document quarantines** —
-consistent with never guessing. Attaching transactions to the wrong account is
-indistinguishable from correct behaviour until it is very expensive to unwind.
+Accounts are upserted on `(institution, account_ref_masked, sub_account_label, currency)`,
+derived from the document header. **If an adapter cannot determine the account, the document
+quarantines** — consistent with never guessing. Attaching transactions to the wrong account
+is indistinguishable from correct behaviour until it is very expensive to unwind.
+
+**`account_ref_masked` is the masked account number for a deposit account, and the card
+*product* for a card.** Card numbers change when a card is reissued or replaced while the
+account continues, so keying on the number would fork one account's history in two. The
+product — the card brand — is what actually distinguishes two cards held at the same bank,
+and it is stable for the life of the account. Every issuer in the corpus prints it:
+`OCBC REWARDS CARD`, `MARI CREDIT CARD`, `LIVE FRESH DBS VISA PAYWAVE PLATINUM`. Trust
+prints no card number at all and issues one product, so its adapter asserts the product name.
+
+Note for later adapters: at least one issuer's card statement covers several cards in one
+document, with a "grand total for all card accounts" line. The account model already handles
+that — one `ParsedAccount` per card — but an adapter must not assume a single account.
 
 ---
 
@@ -253,32 +352,49 @@ indistinguishable from correct behaviour until it is very expensive to unwind.
 The schema is defined in [finance-pipeline-architecture.md](../finance-pipeline-architecture.md) §1
 and is not restated here, to avoid the two drifting apart.
 
-Phase 1 notes on top of it:
+Phase 1 additions on top of it:
 
-- The initial migration creates the **full** §1 model. Phase 1 populates only
-  `source_document`, `account` and `txn`; `txn_enrichment`, `recurrence_series` and
+- The initial migration creates the **full** §1 model. Phase 1 populates `source_document`,
+  `account`, `txn` and `statement_balance`; `txn_enrichment`, `recurrence_series` and
   `txn_series_link` sit empty until the enrichment phase.
-- `source_document` gains two Phase 1 columns not in §1: `source_profile` (`dummy` or `prod`)
-  and `source_relpath`, both for staging provenance.
+- **`statement_balance`** is a new table holding each account's stated opening and closing
+  balance per document. Per-pocket balances need somewhere to live, and without them the
+  monthly reconciliation in architecture §8.2 has nothing to compare against later.
+- **`txn` gains `fx_amount_minor`, `fx_currency` and `fx_rate`.** Card statements bill in
+  foreign currency across three printed lines — merchant, then date with both amounts, then
+  the rate. `amount_minor` remains the settled amount, so reconciliation is unaffected.
+- `source_document` gains `statement_date`, `layout_fingerprint`, `source_profile`
+  (`dummy` or `prod`) and `source_relpath`.
+- `account` gains `sub_account_label`, so one document's several pockets become several
+  accounts.
 - `parse_status` is `TEXT` plus a `CHECK` constraint rather than a Postgres `ENUM`, because
   `ENUM` is not portable and portability is what the SQLite test run depends on.
 - Timestamps are timezone-aware UTC.
 - Money is `BIGINT` minor units with currency in its own column. Never a float, anywhere.
 
+`tests/test_migration.py` asserts that the migration and `app/storage/schema.py` agree,
+column for column, so the schema the tests exercise is the schema an operator actually runs.
+
+**Single-tenant by design, for now.** `source_document.sha256`, `txn.dedupe_key` and the
+`account` identity constraint are globally unique. See
+[development-rules.md](development-rules.md) Rule 3 for what that costs if the system ever
+grows more than one owner, and why the decision is the operator's to make before history
+accumulates.
+
 ---
 
-## 8. Planned CLI
-
-*None of these exist yet.*
+## 8. CLI
 
 | Command | Purpose |
 |---|---|
 | `finstone stage --profile <dummy\|prod>` | Copy `uploads/<profile>/` into `data/inbox/`, recursively and idempotently |
 | `finstone ingest` | Process everything in `data/inbox/` |
 | `finstone run --profile <dummy\|prod>` | `stage` then `ingest` |
-| `finstone fingerprint <path>` | Print a file's fingerprint and the adapter it routes to, if any |
+| `finstone doctor <path> [--redact]` | Parse one document and explain the result; no database involved |
+| `finstone report [--redact]` | Render every quarantined document as a readable report |
+| `finstone fingerprint <path>` | Print a document's fingerprint and the adapter it routes to |
+| `finstone adapters` | List registered layouts |
 | `finstone status` | Document count, transaction count, quarantine depth, unverified count |
-| `finstone reparse --sha256 <hash>` | Re-parse one document from the immutable store |
 
 ---
 
@@ -302,16 +418,41 @@ required) and Postgres (when `TEST_DATABASE_URL` is set). That dual run is the p
 Rule 1 in [development-rules.md](development-rules.md) actually holds rather than being
 merely asserted.
 
-Cases the suite must cover:
+Test documents come from two places, and they are not interchangeable:
 
-- Nested `uploads/dummy/<bank>/<year>/` subfolders are all discovered by the recursive walk.
+- `tests/fixtures/make_pdf.py` writes minimal PDFs with no third-party dependency, giving
+  deterministic inputs that run anywhere including CI.
+- Adapter tests run against the operator's real documents in `uploads/dummy`, marked
+  `requires_dummy` so they **skip cleanly when that folder is absent**. Those are the tests
+  that prove the adapters read real statements; the fixtures prove the pipeline around them.
+
+Cases covered:
+
+- Nested `uploads/dummy/<bank>/<type>/` subfolders are all discovered by the recursive walk.
 - Running the pipeline twice produces identical document and transaction counts.
-- A fixture with one row deleted fails reconciliation, quarantines, and writes **zero**
-  transactions, with expected-versus-actual balances in `reason.json`.
+- A statement with a wrong closing balance fails reconciliation, quarantines, and writes
+  **zero** transactions, with expected-versus-actual in `reason.json`.
+- One document quarantining does not stop the others in the batch importing.
 - Two same-day identical amounts both survive, with `seq` 0 and 1.
 - An unrecognised fingerprint quarantines rather than being guessed at.
-- A balance-free CSV lands as `imported_unverified`, not as reconciled.
-- Money parsing and round-tripping never touches a float.
+- A balance-free document lands as `imported_unverified`, not as reconciled.
+- A December-to-January period resolves year-less dates correctly, and an ambiguous one
+  raises instead of guessing.
+- Money parsing never touches a float, and sub-cent precision is refused rather than rounded.
+- The migration and `app/storage/schema.py` agree column for column.
+- `stage --profile prod` refuses to run without `FINSTONE_ALLOW_PROD=1`.
+
+### Current results on the operator's corpus
+
+`finstone run --profile dummy` over the 11 documents in `uploads/dummy`:
+
+| Outcome | Count | Detail |
+|---|---|---|
+| Imported and reconciled | 4 | All Trust; 39 transactions across 4 accounts |
+| Quarantined, `unknown_layout` | 7 | DBS ×2, MariBank ×4, OCBC ×1 — no adapter yet |
+
+Every imported account reconciles exactly, including the three Trust pockets and both card
+statements. A second run inserts nothing.
 
 ## Related documents
 
