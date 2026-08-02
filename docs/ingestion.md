@@ -121,11 +121,34 @@ For each file in `data/inbox/`:
    database transaction**. Any failure rolls back the entire document. There is no such
    thing as a half-imported statement.
 
+### Draining the inbox
+
+**Once a document's bytes are in the content-addressed store, its inbox copy is removed.**
+Without this the inbox grows without bound and every run reprocesses the entire history of
+everything ever dropped into it — re-parsing, re-validating and re-alerting on documents
+that were settled months ago.
+
+Draining is only safe because the store holds the original: the inbox is a queue, not an
+archive. `reparse` is how anything gets read a second time.
+
+Ingestion is also **scoped to a profile**: `--profile prod` walks `data/inbox/prod/` and
+nothing else. The prod/dummy boundary enforced at `stage` would be worth nothing if
+ingestion ignored it.
+
 ### Quarantine
 
 A failure at any step writes `data/quarantine/<sha256>.reason.json` containing the failure
 class, the adapter and fingerprint involved, expected versus actual balances where relevant,
 and the traceback. The original is already in `data/store/`, so nothing is lost.
+
+**It also writes a `source_document` row with `parse_status='quarantined'`.** Recording the
+failure in the ledger rather than only on disk is what stops the same document being
+re-parsed and re-alerted on every subsequent run — a signal that fires every night is one
+nobody reads. `stage` then skips the file too, because the ledger already knows its digest.
+
+For a quarantined document, `institution` and `doc_type` come from the folder it was filed
+in, not from its contents: with an unknown layout nothing has been read out of the document
+at all. `finstone status` reports these separately from imported documents for that reason.
 
 **One bad document never stops the run.** Every other file in the batch still imports.
 Quarantine depth is a metric worth alerting on (architecture §8.2), not a silent state.
@@ -133,9 +156,17 @@ Quarantine depth is a metric worth alerting on (architecture §8.2), not a silen
 ### `reparse`
 
 Because originals are immutable and content-addressed, fixing an adapter and re-running it
-over history is a first-class operation rather than a recovery scramble. `reparse --sha256 <hash>`
-re-runs a single document from the store; the `parser_version` on `source_document` records
-which adapter version produced the existing rows.
+over history is a first-class operation rather than a recovery scramble — and, once the
+inbox is drained, the only way back to a document.
+
+```
+finstone reparse --quarantined      retry everything that failed
+finstone reparse --sha256 <hash>    replay one document
+```
+
+Existing rows for the document are deleted first, so a reparse is a replacement rather than
+a second import, and the stale `reason.json` is cleared so `finstone report` stops
+describing a failure that has since been fixed. The stored bytes are never touched.
 
 ---
 
@@ -401,13 +432,14 @@ already runs under a tenant. Turning multi-tenancy on later changes how that con
 | Command | Purpose |
 |---|---|
 | `finstone stage --profile <dummy\|prod>` | Copy `uploads/<profile>/` into `data/inbox/`, recursively and idempotently |
-| `finstone ingest` | Process everything in `data/inbox/` |
+| `finstone ingest [--profile <dummy\|prod>]` | Process `data/inbox/`, or just one profile's subtree |
 | `finstone run --profile <dummy\|prod>` | `stage` then `ingest` |
 | `finstone doctor <path> [--redact]` | Parse one document and explain the result; no database involved |
 | `finstone report [--redact]` | Render every quarantined document as a readable report |
 | `finstone fingerprint <path>` | Print a document's fingerprint and the adapter it routes to |
 | `finstone adapters` | List registered layouts |
-| `finstone status` | Document count, transaction count, quarantine depth, unverified count |
+| `finstone reparse --quarantined \| --sha256 <hash>` | Replay from the immutable store after an adapter fix |
+| `finstone status` | Document, account and transaction counts; quarantine depth; unverified count |
 
 ---
 

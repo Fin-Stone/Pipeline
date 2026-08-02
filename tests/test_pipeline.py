@@ -16,7 +16,7 @@ from app.domain.models import DEPOSIT, DOC_TYPE_ACCOUNT, ParsedAccount, ParsedDo
 from app.parsers import fingerprint as fingerprinting
 from app.parsers import pdfio
 from app.parsers.registry import AdapterRegistry, UnknownLayout
-from app.pipeline.ingest import ingest_inbox
+from app.pipeline.ingest import ingest_inbox, reparse
 from app.pipeline.quarantine import REASON_SUFFIX
 from app.pipeline.stage import stage
 from app.pipeline.validate import validate
@@ -134,17 +134,84 @@ class TestIngest:
         assert counts.documents == 1 and counts.txns == 2 and counts.accounts == 1
 
     def test_is_idempotent_across_runs(self, config, repository, context, blob_store, notifier, registry_for):
+        """Staging and ingesting the same document twice must add nothing.
+
+        This is the real `finstone run` twice, including the re-stage: the
+        inbox is drained after a successful import, so a retry has to put the
+        file back before it can prove anything.
+        """
+        source = _statement_pdf(
+            config.uploads_for("dummy") / "a.pdf",
+            [("03 Jun", "Salary", "+2,000.00")],
+            opening="1,000.00", closing="3,000.00",
+        )
+        registry = registry_for(source)
+
+        stage(config, "dummy", repository=repository, context=context)
+        _run(config, context, repository, blob_store, notifier, registry)
+        before = repository.counts(context)
+
+        staged_again = stage(config, "dummy", repository=repository, context=context)
+        second = _run(config, context, repository, blob_store, notifier, registry)
+
+        # stage skips it because the ledger already knows the digest, so
+        # ingest has nothing to do at all.
+        assert staged_again.already_known == 1 and staged_again.staged == 0
+        assert second.txns_inserted == 0
+        assert repository.counts(context) == before
+
+    def test_the_inbox_is_drained_after_a_document_is_processed(
+        self, config, repository, context, blob_store, notifier, registry_for
+    ):
+        """Otherwise the inbox grows without bound and every run reprocesses
+        the entire history of everything ever dropped in."""
         path = _statement_pdf(
             config.inbox_dir / "dummy" / "a.pdf",
             [("03 Jun", "Salary", "+2,000.00")],
             opening="1,000.00", closing="3,000.00",
         )
-        registry = registry_for(path)
-        _run(config, context, repository, blob_store, notifier, registry)
-        before = repository.counts(context)
-        second = _run(config, context, repository, blob_store, notifier, registry)
-        assert second.duplicates == 1 and second.txns_inserted == 0
-        assert repository.counts(context) == before
+        _run(config, context, repository, blob_store, notifier, registry_for(path))
+
+        assert not path.exists()
+        assert not list(config.inbox_dir.rglob("*.pdf"))
+        # The original is safe in the content-addressed store, which is what
+        # makes removing the inbox copy sound.
+        assert any(f.is_file() and len(f.name) == 64 for f in config.store_dir.rglob("*"))
+
+    def test_a_quarantined_document_is_not_re_reported_every_run(
+        self, config, repository, context, blob_store, notifier
+    ):
+        """A failure that re-alerts on every run turns a real signal into
+        noise, and eventually into something nobody reads."""
+        _statement_pdf(config.inbox_dir / "dummy" / "a.pdf", [], opening="0.00", closing="0.00")
+        first = _run(config, context, repository, blob_store, notifier, AdapterRegistry())
+        assert first.quarantined == 1
+        assert first.outcomes[0].reason == "unknown_layout"
+
+        # Offered again, it is recognised rather than re-parsed and re-alerted.
+        _statement_pdf(config.inbox_dir / "dummy" / "a.pdf", [], opening="0.00", closing="0.00")
+        second = _run(config, context, repository, blob_store, notifier, AdapterRegistry())
+        assert second.outcomes[0].reason == "already_quarantined"
+
+    def test_ingest_is_scoped_to_a_profile(
+        self, config, repository, context, blob_store, notifier, registry_for
+    ):
+        """A prod run must never reach into the dummy inbox. The prod/dummy
+        boundary is worth nothing if stage enforces it and ingest ignores it."""
+        dummy = _statement_pdf(
+            config.inbox_dir / "dummy" / "a.pdf",
+            [("03 Jun", "Salary", "+2,000.00")],
+            opening="1,000.00", closing="3,000.00",
+        )
+        registry = registry_for(dummy)
+
+        summary = ingest_inbox(config, context, repository, blob_store, notifier, registry, profile="prod")
+        assert summary.processed == 0
+        assert dummy.exists()          # untouched
+        assert repository.counts(context).documents == 0
+
+        summary = ingest_inbox(config, context, repository, blob_store, notifier, registry, profile="dummy")
+        assert summary.imported == 1
 
     def test_stores_the_original_content_addressed(self, config, repository, context, blob_store, notifier, registry_for):
         path = _statement_pdf(config.inbox_dir / "dummy" / "a.pdf", [], opening="0.00", closing="0.00")
@@ -216,6 +283,73 @@ class TestIngest:
         summary = _run(config, context, repository, blob_store, notifier, registry_for(good))
         assert summary.imported == 1 and summary.quarantined == 1
         assert repository.counts(context).txns == 1
+
+
+class TestReparse:
+    """Replaying originals from the store is the counterpart to draining the
+    inbox: once the inbox copy is gone, the store is the only way back."""
+
+    def _quarantine_one(self, config, repository, context, blob_store, notifier):
+        path = _statement_pdf(
+            config.inbox_dir / "dummy" / "a.pdf",
+            [("03 Jun", "Salary", "+2,000.00")],
+            opening="1,000.00", closing="3,000.00",
+        )
+        registry_with_adapter = AdapterRegistry()
+        registry_with_adapter.register(
+            SyntheticAdapter(), [fingerprinting.fingerprint_pdf(pdfio.load(path))]
+        )
+        # Ingest with an empty registry so it quarantines as an unknown layout.
+        _run(config, context, repository, blob_store, notifier, AdapterRegistry())
+        return registry_with_adapter
+
+    def test_replays_a_quarantined_document_once_an_adapter_exists(
+        self, config, repository, context, blob_store, notifier
+    ):
+        fixed = self._quarantine_one(config, repository, context, blob_store, notifier)
+        assert repository.counts(context).documents == 0
+        assert not list(config.inbox_dir.rglob("*.pdf"))   # inbox already drained
+
+        summary = reparse(config, context, repository, blob_store, notifier, fixed, quarantined_only=True)
+
+        assert summary.imported == 1
+        counts = repository.counts(context)
+        assert counts.documents == 1 and counts.txns == 1
+        assert counts.documents_quarantined == 0
+
+    def test_clears_the_stale_reason_file(
+        self, config, repository, context, blob_store, notifier
+    ):
+        """A reason describing a failure that has since been fixed makes
+        `finstone report` lie about the current state."""
+        fixed = self._quarantine_one(config, repository, context, blob_store, notifier)
+        assert list(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+
+        reparse(config, context, repository, blob_store, notifier, fixed, quarantined_only=True)
+        assert not list(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+
+    def test_replacing_an_imported_document_does_not_duplicate_it(
+        self, config, repository, context, blob_store, notifier, registry_for
+    ):
+        path = _statement_pdf(
+            config.inbox_dir / "dummy" / "a.pdf",
+            [("03 Jun", "Salary", "+2,000.00")],
+            opening="1,000.00", closing="3,000.00",
+        )
+        registry = registry_for(path)
+        _run(config, context, repository, blob_store, notifier, registry)
+        before = repository.counts(context)
+
+        summary = reparse(config, context, repository, blob_store, notifier, registry)
+        assert summary.imported == 1
+        assert repository.counts(context) == before
+
+    def test_unknown_digest_is_an_error_not_a_silent_no_op(
+        self, config, repository, context, blob_store, notifier
+    ):
+        with pytest.raises(LookupError):
+            reparse(config, context, repository, blob_store, notifier,
+                    AdapterRegistry(), sha256="f" * 64)
 
 
 class TestValidation:

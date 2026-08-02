@@ -199,13 +199,16 @@ class TestPipelineRunsUnderATenant:
     def test_two_tenants_ingesting_the_same_file_both_succeed(
         self, config, repository, context, other_context, blob_store, notifier
     ):
-        path = write_pdf(
-            config.inbox_dir / "dummy" / "a.pdf",
-            synthetic_statement([("03 Jun", "Salary", "+2,000.00")],
-                                opening="1,000.00", closing="3,000.00"),
+        placements = synthetic_statement(
+            [("03 Jun", "Salary", "+2,000.00")], opening="1,000.00", closing="3,000.00",
         )
+        path = write_pdf(config.inbox_dir / "dummy" / "a.pdf", placements)
         registry = _registry_for(path)
+
         first = ingest_inbox(config, context, repository, blob_store, notifier, registry)
+        # Each tenant stages their own copy; the inbox is drained after the
+        # first import, so the file has to be put back for the second.
+        write_pdf(config.inbox_dir / "dummy" / "a.pdf", placements)
         second = ingest_inbox(config, other_context, repository, blob_store, notifier, registry)
 
         assert first.imported == 1 and second.imported == 1

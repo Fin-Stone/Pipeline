@@ -17,7 +17,7 @@ from .parsers import fingerprint as fingerprinting
 from .parsers import pdfio
 from .parsers.registry import build_default_registry
 from .pipeline import quarantine
-from .pipeline.ingest import ingest_inbox
+from .pipeline.ingest import ingest_inbox, reparse
 from .pipeline.stage import stage
 from .storage.factory import build_blob_store, build_notifier, build_repository
 
@@ -51,7 +51,10 @@ def cmd_ingest(args) -> int:
     repository = build_repository(config)
     try:
         context = repository.resolve_context(config.tenant_slug, config.member_email)
-        summary = ingest_inbox(config, context, repository, build_blob_store(config), build_notifier(config))
+        summary = ingest_inbox(
+            config, context, repository, build_blob_store(config), build_notifier(config),
+            profile=args.profile,
+        )
     finally:
         repository.close()
     _print_summary(summary)
@@ -69,7 +72,10 @@ def cmd_run(args) -> int:
             f"({staged.discovered} discovered, {staged.already_known} already imported, "
             f"{staged.already_staged} already in inbox)"
         )
-        summary = ingest_inbox(config, context, repository, build_blob_store(config), build_notifier(config))
+        summary = ingest_inbox(
+            config, context, repository, build_blob_store(config), build_notifier(config),
+            profile=args.profile,
+        )
     finally:
         repository.close()
     _print_summary(summary)
@@ -77,14 +83,18 @@ def cmd_run(args) -> int:
 
 
 def _print_summary(summary) -> None:
+    if summary.processed == 0:
+        print("nothing to ingest: the inbox is empty for this profile")
+        return
     print(
         f"processed {summary.processed}: {summary.imported} imported, "
-        f"{summary.unverified} imported-unverified, {summary.duplicates} duplicate, "
+        f"{summary.unverified} imported-unverified, {summary.duplicates} already imported, "
         f"{summary.quarantined} quarantined; {summary.txns_inserted} transaction(s) inserted"
     )
     for outcome in summary.outcomes:
         if outcome.status == "quarantined":
-            print(f"  quarantined  {Path(outcome.path).name}  ({outcome.reason})")
+            note = " (already known)" if outcome.reason == "already_quarantined" else f"  ({outcome.reason})"
+            print(f"  quarantined  {Path(outcome.path).name}{note}")
 
 
 def cmd_fingerprint(args) -> int:
@@ -118,11 +128,42 @@ def cmd_status(args) -> int:
     print(f"  unverified         {counts.documents_unverified}")
     print(f"accounts             {counts.accounts}")
     print(f"transactions         {counts.txns}")
-    print(f"quarantine depth     {quarantine.depth(config.quarantine_dir)}")
+    print(f"quarantined          {counts.documents_quarantined}")
+    print(f"quarantine reports   {quarantine.depth(config.quarantine_dir)}")
     if counts.by_institution:
-        print("by institution:")
+        print("\nimported by institution:")
         for name, count in sorted(counts.by_institution.items()):
             print(f"  {name:<24} {count}")
+    if counts.quarantined_by_institution:
+        # Grouped by the folder the file was in, not by anything parsed out of
+        # it — for an unknown layout nothing was read from the document at all.
+        print("\nquarantined by folder (nothing was parsed from these):")
+        for name, count in sorted(counts.quarantined_by_institution.items()):
+            print(f"  {name:<24} {count}")
+        print("\n  finstone report                  why each one failed")
+        print("  finstone reparse --quarantined   retry after adding an adapter")
+    return 0
+
+
+def cmd_reparse(args) -> int:
+    """Replay documents from the immutable store after an adapter fix."""
+    config = load_config()
+    repository = build_repository(config)
+    try:
+        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        summary = reparse(
+            config, context, repository, build_blob_store(config), build_notifier(config),
+            sha256=args.sha256, quarantined_only=args.quarantined,
+        )
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        repository.close()
+    if summary.processed == 0:
+        print("nothing to reparse")
+        return 0
+    _print_summary(summary)
     return 0
 
 
@@ -313,7 +354,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.set_defaults(func=cmd_stage)
 
-    p = sub.add_parser("ingest", help="process everything in data/inbox")
+    p = sub.add_parser("ingest", help="process data/inbox")
+    p.add_argument(
+        "--profile", choices=PROFILES, default=None,
+        help="restrict to one profile's inbox subtree; omit to process all of it",
+    )
     p.set_defaults(func=cmd_ingest)
 
     p = sub.add_parser("run", help="stage then ingest")
@@ -326,6 +371,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("status", help="ledger and quarantine counts")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser(
+        "reparse",
+        help="replay documents from the store after an adapter fix",
+    )
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--sha256", help="one document")
+    group.add_argument("--quarantined", action="store_true", help="every quarantined document")
+    p.set_defaults(func=cmd_reparse)
 
     p = sub.add_parser("adapters", help="list registered layouts")
     p.set_defaults(func=cmd_adapters)

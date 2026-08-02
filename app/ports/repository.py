@@ -96,7 +96,11 @@ class StatusCounts:
     documents_quarantined: int = 0
     accounts: int = 0
     txns: int = 0
+    #: Imported documents per institution. Quarantined ones are counted
+    #: separately: a document that failed was never read, so grouping it with
+    #: successes would misreport what is actually in the ledger.
     by_institution: dict[str, int] = field(default_factory=dict)
+    quarantined_by_institution: dict[str, int] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -134,7 +138,26 @@ class LedgerRepository(Protocol):
     # -- ledger --------------------------------------------------------------
 
     def get_document_id(self, context: TenantContext, sha256: str) -> int | None:
-        """Return the id of a document already imported *for this tenant*."""
+        """Return the id of a document already seen *for this tenant*.
+
+        Includes quarantined documents: a document that failed is still a
+        document this tenant has been shown, and re-offering it should not
+        re-run the same failure.
+        """
+
+    def get_document_status(self, context: TenantContext, sha256: str) -> str | None:
+        """Return a known document's parse_status, or None if unseen."""
+
+    def list_documents(self, context: TenantContext, parse_status: str | None = None) -> list[dict]:
+        """Documents for this tenant, optionally filtered by status."""
+
+    def delete_document(self, context: TenantContext, sha256: str) -> bool:
+        """Remove a document and everything derived from it.
+
+        Used by `reparse` to replay an original from the store after an
+        adapter fix. The stored bytes are never touched — only the rows
+        derived from them.
+        """
 
     def existing_dedupe_keys(self, context: TenantContext, keys: list[str]) -> set[str]:
         """Return the subset of `keys` already present for this tenant."""

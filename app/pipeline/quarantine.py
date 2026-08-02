@@ -69,6 +69,19 @@ def write_reason(
     return target
 
 
+def clear_reason(quarantine_dir: Path, sha256: str) -> bool:
+    """Remove a document's reason file, before it is reparsed.
+
+    A stale reason describing a failure that has since been fixed is worse
+    than none: it makes `finstone report` lie about the current state.
+    """
+    target = quarantine_dir / f"{sha256}{REASON_SUFFIX}"
+    if target.exists():
+        target.unlink()
+        return True
+    return False
+
+
 def depth(quarantine_dir: Path) -> int:
     if not quarantine_dir.exists():
         return 0

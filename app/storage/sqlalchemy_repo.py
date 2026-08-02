@@ -163,6 +163,59 @@ class SqlAlchemyLedgerRepository:
         with self._engine.connect() as conn:
             return conn.execute(stmt).scalar_one_or_none()
 
+    def get_document_status(self, context: TenantContext, sha256: str) -> str | None:
+        stmt = select(schema.source_document.c.parse_status).where(
+            (schema.source_document.c.tenant_id == context.tenant_id)
+            & (schema.source_document.c.sha256 == sha256)
+        )
+        with self._engine.connect() as conn:
+            return conn.execute(stmt).scalar_one_or_none()
+
+    def list_documents(self, context: TenantContext, parse_status: str | None = None) -> list[dict]:
+        columns = schema.source_document.c
+        stmt = select(
+            columns.sha256, columns.institution, columns.doc_type, columns.parse_status,
+            columns.storage_path, columns.source_relpath, columns.source_profile,
+            columns.layout_fingerprint,
+        ).where(columns.tenant_id == context.tenant_id)
+        if parse_status is not None:
+            stmt = stmt.where(columns.parse_status == parse_status)
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt.order_by(columns.source_relpath))]
+
+    def delete_document(self, context: TenantContext, sha256: str) -> bool:
+        """Remove a document and everything derived from it, atomically.
+
+        The stored original is deliberately left alone: it is immutable and is
+        exactly what a reparse reads from.
+        """
+        with self._engine.begin() as conn:
+            document_id = conn.execute(
+                select(schema.source_document.c.id).where(
+                    (schema.source_document.c.tenant_id == context.tenant_id)
+                    & (schema.source_document.c.sha256 == sha256)
+                )
+            ).scalar_one_or_none()
+            if document_id is None:
+                return False
+
+            conn.execute(
+                schema.txn.delete().where(
+                    (schema.txn.c.tenant_id == context.tenant_id)
+                    & (schema.txn.c.source_document_id == document_id)
+                )
+            )
+            conn.execute(
+                schema.statement_balance.delete().where(
+                    (schema.statement_balance.c.tenant_id == context.tenant_id)
+                    & (schema.statement_balance.c.source_document_id == document_id)
+                )
+            )
+            conn.execute(
+                schema.source_document.delete().where(schema.source_document.c.id == document_id)
+            )
+        return True
+
     def existing_dedupe_keys(self, context: TenantContext, keys: list[str]) -> set[str]:
         if not keys:
             return set()
@@ -190,7 +243,20 @@ class SqlAlchemyLedgerRepository:
             by_institution = dict(
                 conn.execute(
                     select(schema.source_document.c.institution, func.count())
-                    .where(schema.source_document.c.tenant_id == tenant)
+                    .where(
+                        (schema.source_document.c.tenant_id == tenant)
+                        & (schema.source_document.c.parse_status != "quarantined")
+                    )
+                    .group_by(schema.source_document.c.institution)
+                ).all()
+            )
+            quarantined_by_institution = dict(
+                conn.execute(
+                    select(schema.source_document.c.institution, func.count())
+                    .where(
+                        (schema.source_document.c.tenant_id == tenant)
+                        & (schema.source_document.c.parse_status == "quarantined")
+                    )
                     .group_by(schema.source_document.c.institution)
                 ).all()
             )
@@ -209,6 +275,7 @@ class SqlAlchemyLedgerRepository:
             accounts=accounts,
             txns=txns,
             by_institution=by_institution,
+            quarantined_by_institution=quarantined_by_institution,
         )
 
     # -- writes --------------------------------------------------------------
