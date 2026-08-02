@@ -351,15 +351,31 @@ def cmd_report(args) -> int:
                 accounts=detail.get("accounts"),
                 redact=args.redact,
             ))
-        elif failure_class == "unknown_layout":
+        elif failure_class in ("unknown_layout", "ambiguous_layout"):
             print(diagnostics.RULE)
-            print("UNKNOWN LAYOUT")
+            print("UNROUTABLE" if failure_class == "unknown_layout" else "AMBIGUOUS LAYOUT")
             print(diagnostics.RULE)
             print(f"file        {diagnostics.describe(name, args.redact)}")
             print(f"layout      {detail.get('fingerprint')}")
             print(f"producer    {detail.get('producer') or '(none)'}")
-            print("\nNo adapter is registered for this layout. Add the fingerprint above")
-            print("to the matching adapter's FINGERPRINTS list.")
+            print(f"            normalised: {detail.get('producer_normalised') or '(none)'}")
+
+            candidates = detail.get("candidates") or []
+            if candidates:
+                print("\nWhat each adapter required and did not find:")
+                for candidate in candidates:
+                    print(f"  {candidate['adapter']}  (expects producer {candidate['expects_producer']})")
+                    for missing in candidate.get("missing", []):
+                        print(f"    missing line  {diagnostics.describe(missing, args.redact)}")
+
+            labels = detail.get("label_lines") or []
+            if labels:
+                print("\nHeader lines this document carries:")
+                for label in labels:
+                    print(f"    {diagnostics.describe(label, args.redact)}")
+
+            print("\nTo add an adapter, pick the lines above that are the bank's own words —")
+            print("never the customer's — and declare them as its LayoutSignature.")
             print(diagnostics.RULE)
         else:
             context = detail.get("context", {})

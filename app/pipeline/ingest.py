@@ -106,9 +106,17 @@ def ingest_inbox(
 def ingest_file(
     config: Config, context, path: Path, repository, blob_store, notifier,
     registry: AdapterRegistry, *, drain: bool = True,
+    provenance: tuple[str, str] | None = None,
 ) -> IngestOutcome:
+    """Ingest one file.
+
+    `provenance` overrides the (profile, relative path) that would otherwise be
+    derived from the file's location. A reparse reads from the content-addressed
+    store, where the filename is a digest and the directory says nothing, so it
+    passes the provenance recorded when the document was first staged.
+    """
     digest = sha256_file(path)
-    profile, relpath = _provenance(config, path)
+    profile, relpath = provenance or _provenance(config, path)
 
     known = repository.get_document_status(context, digest)
     if known is not None:
@@ -288,8 +296,14 @@ def reparse(
         quarantine.clear_reason(config.quarantine_dir, target["sha256"])
         # drain=False: the file being read *is* the stored original, and the
         # store is immutable.
+        #
+        # The provenance is carried over from the row just deleted. Without it
+        # the document would be re-recorded against its own digest, because
+        # that is its filename in the store — losing the operator's folder and
+        # making `status` group failures by hash instead of by institution.
         outcomes.append(ingest_file(
             config, context, stored, repository, blob_store, notifier, registry, drain=False,
+            provenance=(target["source_profile"], target["source_relpath"]),
         ))
 
     return IngestSummary(

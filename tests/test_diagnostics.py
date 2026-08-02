@@ -148,7 +148,9 @@ class TestRedactionCoversEveryReportPath:
             cli.load_config = original
 
         assert "MyBank" not in out and "Statement" not in out
-        assert "UNKNOWN LAYOUT" in out
+        assert "UNROUTABLE" in out
+        # The header lines it printed are document text and must be masked too.
+        assert "test bank placeholder limited" not in out
 
 
 class TestQuarantineRecordsEnoughToDebug:

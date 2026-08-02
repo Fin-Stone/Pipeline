@@ -349,6 +349,30 @@ class TestReparse:
             reparse(config, context, repository, blob_store, notifier,
                     AdapterRegistry(), sha256="f" * 64)
 
+    def test_provenance_survives_a_reparse(
+        self, config, repository, context, blob_store, notifier
+    ):
+        """A reparse reads from the store, where the filename is a digest. If
+        provenance were re-derived from that path, the operator's folder would
+        be replaced by a hash and `status` would group failures by sha256."""
+        _statement_pdf(
+            config.inbox_dir / "dummy" / "MyBank" / "acc" / "june.pdf",
+            [("03 Jun", "Salary", "+2,000.00")],
+            opening="1,000.00", closing="3,000.00",
+        )
+        _run(config, context, repository, blob_store, notifier, AdapterRegistry())
+
+        before = repository.list_documents(context)[0]
+        assert before["source_relpath"] == "MyBank/acc/june.pdf"
+
+        reparse(config, context, repository, blob_store, notifier,
+                AdapterRegistry(), quarantined_only=True)
+
+        after = repository.list_documents(context)[0]
+        assert after["source_relpath"] == "MyBank/acc/june.pdf"
+        assert after["source_profile"] == "dummy"
+        assert after["institution"] == "MyBank"
+
 
 class TestValidation:
     def _document(self, txns, opening, closing):
