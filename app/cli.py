@@ -44,7 +44,7 @@ def cmd_stage(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
-        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         result = stage(config, args.profile, repository=repository, context=context)
     finally:
         repository.close()
@@ -60,7 +60,7 @@ def cmd_ingest(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
-        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         summary = ingest_inbox(
             config, context, repository, build_blob_store(config), build_notifier(config),
             profile=args.profile,
@@ -75,7 +75,7 @@ def cmd_run(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
-        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         staged = stage(config, args.profile, repository=repository, context=context)
         print(
             f"staged {staged.staged} new file(s) from uploads/{staged.profile} "
@@ -195,11 +195,12 @@ def cmd_status(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
-        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         counts = repository.counts(context)
     finally:
         repository.close()
-    print(f"tenant               {config.tenant_slug}")
+    print(f"profile              {args.profile}")
+    print(f"tenant               {config.tenant_for(args.profile)}")
     print(f"documents            {counts.documents}")
     print(f"  unverified         {counts.documents_unverified}")
     print(f"accounts             {counts.accounts}")
@@ -226,7 +227,7 @@ def cmd_reparse(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
-        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         summary = reparse(
             config, context, repository, build_blob_store(config), build_notifier(config),
             sha256=args.sha256, quarantined_only=args.quarantined,
@@ -424,10 +425,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.set_defaults(func=cmd_stage)
 
-    p = sub.add_parser("ingest", help="process data/inbox")
+    p = sub.add_parser("ingest", help="process data/inbox for one profile")
     p.add_argument(
-        "--profile", choices=PROFILES, default=None,
-        help="restrict to one profile's inbox subtree; omit to process all of it",
+        "--profile", choices=PROFILES, default=PROFILE_DUMMY,
+        help="which profile's inbox to process; also selects its tenant",
     )
     p.set_defaults(func=cmd_ingest)
 
@@ -440,13 +441,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--redact", action="store_true", help="mask header lines before printing")
     p.set_defaults(func=cmd_fingerprint)
 
-    p = sub.add_parser("status", help="ledger and quarantine counts")
+    p = sub.add_parser("status", help="ledger and quarantine counts for one profile")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser(
         "reparse",
         help="replay documents from the store after an adapter fix",
     )
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--sha256", help="one document")
     group.add_argument("--quarantined", action="store_true", help="every quarantined document")

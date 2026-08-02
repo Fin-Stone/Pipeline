@@ -472,6 +472,21 @@ Phase 1 additions on top of it:
 `tests/test_migration.py` asserts that the migration and `app/storage/schema.py` agree,
 column for column, so the schema the tests exercise is the schema an operator actually runs.
 
+### Profiles are tenants
+
+`uploads/dummy` and `uploads/prod` resolve to **different tenants** — `default-dummy` and
+`default`. As far as production is concerned dummy documents do not exist: not in its
+counts, not in its accounts, and not in its deduplication.
+
+That last one is why. Sharing a tenant meant a real statement whose synthetic copy had
+already been imported arrived with every row deduplicated away, leaving a document with
+balances attached and no transactions. Four such documents existed in practice.
+
+A tenant is precisely "a set of records that must never mix", which is exactly the
+requirement, so the isolation reuses the mechanism that already exists and is already tested
+rather than inventing a second one. Every command takes `--profile`, and that choice selects
+the tenant.
+
 ### Tenancy
 
 Every ledger table carries `tenant_id`, and the constraints that could collide between

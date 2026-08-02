@@ -70,6 +70,26 @@ class Config:
             raise ConfigError(f"unknown profile {profile!r}; expected one of {PROFILES}")
         return self.uploads_dir / profile
 
+    def tenant_for(self, profile: str) -> str:
+        """The tenant a profile's documents belong to.
+
+        Dummy documents live in their own tenant, so as far as production is
+        concerned they do not exist: not in its counts, not in its accounts,
+        and — the part that actually bit — not in its deduplication.
+
+        Sharing a tenant meant a real statement whose synthetic copy had
+        already been imported arrived with every row deduplicated away, leaving
+        a document with balances and no transactions.
+
+        A tenant is precisely "a set of records that must never mix", which is
+        exactly the requirement here, so the isolation reuses the mechanism
+        that already exists and is already tested rather than inventing a
+        second one.
+        """
+        if profile not in PROFILES:
+            raise ConfigError(f"unknown profile {profile!r}; expected one of {PROFILES}")
+        return self.tenant_slug if profile == PROFILE_PROD else f"{self.tenant_slug}-{profile}"
+
     def require_profile_allowed(self, profile: str) -> None:
         """Refuse to touch real data unless the operator opted in explicitly.
 
