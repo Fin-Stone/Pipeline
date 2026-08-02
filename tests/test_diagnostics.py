@@ -104,7 +104,7 @@ class TestParseFailureReport:
 
 class TestQuarantineRecordsEnoughToDebug:
     def test_reconciliation_failure_records_the_parsed_rows(
-        self, config, repository, blob_store, notifier
+        self, config, repository, context, blob_store, notifier
     ):
         """Without the parsed rows in the reason file, the report cannot point
         at the offending transaction later."""
@@ -115,7 +115,7 @@ class TestQuarantineRecordsEnoughToDebug:
                 opening="1,000.00", closing="9,999.00",
             ),
         )
-        ingest_inbox(config, repository, blob_store, notifier, _registry_for(path))
+        ingest_inbox(config, context, repository, blob_store, notifier, _registry_for(path))
 
         payload = json.loads(next(config.quarantine_dir.glob(f"*{REASON_SUFFIX}")).read_text(encoding="utf-8"))
         assert payload["failure_class"] == "validation_failed"
@@ -131,10 +131,10 @@ class TestQuarantineRecordsEnoughToDebug:
         assert "difference" in report
 
     def test_unknown_layout_records_the_fingerprint_to_register(
-        self, config, repository, blob_store, notifier
+        self, config, repository, context, blob_store, notifier
     ):
         write_pdf(config.inbox_dir / "dummy" / "a.pdf", synthetic_statement([], closing="1,000.00"))
-        ingest_inbox(config, repository, blob_store, notifier, AdapterRegistry())
+        ingest_inbox(config, context, repository, blob_store, notifier, AdapterRegistry())
 
         payload = json.loads(next(config.quarantine_dir.glob(f"*{REASON_SUFFIX}")).read_text(encoding="utf-8"))
         assert len(payload["detail"]["fingerprint"]) == 40

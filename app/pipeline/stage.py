@@ -44,7 +44,7 @@ class StageResult:
     paths: tuple[str, ...] = ()
 
 
-def stage(config: Config, profile: str, repository=None) -> StageResult:
+def stage(config: Config, profile: str, repository=None, context=None) -> StageResult:
     """Copy new documents from uploads/<profile>/ into the inbox.
 
     Idempotent twice over: a file whose digest is already in the ledger is
@@ -62,7 +62,11 @@ def stage(config: Config, profile: str, repository=None) -> StageResult:
         discovered += 1
         digest = sha256_file(found.path)
 
-        if repository is not None and repository.get_document_id(digest) is not None:
+        if (
+            repository is not None
+            and context is not None
+            and repository.get_document_id(context, digest) is not None
+        ):
             already_known += 1
             continue
 

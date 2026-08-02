@@ -65,14 +65,16 @@ Three rules bind every contributor, human or agent. All are stated in full in
    be flagged with a real number. Measured as of Phase 1: the database seam is **2.4% of
    per-document time**, because PDF parsing dominates by roughly forty to one.
 2. **`uploads/prod/` is off-limits to agents.** Real financial data. Use `uploads/dummy/`.
-3. **Build for portability, and for more than one owner.** One command to install, no
-   host-specific assumptions, and nothing that makes a future tenant scope harder to add.
+3. **Build for portability, and for more than one owner.** One command to install and no
+   host-specific assumptions. The schema is tenant-scoped and carries `tenant`/`member`
+   tables with SSO identity fields, but runs single-tenant and single-member until the
+   pipeline is proven end to end.
 
 ## Documentation
 
 - [finance-pipeline-architecture.md](finance-pipeline-architecture.md) is the design and architecture source of truth.
-- [docs/development-rules.md](docs/development-rules.md) states the two binding development rules.
-- [docs/ingestion.md](docs/ingestion.md) is the Phase 1 ingestion and storage design.
+- [docs/development-rules.md](docs/development-rules.md) states the three binding development rules.
+- [docs/ingestion.md](docs/ingestion.md) is the Phase 1 ingestion and storage design of record.
 - [docs/repo-structure.md](docs/repo-structure.md) explains the repository layout and startup strategy.
 - [docs/agent-doc-sync.md](docs/agent-doc-sync.md) defines the documentation synchronization contract.
 - [AGENTS.md](AGENTS.md) provides the operating contract for agent-driven changes.

@@ -34,7 +34,8 @@ def cmd_stage(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
-        result = stage(config, args.profile, repository=repository)
+        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        result = stage(config, args.profile, repository=repository, context=context)
     finally:
         repository.close()
     print(
@@ -49,7 +50,8 @@ def cmd_ingest(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
-        summary = ingest_inbox(config, repository, build_blob_store(config), build_notifier(config))
+        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        summary = ingest_inbox(config, context, repository, build_blob_store(config), build_notifier(config))
     finally:
         repository.close()
     _print_summary(summary)
@@ -60,13 +62,14 @@ def cmd_run(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
-        staged = stage(config, args.profile, repository=repository)
+        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        staged = stage(config, args.profile, repository=repository, context=context)
         print(
             f"staged {staged.staged} new file(s) from uploads/{staged.profile} "
             f"({staged.discovered} discovered, {staged.already_known} already imported, "
             f"{staged.already_staged} already in inbox)"
         )
-        summary = ingest_inbox(config, repository, build_blob_store(config), build_notifier(config))
+        summary = ingest_inbox(config, context, repository, build_blob_store(config), build_notifier(config))
     finally:
         repository.close()
     _print_summary(summary)
@@ -106,9 +109,11 @@ def cmd_status(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
-        counts = repository.counts()
+        context = repository.resolve_context(config.tenant_slug, config.member_email)
+        counts = repository.counts(context)
     finally:
         repository.close()
+    print(f"tenant               {config.tenant_slug}")
     print(f"documents            {counts.documents}")
     print(f"  unverified         {counts.documents_unverified}")
     print(f"accounts             {counts.accounts}")

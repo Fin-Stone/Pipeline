@@ -8,6 +8,10 @@ Everything here is portable SQL. Deduplication is a *select existing keys →
 insert the complement* with the unique index as a backstop, deliberately not
 `ON CONFLICT`, so SQLite and Postgres run identical code and the dual-engine
 test run stays meaningful. See docs/development-rules.md Rule 1.
+
+**Every read and write is filtered by `context.tenant_id`.** There is no code
+path in this class that touches a ledger table without that filter, and the
+tenant-isolation tests exist to keep it that way.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
+from ..domain.tenancy import MemberIdentity, TenantContext
 from ..ports.repository import (
     AccountRecord,
     BalanceRecord,
@@ -49,40 +54,154 @@ class SqlAlchemyLedgerRepository:
     def close(self) -> None:
         self._engine.dispose()
 
+    # -- tenancy -------------------------------------------------------------
+
+    def ensure_tenant(self, slug: str, name: str | None = None) -> int:
+        with self._engine.begin() as conn:
+            found = conn.execute(
+                select(schema.tenant.c.id).where(schema.tenant.c.slug == slug)
+            ).scalar_one_or_none()
+            if found is not None:
+                return found
+            return conn.execute(
+                schema.tenant.insert().values(
+                    slug=slug,
+                    name=name or slug.replace("-", " ").title(),
+                    status="active",
+                    created_at=datetime.now(timezone.utc),
+                )
+            ).inserted_primary_key[0]
+
+    def ensure_member(
+        self,
+        tenant_id: int,
+        *,
+        display_name: str,
+        email: str | None = None,
+        identity: MemberIdentity | None = None,
+        role: str = "owner",
+    ) -> int:
+        with self._engine.begin() as conn:
+            if identity is not None:
+                found = conn.execute(
+                    select(schema.member.c.id).where(
+                        (schema.member.c.auth_issuer == identity.issuer)
+                        & (schema.member.c.auth_subject == identity.subject)
+                    )
+                ).scalar_one_or_none()
+                if found is not None:
+                    return found
+
+            if email is not None:
+                found = conn.execute(
+                    select(schema.member.c.id).where(
+                        (schema.member.c.tenant_id == tenant_id)
+                        & (schema.member.c.email == email)
+                    )
+                ).scalar_one_or_none()
+                if found is not None:
+                    # First SSO login for a member invited by email: attach the
+                    # identity rather than creating a second row for them.
+                    if identity is not None:
+                        conn.execute(
+                            schema.member.update()
+                            .where(schema.member.c.id == found)
+                            .values(auth_issuer=identity.issuer, auth_subject=identity.subject)
+                        )
+                    return found
+
+            return conn.execute(
+                schema.member.insert().values(
+                    tenant_id=tenant_id,
+                    display_name=display_name,
+                    email=email,
+                    auth_issuer=identity.issuer if identity else None,
+                    auth_subject=identity.subject if identity else None,
+                    role=role,
+                    status="active",
+                    created_at=datetime.now(timezone.utc),
+                )
+            ).inserted_primary_key[0]
+
+    def resolve_context(self, tenant_slug: str, member_email: str | None = None) -> TenantContext:
+        tenant_id = self.ensure_tenant(tenant_slug)
+        member_id = None
+        role = "owner"
+        if member_email:
+            member_id = self.ensure_member(
+                tenant_id,
+                display_name=member_email.split("@")[0],
+                email=member_email,
+            )
+            with self._engine.connect() as conn:
+                role = conn.execute(
+                    select(schema.member.c.role).where(schema.member.c.id == member_id)
+                ).scalar_one()
+        return TenantContext(tenant_id=tenant_id, member_id=member_id, role=role)
+
+    def find_member_by_identity(self, identity: MemberIdentity) -> TenantContext | None:
+        stmt = select(
+            schema.member.c.id, schema.member.c.tenant_id, schema.member.c.role,
+        ).where(
+            (schema.member.c.auth_issuer == identity.issuer)
+            & (schema.member.c.auth_subject == identity.subject)
+            & (schema.member.c.status == "active")
+        )
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).one_or_none()
+        if row is None:
+            return None
+        return TenantContext(tenant_id=row.tenant_id, member_id=row.id, role=row.role)
+
     # -- reads ---------------------------------------------------------------
 
-    def get_document_id(self, sha256: str) -> int | None:
-        stmt = select(schema.source_document.c.id).where(schema.source_document.c.sha256 == sha256)
+    def get_document_id(self, context: TenantContext, sha256: str) -> int | None:
+        stmt = select(schema.source_document.c.id).where(
+            (schema.source_document.c.tenant_id == context.tenant_id)
+            & (schema.source_document.c.sha256 == sha256)
+        )
         with self._engine.connect() as conn:
             return conn.execute(stmt).scalar_one_or_none()
 
-    def existing_dedupe_keys(self, keys: list[str]) -> set[str]:
+    def existing_dedupe_keys(self, context: TenantContext, keys: list[str]) -> set[str]:
         if not keys:
             return set()
         found: set[str] = set()
         with self._engine.connect() as conn:
             for start in range(0, len(keys), _KEY_CHUNK):
                 chunk = keys[start:start + _KEY_CHUNK]
-                stmt = select(schema.txn.c.dedupe_key).where(schema.txn.c.dedupe_key.in_(chunk))
+                stmt = select(schema.txn.c.dedupe_key).where(
+                    (schema.txn.c.tenant_id == context.tenant_id)
+                    & (schema.txn.c.dedupe_key.in_(chunk))
+                )
                 found.update(conn.execute(stmt).scalars())
         return found
 
-    def counts(self) -> StatusCounts:
+    def counts(self, context: TenantContext) -> StatusCounts:
+        tenant = context.tenant_id
         with self._engine.connect() as conn:
             by_status = dict(
                 conn.execute(
                     select(schema.source_document.c.parse_status, func.count())
+                    .where(schema.source_document.c.tenant_id == tenant)
                     .group_by(schema.source_document.c.parse_status)
                 ).all()
             )
             by_institution = dict(
                 conn.execute(
                     select(schema.source_document.c.institution, func.count())
+                    .where(schema.source_document.c.tenant_id == tenant)
                     .group_by(schema.source_document.c.institution)
                 ).all()
             )
-            accounts = conn.execute(select(func.count()).select_from(schema.account)).scalar_one()
-            txns = conn.execute(select(func.count()).select_from(schema.txn)).scalar_one()
+            accounts = conn.execute(
+                select(func.count()).select_from(schema.account)
+                .where(schema.account.c.tenant_id == tenant)
+            ).scalar_one()
+            txns = conn.execute(
+                select(func.count()).select_from(schema.txn)
+                .where(schema.txn.c.tenant_id == tenant)
+            ).scalar_one()
         return StatusCounts(
             documents=by_status.get("imported", 0) + by_status.get("imported_unverified", 0),
             documents_unverified=by_status.get("imported_unverified", 0),
@@ -96,6 +215,7 @@ class SqlAlchemyLedgerRepository:
 
     def insert_document(
         self,
+        context: TenantContext,
         document: DocumentRecord,
         balances: list[BalanceRecord],
         txns: list[TxnRecord],
@@ -108,17 +228,22 @@ class SqlAlchemyLedgerRepository:
         statement.
         """
         fetched_at = document.fetched_at or datetime.now(timezone.utc)
+        tenant = context.tenant_id
 
         with self._engine.begin() as conn:
             existing = conn.execute(
-                select(schema.source_document.c.id)
-                .where(schema.source_document.c.sha256 == document.sha256)
+                select(schema.source_document.c.id).where(
+                    (schema.source_document.c.tenant_id == tenant)
+                    & (schema.source_document.c.sha256 == document.sha256)
+                )
             ).scalar_one_or_none()
             if existing is not None:
                 return InsertResult(document_id=existing)
 
             document_id = conn.execute(
                 schema.source_document.insert().values(
+                    tenant_id=tenant,
+                    uploaded_by_member_id=context.member_id,
                     sha256=document.sha256,
                     institution=document.institution,
                     doc_type=document.doc_type,
@@ -138,15 +263,16 @@ class SqlAlchemyLedgerRepository:
 
             account_ids: dict[tuple, int] = {}
             for record in balances:
-                account_ids[_account_key(record.account_key)] = self._upsert_account(conn, record.account_key)
+                account_ids[_account_key(record.account_key)] = self._upsert_account(conn, tenant, record.account_key)
             for record in txns:
                 key = _account_key(record.account_key)
                 if key not in account_ids:
-                    account_ids[key] = self._upsert_account(conn, record.account_key)
+                    account_ids[key] = self._upsert_account(conn, tenant, record.account_key)
 
             for record in balances:
                 conn.execute(
                     schema.statement_balance.insert().values(
+                        tenant_id=tenant,
                         account_id=account_ids[_account_key(record.account_key)],
                         source_document_id=document_id,
                         opening_balance_minor=record.opening_balance_minor,
@@ -154,7 +280,7 @@ class SqlAlchemyLedgerRepository:
                     )
                 )
 
-            inserted, skipped = self._insert_txns(conn, document_id, account_ids, txns)
+            inserted, skipped = self._insert_txns(conn, tenant, document_id, account_ids, txns)
 
         return InsertResult(
             document_id=document_id,
@@ -163,9 +289,10 @@ class SqlAlchemyLedgerRepository:
             txns_skipped=skipped,
         )
 
-    def _upsert_account(self, conn, record: AccountRecord) -> int:
+    def _upsert_account(self, conn, tenant_id: int, record: AccountRecord) -> int:
         where = (
-            (schema.account.c.institution == record.institution)
+            (schema.account.c.tenant_id == tenant_id)
+            & (schema.account.c.institution == record.institution)
             & (schema.account.c.account_ref_masked == record.account_ref_masked)
             & (schema.account.c.sub_account_label == (record.sub_account_label or ""))
             & (schema.account.c.currency == record.currency)
@@ -175,6 +302,11 @@ class SqlAlchemyLedgerRepository:
             return found
         return conn.execute(
             schema.account.insert().values(
+                tenant_id=tenant_id,
+                # NULL means shared across the tenant. Statement ingestion
+                # cannot know whose account it is, and guessing would be worse
+                # than leaving it joint until someone says otherwise.
+                owner_member_id=None,
                 institution=record.institution,
                 account_ref_masked=record.account_ref_masked,
                 sub_account_label=record.sub_account_label or "",
@@ -183,7 +315,7 @@ class SqlAlchemyLedgerRepository:
             )
         ).inserted_primary_key[0]
 
-    def _insert_txns(self, conn, document_id: int, account_ids: dict, txns: list[TxnRecord]) -> tuple[int, int]:
+    def _insert_txns(self, conn, tenant_id: int, document_id: int, account_ids: dict, txns: list[TxnRecord]) -> tuple[int, int]:
         if not txns:
             return 0, 0
 
@@ -193,7 +325,10 @@ class SqlAlchemyLedgerRepository:
             chunk = keys[start:start + _KEY_CHUNK]
             already.update(
                 conn.execute(
-                    select(schema.txn.c.dedupe_key).where(schema.txn.c.dedupe_key.in_(chunk))
+                    select(schema.txn.c.dedupe_key).where(
+                        (schema.txn.c.tenant_id == tenant_id)
+                        & (schema.txn.c.dedupe_key.in_(chunk))
+                    )
                 ).scalars()
             )
 
@@ -204,6 +339,7 @@ class SqlAlchemyLedgerRepository:
                 continue
             seen_in_batch.add(t.dedupe_key)
             rows.append({
+                "tenant_id": tenant_id,
                 "account_id": account_ids[_account_key(t.account_key)],
                 "source_document_id": document_id,
                 "posted_date": t.posted_date,

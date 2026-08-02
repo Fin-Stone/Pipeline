@@ -7,6 +7,13 @@ same code against SQLite and Postgres, and a Postgres-ism leaking in here is
 what that run exists to catch.
 
 Money is BIGINT minor units with currency in its own column. Never a float.
+
+**Tenancy.** Every ledger table carries `tenant_id`, and every uniqueness
+constraint that could otherwise collide between households is scoped by it.
+The system runs single-tenant and single-member for now — one default tenant
+is seeded and everything resolves to it — but the *shape* is here from the
+start, because adding a tenant scope after a ledger has history means
+recomputing every dedupe key in it. See docs/development-rules.md Rule 3.
 """
 
 from __future__ import annotations
@@ -34,12 +41,73 @@ PARSE_STATUSES = ("imported", "imported_unverified", "quarantined")
 ACCOUNT_KINDS = ("deposit", "card", "loan")
 SOURCE_PROFILES = ("dummy", "prod")
 
+#: Roles a member holds within a tenant. `owner` administers the tenant;
+#: `adult` has full access to what is shared with them; `child` and `viewer`
+#: are read-only. Enforcement belongs to the API layer when it exists — this
+#: is the vocabulary it will enforce against.
+MEMBER_ROLES = ("owner", "adult", "child", "viewer")
+MEMBER_STATUSES = ("active", "invited", "suspended")
+TENANT_STATUSES = ("active", "suspended")
+
+#: The tenant and member every single-user installation resolves to.
+DEFAULT_TENANT_SLUG = "default"
+DEFAULT_MEMBER_EMAIL = "owner@localhost"
+
+# --- Tenancy ----------------------------------------------------------------
+
+tenant = Table(
+    "tenant",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    # Stable, URL-safe handle. A household or "family plan".
+    Column("slug", String(64), nullable=False, unique=True),
+    Column("name", String(128), nullable=False),
+    Column("status", String(16), nullable=False, server_default="active"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "status IN ('" + "','".join(TENANT_STATUSES) + "')",
+        name="ck_tenant_status",
+    ),
+)
+
+member = Table(
+    "member",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("display_name", String(128), nullable=False),
+    Column("email", String(320)),
+    # OIDC identity: the issuer and its subject claim, which together are the
+    # only globally stable identifier an SSO provider gives you. Email is not
+    # an identity — it can be reassigned.
+    #
+    # No password column exists, and none should be added: authentication is
+    # the identity provider's job, and a credential this system never holds is
+    # one it can never leak.
+    Column("auth_issuer", String(255)),
+    Column("auth_subject", String(255)),
+    Column("role", String(16), nullable=False, server_default="owner"),
+    Column("status", String(16), nullable=False, server_default="active"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    # One SSO identity maps to exactly one member. NULLs do not collide, so
+    # members can exist before their first login.
+    UniqueConstraint("auth_issuer", "auth_subject", name="uq_member_identity"),
+    UniqueConstraint("tenant_id", "email", name="uq_member_email_per_tenant"),
+    CheckConstraint("role IN ('" + "','".join(MEMBER_ROLES) + "')", name="ck_member_role"),
+    CheckConstraint("status IN ('" + "','".join(MEMBER_STATUSES) + "')", name="ck_member_status"),
+)
+
+# --- Ledger -----------------------------------------------------------------
+
 source_document = Table(
     "source_document",
     metadata,
     Column("id", Integer, primary_key=True),
-    # UNIQUE sha256 is half of what makes re-import a guaranteed no-op.
-    Column("sha256", String(64), nullable=False, unique=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    # Who dropped the file in. Null for anything ingested before members
+    # existed, or by an automated feed.
+    Column("uploaded_by_member_id", Integer, ForeignKey("member.id")),
+    Column("sha256", String(64), nullable=False),
     Column("institution", String(64), nullable=False),
     Column("doc_type", String(32), nullable=False),
     Column("period_start", Date),
@@ -55,6 +123,9 @@ source_document = Table(
     # operator had it filed.
     Column("source_profile", String(16), nullable=False),
     Column("source_relpath", Text, nullable=False),
+    # Half of what makes re-import a guaranteed no-op — scoped to the tenant,
+    # so two households holding the same statement do not collide.
+    UniqueConstraint("tenant_id", "sha256", name="uq_source_document_sha256"),
     CheckConstraint(
         "parse_status IN ('" + "','".join(PARSE_STATUSES) + "')",
         name="ck_source_document_parse_status",
@@ -69,6 +140,11 @@ account = Table(
     "account",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    # Which member the account belongs to. NULL means it is shared across the
+    # whole tenant — a joint account, in family terms. This is what lets one
+    # household hold both joint and personal accounts.
+    Column("owner_member_id", Integer, ForeignKey("member.id")),
     Column("institution", String(64), nullable=False),
     # The account's stable identity within its institution.
     #
@@ -85,7 +161,7 @@ account = Table(
     Column("currency", String(3), nullable=False),
     Column("kind", String(16), nullable=False),
     UniqueConstraint(
-        "institution", "account_ref_masked", "sub_account_label", "currency",
+        "tenant_id", "institution", "account_ref_masked", "sub_account_label", "currency",
         name="uq_account_identity",
     ),
     CheckConstraint(
@@ -98,6 +174,7 @@ txn = Table(
     "txn",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
     Column("account_id", Integer, ForeignKey("account.id"), nullable=False),
     Column("source_document_id", Integer, ForeignKey("source_document.id"), nullable=False),
     Column("posted_date", Date, nullable=False),
@@ -115,12 +192,16 @@ txn = Table(
     Column("description_norm", Text, nullable=False),
     Column("counterparty_norm", Text, nullable=False, server_default=""),
     Column("seq", Integer, nullable=False, server_default="0"),
-    # The other half of idempotency.
-    Column("dedupe_key", String(64), nullable=False, unique=True),
+    # The other half of idempotency. The key itself is a property of the
+    # transaction's content; the tenant scope lives in the constraint, so two
+    # households with identical transactions never collide.
+    Column("dedupe_key", String(64), nullable=False),
+    UniqueConstraint("tenant_id", "dedupe_key", name="uq_txn_dedupe_key"),
 )
 
 Index("ix_txn_account_posted", txn.c.account_id, txn.c.posted_date)
 Index("ix_txn_source_document", txn.c.source_document_id)
+Index("ix_txn_tenant", txn.c.tenant_id)
 
 # Per-account opening and closing balances as the statement stated them.
 # Without this, the monthly reconciliation in architecture §8.2 has nothing to
@@ -129,6 +210,7 @@ statement_balance = Table(
     "statement_balance",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
     Column("account_id", Integer, ForeignKey("account.id"), nullable=False),
     Column("source_document_id", Integer, ForeignKey("source_document.id"), nullable=False),
     Column("opening_balance_minor", BigInteger),
@@ -145,9 +227,13 @@ txn_enrichment = Table(
     "txn_enrichment",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
     Column("txn_id", Integer, ForeignKey("txn.id"), nullable=False),
     Column("category", String(64)),
     Column("subcategory", String(64)),
+    # "For whom" — which member the spend was for. Distinct from the account's
+    # owner: a joint card can pay for any member.
+    Column("beneficiary_member_id", Integer, ForeignKey("member.id")),
     Column("beneficiary", String(64)),
     Column("confidence", Numeric(5, 4)),
     Column("source", String(16), nullable=False),
@@ -160,6 +246,7 @@ recurrence_series = Table(
     "recurrence_series",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
     Column("merchant_norm", Text, nullable=False),
     Column("amount_centre_minor", BigInteger, nullable=False),
     Column("amount_tolerance_minor", BigInteger, nullable=False),
@@ -176,4 +263,15 @@ txn_series_link = Table(
     metadata,
     Column("txn_id", Integer, ForeignKey("txn.id"), primary_key=True),
     Column("series_id", Integer, ForeignKey("recurrence_series.id"), primary_key=True),
+)
+
+#: Every table carrying tenant-owned rows. Used by the isolation tests, which
+#: assert that nothing gains a tenant-scoped row without being listed here.
+TENANT_SCOPED_TABLES = (
+    source_document,
+    account,
+    txn,
+    statement_balance,
+    txn_enrichment,
+    recurrence_series,
 )

@@ -1,12 +1,17 @@
 """The ledger persistence seam.
 
-Any implementation must satisfy two properties the pipeline relies on:
+Any implementation must satisfy three properties the pipeline relies on:
 
 1. `insert_document` is atomic — the document row, its accounts, its balances
    and all of its transactions land together or not at all. There is no such
    thing as a half-imported statement.
-2. Re-inserting a document whose sha256 already exists is a no-op, and
-   re-inserting a transaction whose dedupe_key already exists is skipped.
+2. Re-inserting a document whose sha256 already exists **within the same
+   tenant** is a no-op, and re-inserting a transaction whose dedupe_key already
+   exists within that tenant is skipped.
+3. **Every method is scoped by an explicit `TenantContext`.** No method may
+   default it, infer it, or read across tenants. It is a required argument so
+   that omitting it fails loudly at the call site rather than silently
+   returning another household's records.
 """
 
 from __future__ import annotations
@@ -15,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
+
+from ..domain.tenancy import MemberIdentity, TenantContext
 
 # parse_status values. Portable TEXT + CHECK rather than a Postgres ENUM.
 STATUS_IMPORTED = "imported"
@@ -97,21 +104,51 @@ class LedgerRepository(Protocol):
     def create_schema(self) -> None:
         """Create tables if absent. Used by tests; production uses migrations."""
 
-    def get_document_id(self, sha256: str) -> int | None:
-        """Return the id of an already-imported document, or None."""
+    # -- tenancy -------------------------------------------------------------
 
-    def existing_dedupe_keys(self, keys: list[str]) -> set[str]:
-        """Return the subset of `keys` already present in the ledger."""
+    def ensure_tenant(self, slug: str, name: str | None = None) -> int:
+        """Return the tenant's id, creating it if absent."""
+
+    def ensure_member(
+        self,
+        tenant_id: int,
+        *,
+        display_name: str,
+        email: str | None = None,
+        identity: MemberIdentity | None = None,
+        role: str = "owner",
+    ) -> int:
+        """Return the member's id, creating it if absent."""
+
+    def resolve_context(self, tenant_slug: str, member_email: str | None = None) -> TenantContext:
+        """Resolve configuration into the context every other call requires.
+
+        This is the single place a tenant is chosen. When SSO arrives it is
+        replaced by resolution from an authenticated session, and nothing
+        downstream changes.
+        """
+
+    def find_member_by_identity(self, identity: MemberIdentity) -> TenantContext | None:
+        """Resolve an SSO identity to its member, or None if unknown."""
+
+    # -- ledger --------------------------------------------------------------
+
+    def get_document_id(self, context: TenantContext, sha256: str) -> int | None:
+        """Return the id of a document already imported *for this tenant*."""
+
+    def existing_dedupe_keys(self, context: TenantContext, keys: list[str]) -> set[str]:
+        """Return the subset of `keys` already present for this tenant."""
 
     def insert_document(
         self,
+        context: TenantContext,
         document: DocumentRecord,
         balances: list[BalanceRecord],
         txns: list[TxnRecord],
     ) -> InsertResult:
         """Persist a document and everything it carries, atomically."""
 
-    def counts(self) -> StatusCounts:
-        """Summary counts for `finstone status`."""
+    def counts(self, context: TenantContext) -> StatusCounts:
+        """Summary counts for `finstone status`, for this tenant only."""
 
     def close(self) -> None: ...

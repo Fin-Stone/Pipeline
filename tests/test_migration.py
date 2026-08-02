@@ -53,18 +53,62 @@ def test_migration_columns_match_the_declared_schema(tmp_path):
     assert not mismatches, f"migration and schema.py disagree: {mismatches}"
 
 
+def _unique_columns(inspector, table):
+    columns = {tuple(u["column_names"]) for u in inspector.get_unique_constraints(table)}
+    columns |= {tuple(i["column_names"]) for i in inspector.get_indexes(table) if i["unique"]}
+    return columns
+
+
 def test_unique_constraints_that_carry_idempotency_exist(tmp_path):
-    """sha256 and dedupe_key uniqueness are what make every retry safe."""
+    """sha256 and dedupe_key uniqueness are what make every retry safe.
+
+    Both are scoped by tenant: two households holding the same statement, or
+    the same transaction on the same account reference, must not collide.
+    """
     migrated = _migrated_inspector(tmp_path)
 
-    def unique_columns(table):
-        columns = {tuple(u["column_names"]) for u in migrated.get_unique_constraints(table)}
-        columns |= {tuple(i["column_names"]) for i in migrated.get_indexes(table) if i["unique"]}
-        return columns
+    assert ("tenant_id", "sha256") in _unique_columns(migrated, "source_document")
+    assert ("tenant_id", "dedupe_key") in _unique_columns(migrated, "txn")
+    assert (
+        "tenant_id", "institution", "account_ref_masked", "sub_account_label", "currency",
+    ) in _unique_columns(migrated, "account")
 
-    assert ("sha256",) in unique_columns("source_document")
-    assert ("dedupe_key",) in unique_columns("txn")
-    assert ("institution", "account_ref_masked", "sub_account_label", "currency") in unique_columns("account")
+
+def test_no_ledger_uniqueness_escapes_the_tenant_scope(tmp_path):
+    """A globally unique constraint on a ledger table is a cross-tenant
+    collision waiting to happen. This catches one being added by accident."""
+    from app.storage import schema
+
+    migrated = _migrated_inspector(tmp_path)
+    unscoped = {}
+    for table in schema.TENANT_SCOPED_TABLES:
+        for columns in _unique_columns(migrated, table.name):
+            if "tenant_id" not in columns and columns != ("id",):
+                unscoped.setdefault(table.name, []).append(columns)
+
+    # statement_balance is keyed on (account_id, source_document_id); both
+    # already belong to exactly one tenant, so it cannot collide across them.
+    unscoped.pop("statement_balance", None)
+    assert not unscoped, f"tenant-scoped tables carry global uniqueness: {unscoped}"
+
+
+def test_seeds_the_default_tenant_and_member(tmp_path):
+    """A fresh database must be immediately usable single-user."""
+    from sqlalchemy import text
+
+    url = f"sqlite:///{(tmp_path / 'seeded.db').as_posix()}"
+    config = AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(REPO_ROOT / "app" / "migrations"))
+    config.set_main_option("sqlalchemy.url", url)
+    config.attributes["url_set_by_caller"] = True
+    command.upgrade(config, "head")
+
+    with create_engine(url).connect() as conn:
+        assert conn.execute(text("SELECT slug FROM tenant")).scalars().all() == ["default"]
+        assert conn.execute(text("SELECT role FROM member")).scalars().all() == ["owner"]
+        # No password column exists, and none should ever be added.
+        columns = {c["name"] for c in inspect(create_engine(url)).get_columns("member")}
+        assert not {c for c in columns if "password" in c or "secret" in c}
 
 
 def test_migration_is_reversible(tmp_path):

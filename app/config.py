@@ -31,6 +31,13 @@ def _path(name: str, default: Path) -> Path:
     return Path(raw).expanduser().resolve() if raw else default
 
 
+#: The tenant and member a single-user installation resolves to. Real values
+#: arrive from an authenticated session once SSO exists; until then everything
+#: runs as this one household with one member.
+DEFAULT_TENANT_SLUG = "default"
+DEFAULT_MEMBER_EMAIL = "owner@localhost"
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     database_url: str
@@ -38,6 +45,8 @@ class Config:
     data_dir: Path
     allow_prod: bool
     amount_ceiling_minor: int
+    tenant_slug: str = DEFAULT_TENANT_SLUG
+    member_email: str | None = DEFAULT_MEMBER_EMAIL
 
     @property
     def inbox_dir(self) -> Path:
@@ -94,4 +103,9 @@ def load_config() -> Config:
         # 10 million in minor units. A personal statement line above this is
         # far more likely to be a misparse than a real transaction.
         amount_ceiling_minor=int(os.environ.get("FINSTONE_AMOUNT_CEILING_MINOR", str(10_000_000_00))),
+        # Single-tenant today. These exist so the pipeline is already written
+        # against a tenant context, and switching multi-tenancy on becomes a
+        # change to how the context is resolved rather than to every call site.
+        tenant_slug=os.environ.get("FINSTONE_TENANT", DEFAULT_TENANT_SLUG),
+        member_email=os.environ.get("FINSTONE_MEMBER", DEFAULT_MEMBER_EMAIL) or None,
     )

@@ -64,6 +64,22 @@ def repository(request, tmp_path):
 
 
 @pytest.fixture
+def context(repository, config):
+    """The tenant context every repository call requires.
+
+    Single-tenant today, but resolved rather than assumed, so the tests
+    exercise the same code path a multi-tenant deployment will.
+    """
+    return repository.resolve_context(config.tenant_slug, config.member_email)
+
+
+@pytest.fixture
+def other_context(repository):
+    """A second tenant, for the isolation tests."""
+    return repository.resolve_context("other-household", "someone@example.com")
+
+
+@pytest.fixture
 def config(tmp_path) -> Config:
     return Config(
         database_url=f"sqlite:///{(tmp_path / 'ledger.db').as_posix()}",

@@ -49,7 +49,7 @@ class IngestSummary:
     outcomes: tuple[IngestOutcome, ...] = ()
 
 
-def ingest_inbox(config: Config, repository, blob_store, notifier, registry: AdapterRegistry | None = None) -> IngestSummary:
+def ingest_inbox(config: Config, context, repository, blob_store, notifier, registry: AdapterRegistry | None = None) -> IngestSummary:
     registry = registry or build_default_registry()
     inbox = config.inbox_dir
     outcomes = []
@@ -59,7 +59,7 @@ def ingest_inbox(config: Config, repository, blob_store, notifier, registry: Ada
         if p.is_file() and p.suffix.lower() in DOCUMENT_EXTENSIONS
     ]
     for path in files:
-        outcomes.append(ingest_file(config, path, repository, blob_store, notifier, registry))
+        outcomes.append(ingest_file(config, context, path, repository, blob_store, notifier, registry))
 
     return IngestSummary(
         processed=len(outcomes),
@@ -72,11 +72,11 @@ def ingest_inbox(config: Config, repository, blob_store, notifier, registry: Ada
     )
 
 
-def ingest_file(config: Config, path: Path, repository, blob_store, notifier, registry: AdapterRegistry) -> IngestOutcome:
+def ingest_file(config: Config, context, path: Path, repository, blob_store, notifier, registry: AdapterRegistry) -> IngestOutcome:
     digest = sha256_file(path)
     profile, relpath = _provenance(config, path)
 
-    if repository.get_document_id(digest) is not None:
+    if repository.get_document_id(context, digest) is not None:
         return IngestOutcome(sha256=digest, path=str(path), status=STATUS_DUPLICATE)
 
     # Store the original before anything else can fail. The bytes are what
@@ -170,7 +170,7 @@ def ingest_file(config: Config, path: Path, repository, blob_store, notifier, re
         fetched_at=datetime.now(timezone.utc),
     )
     balances, txns = _to_records(parsed)
-    inserted = repository.insert_document(record, balances, txns)
+    inserted = repository.insert_document(context, record, balances, txns)
 
     return IngestOutcome(
         sha256=digest,

@@ -83,77 +83,77 @@ def registry_for(config):
     return build
 
 
-def _run(config, repository, blob_store, notifier, registry):
-    return ingest_inbox(config, repository, blob_store, notifier, registry)
+def _run(config, context, repository, blob_store, notifier, registry):
+    return ingest_inbox(config, context, repository, blob_store, notifier, registry)
 
 
 class TestStaging:
-    def test_discovers_nested_folders_recursively(self, config, repository):
+    def test_discovers_nested_folders_recursively(self, config, repository, context):
         for relpath in ["BankA/acc/jan.pdf", "BankA/cc/feb.pdf", "BankB/2024/mar.pdf"]:
             _statement_pdf(config.uploads_for("dummy") / relpath, [])
-        result = stage(config, "dummy", repository=repository)
+        result = stage(config, "dummy", repository=repository, context=context)
         assert result.discovered == 3
         assert result.staged == 3
         assert (config.inbox_dir / "dummy" / "BankB" / "2024" / "mar.pdf").exists()
 
-    def test_preserves_relative_layout(self, config, repository):
+    def test_preserves_relative_layout(self, config, repository, context):
         _statement_pdf(config.uploads_for("dummy") / "BankA" / "acc" / "jan.pdf", [])
-        stage(config, "dummy", repository=repository)
+        stage(config, "dummy", repository=repository, context=context)
         assert (config.inbox_dir / "dummy" / "BankA" / "acc" / "jan.pdf").exists()
 
-    def test_is_idempotent(self, config, repository):
+    def test_is_idempotent(self, config, repository, context):
         _statement_pdf(config.uploads_for("dummy") / "a.pdf", [])
-        assert stage(config, "dummy", repository=repository).staged == 1
-        second = stage(config, "dummy", repository=repository)
+        assert stage(config, "dummy", repository=repository, context=context).staged == 1
+        second = stage(config, "dummy", repository=repository, context=context)
         assert second.staged == 0 and second.already_staged == 1
 
-    def test_ignores_non_documents(self, config, repository):
+    def test_ignores_non_documents(self, config, repository, context):
         root = config.uploads_for("dummy")
         root.mkdir(parents=True, exist_ok=True)
         (root / "notes.txt").write_text("not a statement")
-        assert stage(config, "dummy", repository=repository).discovered == 0
+        assert stage(config, "dummy", repository=repository, context=context).discovered == 0
 
-    def test_refuses_prod_without_explicit_opt_in(self, config, repository):
+    def test_refuses_prod_without_explicit_opt_in(self, config, repository, context):
         """uploads/prod holds real financial data; processing it must be a
         deliberate act. See docs/development-rules.md Rule 2."""
         from app.config import ConfigError
         with pytest.raises(ConfigError, match="FINSTONE_ALLOW_PROD"):
-            stage(config, "prod", repository=repository)
+            stage(config, "prod", repository=repository, context=context)
 
 
 class TestIngest:
-    def test_imports_and_reconciles(self, config, repository, blob_store, notifier, registry_for):
+    def test_imports_and_reconciles(self, config, repository, context, blob_store, notifier, registry_for):
         path = _statement_pdf(
             config.inbox_dir / "dummy" / "a.pdf",
             [("03 Jun", "Salary", "+2,000.00"), ("10 Jun", "Rent", "1,500.00")],
             opening="1,000.00", closing="1,500.00",
         )
-        summary = _run(config, repository, blob_store, notifier, registry_for(path))
+        summary = _run(config, context, repository, blob_store, notifier, registry_for(path))
         assert summary.imported == 1 and summary.quarantined == 0
-        counts = repository.counts()
+        counts = repository.counts(context)
         assert counts.documents == 1 and counts.txns == 2 and counts.accounts == 1
 
-    def test_is_idempotent_across_runs(self, config, repository, blob_store, notifier, registry_for):
+    def test_is_idempotent_across_runs(self, config, repository, context, blob_store, notifier, registry_for):
         path = _statement_pdf(
             config.inbox_dir / "dummy" / "a.pdf",
             [("03 Jun", "Salary", "+2,000.00")],
             opening="1,000.00", closing="3,000.00",
         )
         registry = registry_for(path)
-        _run(config, repository, blob_store, notifier, registry)
-        before = repository.counts()
-        second = _run(config, repository, blob_store, notifier, registry)
+        _run(config, context, repository, blob_store, notifier, registry)
+        before = repository.counts(context)
+        second = _run(config, context, repository, blob_store, notifier, registry)
         assert second.duplicates == 1 and second.txns_inserted == 0
-        assert repository.counts() == before
+        assert repository.counts(context) == before
 
-    def test_stores_the_original_content_addressed(self, config, repository, blob_store, notifier, registry_for):
+    def test_stores_the_original_content_addressed(self, config, repository, context, blob_store, notifier, registry_for):
         path = _statement_pdf(config.inbox_dir / "dummy" / "a.pdf", [], opening="0.00", closing="0.00")
-        _run(config, repository, blob_store, notifier, registry_for(path))
+        _run(config, context, repository, blob_store, notifier, registry_for(path))
         stored = list(config.store_dir.rglob("*"))
         assert any(f.is_file() and len(f.name) == 64 for f in stored)
 
     def test_reconciliation_failure_writes_no_transactions(
-        self, config, repository, blob_store, notifier, registry_for
+        self, config, repository, context, blob_store, notifier, registry_for
     ):
         """A dropped row must reject the whole document, not import part of it."""
         path = _statement_pdf(
@@ -161,10 +161,10 @@ class TestIngest:
             [("03 Jun", "Salary", "+2,000.00")],
             opening="1,000.00", closing="9,999.00",   # deliberately wrong
         )
-        summary = _run(config, repository, blob_store, notifier, registry_for(path))
+        summary = _run(config, context, repository, blob_store, notifier, registry_for(path))
 
         assert summary.quarantined == 1 and summary.imported == 0
-        counts = repository.counts()
+        counts = repository.counts(context)
         assert counts.txns == 0 and counts.documents == 0
 
         reason_files = list(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
@@ -176,10 +176,10 @@ class TestIngest:
         assert detail["stated_closing_minor"] == 999900
 
     def test_unknown_layout_is_quarantined_never_guessed(
-        self, config, repository, blob_store, notifier
+        self, config, repository, context, blob_store, notifier
     ):
         _statement_pdf(config.inbox_dir / "dummy" / "a.pdf", [], opening="0.00", closing="0.00")
-        summary = _run(config, repository, blob_store, notifier, AdapterRegistry())
+        summary = _run(config, context, repository, blob_store, notifier, AdapterRegistry())
 
         assert summary.quarantined == 1
         reason = json.loads(next(config.quarantine_dir.glob(f"*{REASON_SUFFIX}")).read_text(encoding="utf-8"))
@@ -188,19 +188,19 @@ class TestIngest:
         assert len(reason["detail"]["fingerprint"]) == 40
 
     def test_same_day_identical_amounts_both_survive(
-        self, config, repository, blob_store, notifier, registry_for
+        self, config, repository, context, blob_store, notifier, registry_for
     ):
         path = _statement_pdf(
             config.inbox_dir / "dummy" / "a.pdf",
             [("12 Jun", "Koufu", "4.50"), ("12 Jun", "Koufu", "4.50")],
             opening="100.00", closing="91.00",
         )
-        summary = _run(config, repository, blob_store, notifier, registry_for(path))
+        summary = _run(config, context, repository, blob_store, notifier, registry_for(path))
         assert summary.imported == 1
-        assert repository.counts().txns == 2
+        assert repository.counts(context).txns == 2
 
     def test_quarantine_does_not_stop_the_run(
-        self, config, repository, blob_store, notifier, registry_for
+        self, config, repository, context, blob_store, notifier, registry_for
     ):
         good = _statement_pdf(
             config.inbox_dir / "dummy" / "good.pdf",
@@ -213,9 +213,9 @@ class TestIngest:
             opening="1,000.00", closing="1.00",
             strapline="SYNTHETIC TEST STATEMENT",
         )
-        summary = _run(config, repository, blob_store, notifier, registry_for(good))
+        summary = _run(config, context, repository, blob_store, notifier, registry_for(good))
         assert summary.imported == 1 and summary.quarantined == 1
-        assert repository.counts().txns == 1
+        assert repository.counts(context).txns == 1
 
 
 class TestValidation:

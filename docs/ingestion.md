@@ -375,11 +375,24 @@ Phase 1 additions on top of it:
 `tests/test_migration.py` asserts that the migration and `app/storage/schema.py` agree,
 column for column, so the schema the tests exercise is the schema an operator actually runs.
 
-**Single-tenant by design, for now.** `source_document.sha256`, `txn.dedupe_key` and the
-`account` identity constraint are globally unique. See
-[development-rules.md](development-rules.md) Rule 3 for what that costs if the system ever
-grows more than one owner, and why the decision is the operator's to make before history
-accumulates.
+### Tenancy
+
+Every ledger table carries `tenant_id`, and the constraints that could collide between
+households — `(tenant_id, sha256)`, `(tenant_id, dedupe_key)`, and the `account` identity —
+are scoped by it. `tenant` and `member` tables exist, members carry an OIDC issuer and
+subject for SSO, and `account.owner_member_id` distinguishes a personal account from a
+joint one (`NULL` = shared across the tenant).
+
+**The system runs single-tenant and single-member.** Migration `0001` seeds one `default`
+tenant and one `owner` member, and `FINSTONE_TENANT` / `FINSTONE_MEMBER` resolve to them.
+Multi-tenancy is structured for, not switched on: the shape exists because retrofitting it
+onto a ledger with history would mean recomputing every dedupe key, while adding it at the
+initial migration cost one column.
+
+Every `LedgerRepository` method takes a `TenantContext` as a required argument, so ingestion
+already runs under a tenant. Turning multi-tenancy on later changes how that context is
+*resolved* — from configuration to an authenticated session — and nothing else. See
+[development-rules.md](development-rules.md) Rule 3.
 
 ---
 

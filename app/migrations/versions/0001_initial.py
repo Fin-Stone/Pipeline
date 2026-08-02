@@ -1,10 +1,16 @@
-"""Initial ledger schema.
+"""Initial ledger schema, tenant-scoped from the start.
 
-Architecture §1 in full, plus the Phase 1 additions. Phase 1 populates
-source_document, account, txn and statement_balance; the enrichment and
-recurrence tables are created now because the data model is the architecture —
-separating immutable facts from mutable predictions from the start is what lets
-history be re-classified later without touching the ledger underneath.
+Architecture §1 in full, plus the Phase 1 additions and the tenancy shape.
+Phase 1 populates tenant, member, source_document, account, txn and
+statement_balance; the enrichment and recurrence tables are created now
+because the data model is the architecture — separating immutable facts from
+mutable predictions from the start is what lets history be re-classified later
+without touching the ledger underneath.
+
+The system runs single-tenant and single-member: one default tenant and one
+default member are seeded below, and everything resolves to them. The *shape*
+is here from the start because adding a tenant scope to a ledger that already
+has history means recomputing every dedupe key in it.
 
 Deliberately portable: TEXT + CHECK rather than a Postgres ENUM, no
 dialect-specific types or defaults. tests/test_migration.py asserts this
@@ -14,6 +20,8 @@ Revision ID: 0001_initial
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 import sqlalchemy as sa
 from alembic import op
@@ -27,6 +35,12 @@ PARSE_STATUSES = ("imported", "imported_unverified", "quarantined")
 ACCOUNT_KINDS = ("deposit", "card", "loan")
 SOURCE_PROFILES = ("dummy", "prod")
 ENRICHMENT_SOURCES = ("rule", "knn", "llm", "human")
+MEMBER_ROLES = ("owner", "adult", "child", "viewer")
+MEMBER_STATUSES = ("active", "invited", "suspended")
+TENANT_STATUSES = ("active", "suspended")
+
+DEFAULT_TENANT_SLUG = "default"
+DEFAULT_MEMBER_EMAIL = "owner@localhost"
 
 
 def _in_list(column: str, values: tuple[str, ...]) -> str:
@@ -34,10 +48,41 @@ def _in_list(column: str, values: tuple[str, ...]) -> str:
 
 
 def upgrade() -> None:
+    tenant = op.create_table(
+        "tenant",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("slug", sa.String(64), nullable=False, unique=True),
+        sa.Column("name", sa.String(128), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False, server_default="active"),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(_in_list("status", TENANT_STATUSES), name="ck_tenant_status"),
+    )
+
+    member = op.create_table(
+        "member",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("tenant_id", sa.Integer(), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column("display_name", sa.String(128), nullable=False),
+        sa.Column("email", sa.String(320)),
+        # OIDC issuer and subject. No password column exists, and none should
+        # be added: authentication belongs to the identity provider.
+        sa.Column("auth_issuer", sa.String(255)),
+        sa.Column("auth_subject", sa.String(255)),
+        sa.Column("role", sa.String(16), nullable=False, server_default="owner"),
+        sa.Column("status", sa.String(16), nullable=False, server_default="active"),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.UniqueConstraint("auth_issuer", "auth_subject", name="uq_member_identity"),
+        sa.UniqueConstraint("tenant_id", "email", name="uq_member_email_per_tenant"),
+        sa.CheckConstraint(_in_list("role", MEMBER_ROLES), name="ck_member_role"),
+        sa.CheckConstraint(_in_list("status", MEMBER_STATUSES), name="ck_member_status"),
+    )
+
     op.create_table(
         "source_document",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("sha256", sa.String(64), nullable=False, unique=True),
+        sa.Column("tenant_id", sa.Integer(), sa.ForeignKey("tenant.id"), nullable=False),
+        sa.Column("uploaded_by_member_id", sa.Integer(), sa.ForeignKey("member.id")),
+        sa.Column("sha256", sa.String(64), nullable=False),
         sa.Column("institution", sa.String(64), nullable=False),
         sa.Column("doc_type", sa.String(32), nullable=False),
         sa.Column("period_start", sa.Date()),
@@ -51,6 +96,7 @@ def upgrade() -> None:
         sa.Column("parse_status", sa.String(32), nullable=False),
         sa.Column("source_profile", sa.String(16), nullable=False),
         sa.Column("source_relpath", sa.Text(), nullable=False),
+        sa.UniqueConstraint("tenant_id", "sha256", name="uq_source_document_sha256"),
         sa.CheckConstraint(_in_list("parse_status", PARSE_STATUSES), name="ck_source_document_parse_status"),
         sa.CheckConstraint(_in_list("source_profile", SOURCE_PROFILES), name="ck_source_document_source_profile"),
     )
@@ -58,6 +104,9 @@ def upgrade() -> None:
     op.create_table(
         "account",
         sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("tenant_id", sa.Integer(), sa.ForeignKey("tenant.id"), nullable=False),
+        # NULL means shared across the tenant — a joint account.
+        sa.Column("owner_member_id", sa.Integer(), sa.ForeignKey("member.id")),
         sa.Column("institution", sa.String(64), nullable=False),
         # Masked account number for deposits; the card *product* for cards,
         # because card numbers change on reissue while the account continues.
@@ -66,7 +115,7 @@ def upgrade() -> None:
         sa.Column("currency", sa.String(3), nullable=False),
         sa.Column("kind", sa.String(16), nullable=False),
         sa.UniqueConstraint(
-            "institution", "account_ref_masked", "sub_account_label", "currency",
+            "tenant_id", "institution", "account_ref_masked", "sub_account_label", "currency",
             name="uq_account_identity",
         ),
         sa.CheckConstraint(_in_list("kind", ACCOUNT_KINDS), name="ck_account_kind"),
@@ -75,6 +124,7 @@ def upgrade() -> None:
     op.create_table(
         "txn",
         sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("tenant_id", sa.Integer(), sa.ForeignKey("tenant.id"), nullable=False),
         sa.Column("account_id", sa.Integer(), sa.ForeignKey("account.id"), nullable=False),
         sa.Column("source_document_id", sa.Integer(), sa.ForeignKey("source_document.id"), nullable=False),
         sa.Column("posted_date", sa.Date(), nullable=False),
@@ -88,14 +138,17 @@ def upgrade() -> None:
         sa.Column("description_norm", sa.Text(), nullable=False),
         sa.Column("counterparty_norm", sa.Text(), nullable=False, server_default=""),
         sa.Column("seq", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("dedupe_key", sa.String(64), nullable=False, unique=True),
+        sa.Column("dedupe_key", sa.String(64), nullable=False),
+        sa.UniqueConstraint("tenant_id", "dedupe_key", name="uq_txn_dedupe_key"),
     )
     op.create_index("ix_txn_account_posted", "txn", ["account_id", "posted_date"])
     op.create_index("ix_txn_source_document", "txn", ["source_document_id"])
+    op.create_index("ix_txn_tenant", "txn", ["tenant_id"])
 
     op.create_table(
         "statement_balance",
         sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("tenant_id", sa.Integer(), sa.ForeignKey("tenant.id"), nullable=False),
         sa.Column("account_id", sa.Integer(), sa.ForeignKey("account.id"), nullable=False),
         sa.Column("source_document_id", sa.Integer(), sa.ForeignKey("source_document.id"), nullable=False),
         sa.Column("opening_balance_minor", sa.BigInteger()),
@@ -106,9 +159,13 @@ def upgrade() -> None:
     op.create_table(
         "txn_enrichment",
         sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("tenant_id", sa.Integer(), sa.ForeignKey("tenant.id"), nullable=False),
         sa.Column("txn_id", sa.Integer(), sa.ForeignKey("txn.id"), nullable=False),
         sa.Column("category", sa.String(64)),
         sa.Column("subcategory", sa.String(64)),
+        # "For whom" — distinct from the account owner: a joint card can pay
+        # for any member.
+        sa.Column("beneficiary_member_id", sa.Integer(), sa.ForeignKey("member.id")),
         sa.Column("beneficiary", sa.String(64)),
         sa.Column("confidence", sa.Numeric(5, 4)),
         sa.Column("source", sa.String(16), nullable=False),
@@ -120,6 +177,7 @@ def upgrade() -> None:
     op.create_table(
         "recurrence_series",
         sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("tenant_id", sa.Integer(), sa.ForeignKey("tenant.id"), nullable=False),
         sa.Column("merchant_norm", sa.Text(), nullable=False),
         sa.Column("amount_centre_minor", sa.BigInteger(), nullable=False),
         sa.Column("amount_tolerance_minor", sa.BigInteger(), nullable=False),
@@ -137,14 +195,31 @@ def upgrade() -> None:
         sa.Column("series_id", sa.Integer(), sa.ForeignKey("recurrence_series.id"), primary_key=True),
     )
 
+    # Seed the single tenant and member everything resolves to today. Doing it
+    # here rather than lazily at runtime means a fresh database is immediately
+    # usable, and the foreign keys have something valid to point at.
+    now = datetime.now(timezone.utc)
+    op.bulk_insert(tenant, [{
+        "id": 1, "slug": DEFAULT_TENANT_SLUG, "name": "Default",
+        "status": "active", "created_at": now,
+    }])
+    op.bulk_insert(member, [{
+        "id": 1, "tenant_id": 1, "display_name": "Owner",
+        "email": DEFAULT_MEMBER_EMAIL, "auth_issuer": None, "auth_subject": None,
+        "role": "owner", "status": "active", "created_at": now,
+    }])
+
 
 def downgrade() -> None:
     op.drop_table("txn_series_link")
     op.drop_table("recurrence_series")
     op.drop_table("txn_enrichment")
     op.drop_table("statement_balance")
+    op.drop_index("ix_txn_tenant", table_name="txn")
     op.drop_index("ix_txn_source_document", table_name="txn")
     op.drop_index("ix_txn_account_posted", table_name="txn")
     op.drop_table("txn")
     op.drop_table("account")
     op.drop_table("source_document")
+    op.drop_table("member")
+    op.drop_table("tenant")
