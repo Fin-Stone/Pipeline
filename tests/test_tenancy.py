@@ -147,6 +147,17 @@ class TestIsolation:
             ).scalars().all()
         assert sorted(rows) == sorted([context.tenant_id, other_context.tenant_id])
 
+    def test_statement_balances_are_tenant_scoped(self, repository, context, other_context):
+        balances = [BalanceRecord(account_key=_account(), opening_balance_minor=1000, closing_balance_minor=2000)]
+        repository.insert_document(context, _document("a" * 64), balances, [])
+        repository.insert_document(other_context, _document("b" * 64), balances, [])
+
+        with repository.engine.connect() as conn:
+            rows = conn.execute(
+                select(schema.statement_balance.c.tenant_id).order_by(schema.statement_balance.c.tenant_id)
+            ).scalars().all()
+        assert rows == [context.tenant_id, other_context.tenant_id]
+
     def test_reads_never_cross_tenants(self, repository, context, other_context):
         repository.insert_document(context, _document("a" * 64), [], [_txn("k" * 64)])
 
