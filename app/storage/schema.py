@@ -108,6 +108,11 @@ source_document = Table(
     # existed, or by an automated feed.
     Column("uploaded_by_member_id", Integer, ForeignKey("member.id")),
     Column("sha256", String(64), nullable=False),
+    # Identifies the *statement* rather than the file: one statement per
+    # account per period, whatever bytes happened to carry it. A re-downloaded
+    # or re-saved PDF is the same statement; two members of a household both
+    # uploading a shared account's statement produce one, not two.
+    Column("statement_key", String(64)),
     Column("institution", String(64), nullable=False),
     Column("doc_type", String(32), nullable=False),
     Column("period_start", Date),
@@ -126,6 +131,7 @@ source_document = Table(
     # Half of what makes re-import a guaranteed no-op — scoped to the tenant,
     # so two households holding the same statement do not collide.
     UniqueConstraint("tenant_id", "sha256", name="uq_source_document_sha256"),
+    UniqueConstraint("tenant_id", "statement_key", name="uq_source_document_statement"),
     CheckConstraint(
         "parse_status IN ('" + "','".join(PARSE_STATUSES) + "')",
         name="ck_source_document_parse_status",

@@ -171,6 +171,26 @@ class SqlAlchemyLedgerRepository:
         with self._engine.connect() as conn:
             return conn.execute(stmt).scalar_one_or_none()
 
+    def find_by_statement_key(self, context: TenantContext, statement_key: str) -> dict | None:
+        columns = schema.source_document.c
+        stmt = select(
+            columns.id, columns.sha256, columns.source_relpath, columns.parse_status,
+            columns.period_start, columns.period_end,
+        ).where(
+            (columns.tenant_id == context.tenant_id) & (columns.statement_key == statement_key)
+        )
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).one_or_none()
+        return dict(row._mapping) if row is not None else None
+
+    def dedupe_keys_for_document(self, context: TenantContext, document_id: int) -> set[str]:
+        stmt = select(schema.txn.c.dedupe_key).where(
+            (schema.txn.c.tenant_id == context.tenant_id)
+            & (schema.txn.c.source_document_id == document_id)
+        )
+        with self._engine.connect() as conn:
+            return set(conn.execute(stmt).scalars())
+
     def list_documents(self, context: TenantContext, parse_status: str | None = None) -> list[dict]:
         columns = schema.source_document.c
         stmt = select(
@@ -312,6 +332,7 @@ class SqlAlchemyLedgerRepository:
                     tenant_id=tenant,
                     uploaded_by_member_id=context.member_id,
                     sha256=document.sha256,
+                    statement_key=document.statement_key,
                     institution=document.institution,
                     doc_type=document.doc_type,
                     period_start=document.period_start,

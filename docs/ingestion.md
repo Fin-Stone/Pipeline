@@ -423,6 +423,37 @@ closing balance (architecture §8.2) catches the resulting drift. The alternativ
 (assigning `seq` from what is already in the database) break idempotency outright, which is
 a worse trade.
 
+### A statement's identity is its accounts and period
+
+`source_document` carries two identities, and they answer different questions:
+
+| | Identifies | Answers |
+|---|---|---|
+| `sha256` | the **file** | "have I seen these exact bytes?" |
+| `statement_key` | the **statement** | "do I already hold this account's statement for this period?" |
+
+`statement_key` hashes `(doc_type, period_start, period_end, sorted account references)`
+and is unique per tenant. A bank issues one statement per account per period; that is the
+identity, and the file carrying it is not. PDFs get re-downloaded, re-saved, renamed and
+passed through tools that rewrite their metadata, and every one of those changes the bytes
+without changing a single transaction.
+
+**This matters most for shared accounts.** In a household where two members both have access
+to a joint account, both uploading its statement is the normal case. Keyed only on bytes,
+the second upload imported as a separate document whose every row then matched an existing
+`dedupe_key` and was skipped — leaving a document with balances attached and no
+transactions.
+
+Three outcomes now:
+
+- **Same bytes** → no-op, as before.
+- **Same statement, different bytes** → recognised as already held. Reported as
+  `same_statement`, no second document, no phantom balances.
+- **Same statement, different transactions** → **quarantined** as `conflicting_statement`.
+  That is a reissued or corrected statement, and choosing between two versions silently
+  would be a guess. The report says how they differ: how many rows each holds, and how many
+  are unique to each.
+
 ### Account resolution
 
 Accounts are upserted on `(institution, account_ref_masked, sub_account_label, currency)`,

@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import DOCUMENT_EXTENSIONS, Config
-from ..domain.dedupe import assign_seq, dedupe_key, sha256_file
+from ..domain.dedupe import assign_seq, dedupe_key, sha256_file, statement_key
 from ..domain.models import IngestOutcome, ParsedDocument
 from ..domain.normalise import normalise_counterparty, normalise_description
 from ..parsers import fingerprint as fingerprinting
@@ -219,8 +219,57 @@ def ingest_file(
             period_end=parsed.period_end,
         )
 
+    # Identity is the statement — one per account per period — not the file.
+    # A re-downloaded, re-saved or renamed PDF is the same statement, and in a
+    # household where two members both upload a shared account's statement it
+    # must be recognised as one rather than importing a second document whose
+    # every row then deduplicates away.
+    key = statement_key(
+        parsed.doc_type, parsed.period_start, parsed.period_end,
+        [a.account_ref_masked for a in parsed.accounts],
+    )
+    balances, txns = _to_records(parsed)
+
+    existing = repository.find_by_statement_key(context, key)
+    if existing is not None:
+        already = repository.dedupe_keys_for_document(context, existing["id"])
+        arriving = {t.dedupe_key for t in txns}
+        if already == arriving:
+            # The same statement arriving again. Nothing to add, and nothing
+            # wrong: this is the expected outcome for a shared account.
+            if drain:
+                _drain(path)
+            return IngestOutcome(
+                sha256=digest, path=str(path), status=STATUS_DUPLICATE,
+                reason="same_statement",
+                detail={"already_held_as": existing["source_relpath"]},
+            )
+        # Same account and period, different contents. That is a reissued or
+        # corrected statement, or a parse that disagrees with itself — either
+        # way something the operator should see rather than have resolved
+        # silently in one direction.
+        return fail(
+            "conflicting_statement",
+            "another document already holds this account's statement for this period, "
+            "with different transactions",
+            detail={
+                "adapter": adapter.name,
+                "already_held_as": existing["source_relpath"],
+                "already_held_sha256": existing["sha256"],
+                "transactions_here": len(arriving),
+                "transactions_there": len(already),
+                "only_here": len(arriving - already),
+                "only_there": len(already - arriving),
+            },
+            institution=parsed.institution,
+            doc_type=parsed.doc_type,
+            period_start=parsed.period_start,
+            period_end=parsed.period_end,
+        )
+
     record = DocumentRecord(
         sha256=digest,
+        statement_key=key,
         institution=parsed.institution,
         doc_type=parsed.doc_type,
         period_start=parsed.period_start,
@@ -234,7 +283,6 @@ def ingest_file(
         layout_fingerprint=layout,
         fetched_at=datetime.now(timezone.utc),
     )
-    balances, txns = _to_records(parsed)
     inserted = repository.insert_document(context, record, balances, txns)
 
     # The bytes are in the store and the rows are in the ledger; the inbox

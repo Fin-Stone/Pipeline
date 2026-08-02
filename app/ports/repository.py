@@ -76,6 +76,7 @@ class DocumentRecord:
     source_relpath: str
     parser_version: str | None = None
     layout_fingerprint: str | None = None
+    statement_key: str | None = None
     statement_date: date | None = None
     fetched_at: datetime | None = None
     fetch_method: str = "manual_upload"
@@ -147,6 +148,17 @@ class LedgerRepository(Protocol):
 
     def get_document_status(self, context: TenantContext, sha256: str) -> str | None:
         """Return a known document's parse_status, or None if unseen."""
+
+    def find_by_statement_key(self, context: TenantContext, statement_key: str) -> dict | None:
+        """Return the document already holding this statement, if any.
+
+        Identity is the statement — one per account per period — not the file,
+        so a re-download of the same statement finds its predecessor here.
+        """
+
+    def dedupe_keys_for_document(self, context: TenantContext, document_id: int) -> set[str]:
+        """The dedupe keys of a document's transactions, for comparing two
+        uploads that claim to be the same statement."""
 
     def list_documents(self, context: TenantContext, parse_status: str | None = None) -> list[dict]:
         """Documents for this tenant, optionally filtered by status."""

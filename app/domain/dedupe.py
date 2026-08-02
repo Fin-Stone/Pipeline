@@ -70,6 +70,33 @@ def keys_for(account_natural_key: str, txns: Sequence[ParsedTxn]) -> list[str]:
     ]
 
 
+def statement_key(doc_type: str, period_start, period_end, account_refs: Iterable[str]) -> str:
+    """Identify a *statement*, independent of the file that carried it.
+
+    A bank issues one statement per account per period. That is the identity,
+    and it is what should decide whether two uploads are the same statement —
+    not the bytes, which change whenever a PDF is re-downloaded, re-saved,
+    renamed or passed through anything that touches its metadata.
+
+    This matters most for shared accounts. In a household where two members
+    both diligently upload the joint account's statement, byte-level identity
+    catches only the case where they happen to have the identical file;
+    everything else used to import as a second document whose every row
+    deduplicated away, leaving balances attached to nothing.
+
+    Keyed on the account references rather than the file, so a re-download is
+    recognised as the same statement no matter what happened to it in between.
+    """
+    refs = "|".join(sorted(set(account_refs)))
+    payload = "\x1f".join([
+        doc_type,
+        period_start.isoformat() if period_start else "",
+        period_end.isoformat() if period_end else "",
+        refs,
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
