@@ -26,7 +26,7 @@ from . import base
 FINGERPRINTS = [
     # Observed on the June 2024 and July 2025 statements, which differ in
     # pocket count (1 vs 3) yet share this fingerprint.
-    "b66e89c6107cd76f458c225181d122f4ec23a0ab",
+    "b2c8a72eb6ccc84dd9bc44a3f3f99376f3f6e59f",
 ]
 
 _ACCOUNT_REF = re.compile(r"\b(\d{2}-\d{6,8}-\d)\b")

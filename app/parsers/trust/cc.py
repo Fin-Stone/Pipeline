@@ -27,8 +27,10 @@ from .. import pdfio
 from . import base
 
 FINGERPRINTS = [
-    # Observed on the July 2022 and June 2023 statements.
-    "0056e760e7b3821ec977ebbb6e9f198b5143c2d4",
+    # Observed on the July 2022 and June 2023 statements. Statements from 2025
+    # onward add a transaction-date column but keep the same header, so they
+    # share this fingerprint; see base._resolve_dates.
+    "8a34842de6ba5bab81cb13b67ec6f70ac82024dd",
 ]
 
 #: The card product, which is the account's stable identity. See the module

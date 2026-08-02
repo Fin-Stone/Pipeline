@@ -89,6 +89,36 @@ def resolve_period_date(text: str, period_start: date, period_end: date) -> date
     )
 
 
+#: How far before a statement period a transaction date may legitimately fall.
+#: Card statements routinely show a purchase made in the previous month that
+#: posted in this one. Generous enough for any posting lag, and far short of a
+#: year, so the "exactly one candidate" guarantee below still holds.
+DEFAULT_LOOKBACK_DAYS = 95
+
+
+def resolve_near_period(
+    text: str,
+    period_start: date,
+    period_end: date,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+) -> date:
+    """Resolve a year-less date that may fall shortly *before* the period.
+
+    Card statements print a transaction date alongside the posting date, and
+    the transaction routinely happened in the previous month — "29 Dec" on a
+    January statement is normal, not an error. The posting date must stay
+    inside the period and keeps using `resolve_period_date`; this is for the
+    secondary date only.
+
+    The same single-match rule applies, over a window widened backwards: a
+    lookback under a year cannot make a day-and-month ambiguous.
+    """
+    from datetime import timedelta
+
+    widened_start = period_start - timedelta(days=lookback_days)
+    return resolve_period_date(text, widened_start, period_end)
+
+
 def parse_period(text: str) -> tuple[date, date]:
     """Parse "1 Jul 2025 - 31 Jul 2025" into its two endpoints."""
     parts = re.split(r"\s+[-–—]\s+", text.strip())

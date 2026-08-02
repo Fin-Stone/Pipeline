@@ -10,12 +10,19 @@ acc.py and cc.py.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from ...domain.dates import DateParseError, parse_full_date, parse_period, resolve_period_date
+from ...domain.dates import (
+    DateParseError,
+    parse_full_date,
+    parse_period,
+    resolve_near_period,
+    resolve_period_date,
+)
 from ...domain.models import ParsedTxn
 from ...domain.money import AmountParseError, is_signed, parse_amount
 from ...ports.parser import ParseError
@@ -42,10 +49,22 @@ _SKIP = re.compile(
 )
 _HEADER = re.compile(r"Posting\s+date.*Description", re.IGNORECASE)
 _DAY_MONTH = re.compile(r"^\s*\d{1,2}\s+[A-Za-z]{3,9}\s*$")
+#: A single "01 Jun" anywhere in the date column. Newer statements print two.
+_DATE_TOKEN = re.compile(r"\d{1,2}\s+[A-Za-z]{3,9}")
 #: "1 USD = 1.3394 SGD"
 _FX_RATE = re.compile(r"^\s*1\s+([A-Z]{3})\s*=\s*([\d,]+\.?\d*)\s+([A-Z]{3})\s*$")
 
+log = logging.getLogger("finstone.parsers.trust")
+
 OPENING_LABEL = "previous balance"
+
+#: A description-only line this far *below* a row belongs to that row.
+#:
+#: Measured from the statements: a row's wrapped parts sit about 6pt from its
+#: dated line, the next row's lead-in about 13pt, and the row pitch is about
+#: 25pt. Anything past this threshold is treated as a lead-in for the row that
+#: follows, which is how foreign-currency rows print their merchant.
+CONTINUATION_GAP = 9.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +120,7 @@ def assemble_rows(lines: list[Line], bands: ColumnBands) -> list[Row]:
     """
     rows: list[Row] = []
     pending: list[str] = []
+    last_row_top: float | None = None
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -126,10 +146,16 @@ def assemble_rows(lines: list[Line], bands: ColumnBands) -> list[Row]:
         # and it is the single check that makes the row model safe: anything
         # the adapter cannot price is not a row.
         if not sgd_text:
-            # A dateless description above an amountless line belongs to the
-            # row that follows it — how foreign-currency rows are printed.
             if description and not date_text:
-                pending.append(description)
+                if rows and last_row_top is not None and 0 < line.top - last_row_top <= CONTINUATION_GAP:
+                    # A long merchant name wrapping under its own row. Without
+                    # this it would be held over and prepended to the *next*
+                    # row's description, corrupting both.
+                    rows[-1] = _with_extra_description(rows[-1], description)
+                else:
+                    # Further away: a description printed above the row it
+                    # belongs to, which is how foreign-currency rows print.
+                    pending.append(description)
             continue
 
         if pending:
@@ -137,6 +163,7 @@ def assemble_rows(lines: list[Line], bands: ColumnBands) -> list[Row]:
             pending = []
 
         rows.append(Row(line, date_text, description, fcy_text, sgd_text))
+        last_row_top = line.top
     return rows
 
 
@@ -152,13 +179,29 @@ def _with_rate(row: Row, match: re.Match) -> Row:
     )
 
 
+def _with_extra_description(row: Row, extra: str) -> Row:
+    return Row(
+        line=row.line,
+        date_text=row.date_text,
+        description=" ".join(part for part in (row.description, extra) if part).strip(),
+        fcy_text=row.fcy_text,
+        sgd_text=row.sgd_text,
+        fx_rate=row.fx_rate,
+        fx_rate_currency=row.fx_rate_currency,
+    )
+
+
 def is_section_title(line: Line, bands: ColumnBands) -> bool:
-    """A savings-pocket heading: text in the left column that is not a date."""
+    """A savings-pocket heading: text in the left column holding no date.
+
+    Tested by searching for a date rather than matching the whole cell, so a
+    two-date row is never mistaken for a heading.
+    """
     cells = bands.cells(line)
     if cells[SGD_COL] or cells[FCY_COL] or cells[DESC_COL]:
         return False
     text = cells[DATE_COL].strip()
-    return bool(text) and not _DAY_MONTH.match(text)
+    return bool(text) and not _DATE_TOKEN.search(text)
 
 
 def signed_amount(text: str) -> int:
@@ -211,10 +254,7 @@ def row_context(row: Row) -> dict:
 
 def build_txn(row: Row, period_start: date, period_end: date) -> ParsedTxn:
     context = row_context(row)
-    try:
-        posted = resolve_period_date(row.date_text, period_start, period_end)
-    except DateParseError as exc:
-        raise ParseError(str(exc), context={**context, "failed_on": "posting date"}) from exc
+    posted, value = _resolve_dates(row, period_start, period_end, context)
 
     fx_amount_minor = fx_currency = None
     if row.fcy_text:
@@ -234,6 +274,7 @@ def build_txn(row: Row, period_start: date, period_end: date) -> ParsedTxn:
 
     return ParsedTxn(
         posted_date=posted,
+        value_date=value,
         amount_minor=amount_minor,
         currency=BASE_CURRENCY,
         description_raw=row.description,
@@ -241,6 +282,52 @@ def build_txn(row: Row, period_start: date, period_end: date) -> ParsedTxn:
         fx_currency=fx_currency or row.fx_rate_currency,
         fx_rate=row.fx_rate,
     )
+
+
+def _resolve_dates(row: Row, period_start: date, period_end: date, context: dict) -> tuple[date, date | None]:
+    """Read the date column, which holds one date or two.
+
+    Statements up to 2023 printed a single "Posting date". Newer ones print
+    **transaction date then posting date** — the purchase happened on the
+    first, it hit the account on the second. Only the second is inside the
+    statement period, and only the second is what reconciliation and the
+    period check depend on, so the *last* date is always the posting date.
+
+    That ordering is Trust's format encoded as adapter knowledge. If it were
+    ever wrong, the posting date would fall outside the period and the
+    document would quarantine loudly rather than importing something subtly
+    misdated.
+    """
+    found = _DATE_TOKEN.findall(row.date_text or "")
+
+    if not found:
+        raise ParseError(
+            f"no date found in {row.date_text!r}",
+            context={**context, "failed_on": "posting date"},
+        )
+
+    try:
+        posted = resolve_period_date(found[-1], period_start, period_end)
+    except DateParseError as exc:
+        raise ParseError(str(exc), context={**context, "failed_on": "posting date"}) from exc
+
+    if len(found) < 2:
+        return posted, None
+
+    # The transaction date routinely precedes the period — a purchase on
+    # 29 Dec posting on 2 Jan is normal. Nothing in this phase reads
+    # value_date (not reconciliation, not the period check, not the dedupe
+    # key), so a date that will not resolve is recorded as absent rather than
+    # rejecting a document that otherwise reconciles to the cent.
+    try:
+        value = resolve_near_period(found[0], period_start, period_end)
+    except DateParseError as exc:
+        log.warning(
+            "could not resolve transaction date %r on %s: %s", found[0], row.line.location, exc
+        )
+        return posted, None
+
+    return posted, value
 
 
 def find_period(document: Document, label: str) -> tuple[date, date]:

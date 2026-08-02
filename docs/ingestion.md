@@ -255,6 +255,54 @@ difference between expected and stated is usually exactly one transaction:
 `--redact` masks letters and keeps digits, because amounts are the evidence and merchant
 names are not. Use it when pasting a failure from a real statement.
 
+### Layout drift, and what absorbs it
+
+Institutions change their statements. The design assumption is not that this can be
+prevented, but that it must never fail *silently* — the balance check is what guarantees
+that. Beyond it, drift falls into three tiers by how much work it costs:
+
+| Kind of change | Cost | Example seen so far |
+|---|---|---|
+| Anything derivable from the document | **None** | A column moving; a savings statement rendering a different number of pockets; a statement running to more pages |
+| Header wording, or the rendering tool | **One fingerprint to register** | A new marketing strapline in the header band |
+| A genuinely different table structure | **Adapter code** | Trust adding a transaction-date column beside the posting date in 2025 |
+
+Two rules keep as much as possible in the first tier:
+
+- **Derive geometry from the document.** `header_bands` reads the column x-positions off the
+  table's own header row, so a layout that shifts its columns costs nothing.
+- **Keep volatile things out of the fingerprint.** Amounts and dates are excluded by the
+  digit filter; the producer's *version* is stripped, because Trust renders through headless
+  Chromium and a browser upgrade (`Skia/PDF m80` to `m141`) was otherwise enough to
+  quarantine an unchanged statement.
+
+### Two date columns
+
+Trust statements up to 2023 print a single `Posting date`. From 2025 they print
+**transaction date then posting date** — the purchase happened on the first, it hit the
+account on the second.
+
+The adapter reads whichever it finds, so one code path serves both:
+
+- **The last date is always `posted_date`.** It is the one inside the statement period and
+  the one reconciliation depends on.
+- The first, where present, is `value_date`, resolved over a window widened ~95 days
+  backwards. A purchase on 29 December posting on 2 January is normal, not an error.
+- If the transaction date will not resolve, `value_date` is left null and a warning logged.
+  Nothing in this phase reads it — not reconciliation, not the period check, not the dedupe
+  key — so rejecting a document that otherwise reconciles to the cent would be
+  disproportionate. The posting date stays strict.
+
+### Descriptions that wrap
+
+A long merchant name is printed on its own line above or below its row, about 6pt away,
+against a row pitch of about 25pt. A line *above* belongs to the row that follows — that is
+how foreign-currency rows print their merchant. A line *below*, within
+`base.CONTINUATION_GAP`, belongs to the row it follows.
+
+Getting this wrong corrupts `description_norm`, which feeds `dedupe_key`, so it is a
+correctness issue and not only a cosmetic one.
+
 ### The CSV adapter contract
 
 A redacted sample dropped into `uploads/dummy/` is most useful when it preserves:

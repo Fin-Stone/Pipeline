@@ -102,6 +102,55 @@ class TestParseFailureReport:
         assert "failed on   posting date" in report
 
 
+class TestRedactionCoversEveryReportPath:
+    """`--redact` exists so a failure on a real statement is safe to paste.
+
+    A path that ignores it is worse than having no redaction at all, because
+    the flag implies a guarantee. The first version leaked filenames from the
+    unknown-layout report, which is how real statement names ended up in a
+    pasted failure report.
+    """
+
+    SENSITIVE = "2026 July Statement_1000000000000000004.pdf"
+
+    def test_parse_failure_masks_the_filename(self):
+        report = diagnostics.parse_failure_report(
+            filename=self.SENSITIVE, sha256="a" * 64, message="boom", redact=True,
+        )
+        assert self.SENSITIVE not in report
+        assert "Statement" not in report
+
+    def test_reconciliation_masks_the_filename(self):
+        report = diagnostics.reconciliation_report(
+            filename=self.SENSITIVE, sha256="a" * 64, adapter="t@1", failures=[], redact=True,
+        )
+        assert self.SENSITIVE not in report
+
+    def test_masking_keeps_digits_and_drops_letters(self):
+        """Amounts are the evidence a failure is diagnosed from; merchant and
+        file names are not."""
+        assert diagnostics.mask("Trust Bank 1,234.56") == "xxxxx xxxx 1,234.56"
+
+    def test_report_command_masks_every_filename(self, config, repository, context, blob_store, notifier, capsys):
+        from app.cli import cmd_report
+
+        write_pdf(config.inbox_dir / "dummy" / "MyBank_Statement.pdf",
+                  synthetic_statement([], closing="1,000.00"))
+        ingest_inbox(config, context, repository, blob_store, notifier, AdapterRegistry())
+
+        import app.cli as cli
+        original = cli.load_config
+        cli.load_config = lambda: config
+        try:
+            cmd_report(type("Args", (), {"redact": True})())
+            out = capsys.readouterr().out
+        finally:
+            cli.load_config = original
+
+        assert "MyBank" not in out and "Statement" not in out
+        assert "UNKNOWN LAYOUT" in out
+
+
 class TestQuarantineRecordsEnoughToDebug:
     def test_reconciliation_failure_records_the_parsed_rows(
         self, config, repository, context, blob_store, notifier

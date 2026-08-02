@@ -30,13 +30,25 @@ def _money(minor: int | None, *, width: int = 14) -> str:
     return f"{minor / 100:,.2f}".rjust(width)
 
 
-def _mask(text: str) -> str:
+def mask(text: str) -> str:
     """Keep shape, drop content: letters to x, digits kept (they are the evidence)."""
     return re.sub(r"[A-Za-z]", "x", text or "")
 
 
-def _describe(text: str, redact: bool) -> str:
-    return _mask(text) if redact else text
+def describe(text: str, redact: bool) -> str:
+    """Render a piece of text honouring the redaction flag.
+
+    Every path that prints document-derived text must go through this. Public
+    rather than private because the CLI is a legitimate caller: the leaks this
+    replaced were all places that formatted text directly and silently ignored
+    `--redact`.
+    """
+    return mask(text) if redact else text
+
+
+# Backwards-compatible aliases for existing internal callers.
+_mask = mask
+_describe = describe
 
 
 @dataclass(frozen=True, slots=True)

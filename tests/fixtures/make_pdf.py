@@ -120,3 +120,95 @@ def synthetic_statement(
         placements += [(HEADER_X, top, "30 Jun"), (DESC_X, top, "Closing balance"), (SGD_X + 22, top, closing)]
 
     return placements
+
+
+# --- The two-date layout newer statements use ------------------------------
+# Reproduced from the geometry in the failure reports: a transaction-date
+# column ahead of the posting date, rows on a ~24.7pt pitch, and wrapped
+# description parts sitting ~6pt from their own row.
+
+# The date column has to be wide enough for two dates, so this layout's
+# description and amount columns sit further right than the single-date one.
+TWO_DATE_X = 53.0
+POST_X = 110.0
+TWO_DESC_X = 200.0
+TWO_FCY_X = 380.0
+TWO_SGD_X = 470.0
+
+ROW_PITCH = 24.7
+WRAP_OFFSET = 6.0
+FIRST_ROW_TOP = 197.3
+
+
+def two_date_statement(
+    rows: list[tuple[str, str, str, str]],
+    *,
+    opening: tuple[str, str, str] = ("01 Jun", "01 Jun", "1,000.00"),
+    closing: tuple[str, str, str] | None = ("30 Jun", "30 Jun", "1,000.00"),
+    period: str = "1 Jun 2024 - 30 Jun 2024",
+    closing_label: str = "Total outstanding balance",
+    lead_ins: dict[int, str] | None = None,
+    continuations: dict[int, str] | None = None,
+) -> list[tuple[float, float, str]]:
+    """Build a statement whose table carries transaction *and* posting dates.
+
+    `rows` are (transaction date, posting date, description, amount).
+    `lead_ins` and `continuations` map a row index to text printed just above
+    or just below that row — how long merchant names and foreign-currency
+    details are actually laid out.
+    """
+    lead_ins = lead_ins or {}
+    continuations = continuations or {}
+
+    # Each element on its own baseline, well clear of the 4pt line-grouping
+    # tolerance: overlapping rows interleave by x and corrupt the text.
+    placements: list[tuple[float, float, str]] = [
+        (399.0, 64.0, "Test Bank Placeholder Limited"),
+        (TWO_DATE_X, 100.0, "TEST CUSTOMER"),
+        (313.0, 100.0, "Credit card statement"),
+        (315.0, 120.0, "Statement cycle"),
+        (408.0, 120.0, period),
+        (TWO_DATE_X, 145.0, "SYNTHETIC TEST STATEMENT"),
+    ]
+
+    top = 172.0
+    placements.append((TWO_DATE_X, top, "TRANSACTION DETAILS"))
+    top = 186.0
+    # Both date labels as one run: at 9pt "Transaction date" is wider than the
+    # gap to the posting-date column, so placing them separately would overlap.
+    placements += [
+        (TWO_DATE_X, top, "Transaction date Posting date"),
+        (TWO_DESC_X, top, "Description"),
+        (TWO_FCY_X, top, "Amount in FCY"),
+        (TWO_SGD_X, top, "Amount in SGD"),
+    ]
+
+    top = FIRST_ROW_TOP
+    txn_date, post_date, amount = opening
+    placements += [
+        (TWO_DATE_X, top, txn_date), (POST_X, top, post_date),
+        (TWO_DESC_X, top, "Previous balance"), (TWO_SGD_X + 22, top, amount),
+    ]
+    top += ROW_PITCH
+
+    for index, (txn_date, post_date, description, amount) in enumerate(rows):
+        if index in lead_ins:
+            placements.append((TWO_DESC_X, top - WRAP_OFFSET, lead_ins[index]))
+        placements += [
+            (TWO_DATE_X, top, txn_date), (POST_X, top, post_date),
+            (TWO_SGD_X + 22, top, amount),
+        ]
+        if description:
+            placements.append((TWO_DESC_X, top, description))
+        if index in continuations:
+            placements.append((TWO_DESC_X, top + WRAP_OFFSET, continuations[index]))
+        top += ROW_PITCH
+
+    if closing is not None:
+        txn_date, post_date, amount = closing
+        placements += [
+            (TWO_DATE_X, top, txn_date), (POST_X, top, post_date),
+            (TWO_DESC_X, top, closing_label), (TWO_SGD_X + 22, top, amount),
+        ]
+
+    return placements

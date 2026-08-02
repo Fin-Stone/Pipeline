@@ -200,7 +200,9 @@ def cmd_doctor(args) -> int:
         return 1
 
     layout = fingerprinting.fingerprint_pdf(document)
-    print(f"file        {path.name}")
+    # Filenames carry the institution and the statement month, so they are
+    # document-derived text and must honour --redact like everything else.
+    print(f"file        {diagnostics.describe(path.name, args.redact)}")
     print(f"sha256      {digest}")
     print(f"pages       {len(document.pages)}")
     print(f"producer    {document.producer or '(none)'}")
@@ -216,9 +218,13 @@ def cmd_doctor(args) -> int:
         print("This layout has no adapter, so the document would be quarantined.")
         print("To add one, put this fingerprint in the adapter's FINGERPRINTS list:\n")
         print(f"    {layout}\n")
+        # These are lines lifted straight off page 1. They usually contain only
+        # static layout labels, but a name or address line without digits in it
+        # would be included verbatim, so they are redacted like any other
+        # document text.
         print("Header lines the fingerprint was computed from:")
         for label in fingerprinting.describe(document)["label_lines"]:
-            print(f"    {label}")
+            print(f"    {diagnostics.describe(label, args.redact)}")
         return 1
 
     print(f"adapter     {adapter.name}@{adapter.version}\n")
@@ -319,7 +325,7 @@ def cmd_report(args) -> int:
             print(diagnostics.RULE)
             print("UNKNOWN LAYOUT")
             print(diagnostics.RULE)
-            print(f"file        {name}")
+            print(f"file        {diagnostics.describe(name, args.redact)}")
             print(f"layout      {detail.get('fingerprint')}")
             print(f"producer    {detail.get('producer') or '(none)'}")
             print("\nNo adapter is registered for this layout. Add the fingerprint above")

@@ -28,6 +28,12 @@ taste:
   to the top 35% took Trust card statements from 2 fingerprints to 1 and
   MariBank savings from 2 to 1, with no collisions between institutions.
 
+The producer string is included but **stripped of digits first**: Trust renders
+through headless Chromium, and a browser upgrade moved the producer from
+"Skia/PDF m80" to "Skia/PDF m141", which was enough to make an unchanged
+statement quarantine as a new layout. The tool is a useful signal; its version
+is not.
+
 Caveat worth knowing: a genuinely new digit-free header line — a new marketing
 strapline, say — produces a new fingerprint, which quarantines rather than
 importing. That is the intended loud, boring failure. Registering the new
@@ -48,7 +54,7 @@ _WS = re.compile(r"\s+")
 
 #: Fingerprint algorithm version. Bumping this invalidates every registered
 #: fingerprint, so it changes only when the algorithm itself does.
-ALGORITHM_VERSION = "2"
+ALGORITHM_VERSION = "3"
 
 #: Fraction of page 1 treated as the header band. Statement headers sit above
 #: the summary and transaction tables on every layout in the corpus; see the
@@ -60,6 +66,21 @@ def normalise_label(text: str) -> str:
     text = text.lower().replace("’", "'").replace(" ", " ")
     text = _PUNCT.sub(" ", text)
     return _WS.sub(" ", text).strip()
+
+
+def normalise_producer(text: str) -> str:
+    """Drop the version from a producer or creator string.
+
+    The tool that rendered a PDF is a useful layout signal; the *version* of
+    that tool is not. Trust renders statements through headless Chromium, so
+    the producer moved from "Skia/PDF m80" to "Skia/PDF m141" when they
+    upgraded — a browser upgrade, not a layout change, but enough to make an
+    otherwise identical statement fingerprint as a new layout and quarantine.
+
+    Stripping digits keeps the discriminating part ("Skia/PDF", "Streamline
+    PDFGen for OCBC Group") and discards the volatile part.
+    """
+    return _WS.sub(" ", re.sub(r"[\d.]+", "", text or "")).strip().lower()
 
 
 def label_lines(page: Page, band: float = HEADER_BAND_FRACTION) -> list[str]:
@@ -86,8 +107,8 @@ def fingerprint_pdf(document: Document) -> str:
     first = document.pages[0]
     payload = "\x1f".join([
         ALGORITHM_VERSION,
-        document.producer,
-        document.creator,
+        normalise_producer(document.producer),
+        normalise_producer(document.creator),
         f"{round(first.width)}x{round(first.height)}",
         "\x1e".join(label_lines(first)),
     ])
@@ -102,6 +123,7 @@ def describe(document: Document) -> dict:
         "algorithm_version": ALGORITHM_VERSION,
         "producer": document.producer,
         "creator": document.creator,
+        "producer_normalised": normalise_producer(document.producer),
         "pages": len(document.pages),
         "page_size": f"{round(first.width)}x{round(first.height)}" if first else None,
         "label_lines": label_lines(first) if first else [],
