@@ -19,15 +19,25 @@ from pathlib import Path
 from ...domain.models import DEPOSIT, DOC_TYPE_ACCOUNT, ParsedAccount, ParsedDocument
 from ...ports.parser import ParseError
 from .. import pdfio
+from ..fingerprint import LayoutSignature
 from . import base
 
-#: Layout fingerprints this adapter handles. Trust reflows its header between
-#: years without changing the table, so several may map here over time.
-FINGERPRINTS = [
-    # Observed on the June 2024 and July 2025 statements, which differ in
-    # pocket count (1 vs 3) yet share this fingerprint.
-    "b2c8a72eb6ccc84dd9bc44a3f3f99376f3f6e59f",
-]
+#: What identifies a Trust savings statement.
+#:
+#: Both lines are Trust's own words — the bank naming itself and the statement
+#: naming itself. Deliberately nothing customer-specific: the name and address
+#: also appear in the header band, and routing on them would mean a change of
+#: address broke the adapter. Verified against the June 2024 and July 2025
+#: statements, which differ in pocket count, and the July 2026 one, which has a
+#: different address and a newer Chromium.
+SIGNATURE = LayoutSignature(
+    producer="skia/pdf m",
+    requires=(
+        "trust bank singapore limited",
+        "your savings account by trust statement is ready",
+    ),
+    page_size=(595, 842),
+)
 
 _ACCOUNT_REF = re.compile(r"\b(\d{2}-\d{6,8}-\d)\b")
 _CLOSING_LABEL = "closing balance"

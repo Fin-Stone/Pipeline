@@ -1,8 +1,22 @@
-"""Layout fingerprinting.
+"""Layout identification.
+
+Two things live here, and they do different jobs:
+
+- **`LayoutSignature` routes documents to adapters.** An adapter declares the
+  header lines that identify its format; a document matches when it contains
+  all of them.
+- **`fingerprint_pdf` records what a document looked like.** It is stored on
+  `source_document` and printed in failure reports, so a layout can be talked
+  about precisely. It no longer decides anything.
+
+Routing used to be the fingerprint, compared exactly. That was too brittle,
+for reasons found in production rather than anticipated — see
+`LayoutSignature` — and, worse, it made routing depend on the customer's name
+and address.
 
 A fingerprint identifies a *layout*, not a document. Two statements from the
-same institution in different months must fingerprint identically; a statement
-whose layout has actually changed must not.
+same institution in different months should fingerprint identically; a
+statement whose layout has actually changed should not.
 
 Architecture §2.3 suggests hashing page-1 header text, column x-positions and
 producer metadata. Column positions turned out to be unusable for this corpus:
@@ -45,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 
 from .pdfio import Document, Page
 
@@ -113,6 +128,73 @@ def fingerprint_pdf(document: Document) -> str:
         "\x1e".join(label_lines(first)),
     ])
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+#: Page dimensions this far apart are the same paper size. Chromium's renderer
+#: moved A4 from 595x842 to 596x843 between versions.
+PAGE_TOLERANCE = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class LayoutSignature:
+    """What an adapter asserts a document of its layout must contain.
+
+    Routing used to be an exact hash of the header band, which broke twice in
+    production for reasons that had nothing to do with the layout:
+
+    - the producer version moved with a browser upgrade;
+    - the customer's address changed, and a street name with no digits in it
+      passes the digit filter that excludes every other piece of personal data.
+
+    That second one is the important one. Under exact matching, **every**
+    fingerprint in the corpus included the customer's name, so layout identity
+    depended on who the customer was and where they lived — personal data
+    determining routing, and stored in the ledger.
+
+    A signature instead names the handful of lines that identify the *format*:
+    the bank's own name, the statement's own title. A document matches when it
+    contains all of them. Extra lines — an address, a new marketing strapline,
+    a name — are ignored, because they were never evidence of the layout.
+
+    This is not guessing. The required lines are asserted deliberately by
+    whoever writes the adapter, an ambiguous match is an error rather than a
+    coin toss, and the balance check remains the backstop that makes a wrong
+    match loud instead of silent.
+    """
+
+    #: Normalised producer. Empty means "do not test", for issuers that ship no
+    #: metadata at all.
+    producer: str = ""
+    #: Header lines that must all be present, already normalised.
+    requires: tuple[str, ...] = ()
+    #: Expected page size, compared within PAGE_TOLERANCE. None means any.
+    page_size: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.requires:
+            raise ValueError("a layout signature must require at least one header line")
+
+    def matches(self, document: Document) -> bool:
+        if not document.pages:
+            return False
+        first = document.pages[0]
+
+        if self.producer and normalise_producer(document.producer) != self.producer:
+            return False
+
+        if self.page_size is not None:
+            width, height = self.page_size
+            if abs(first.width - width) > PAGE_TOLERANCE or abs(first.height - height) > PAGE_TOLERANCE:
+                return False
+
+        return set(self.requires).issubset(set(label_lines(first)))
+
+    def missing_from(self, document: Document) -> list[str]:
+        """Which required lines a document lacks — the useful half of a failure."""
+        if not document.pages:
+            return list(self.requires)
+        present = set(label_lines(document.pages[0]))
+        return [line for line in self.requires if line not in present]
 
 
 def describe(document: Document) -> dict:

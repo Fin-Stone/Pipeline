@@ -15,7 +15,7 @@ from app.pipeline import diagnostics
 from app.pipeline.ingest import ingest_inbox
 from app.pipeline.quarantine import REASON_SUFFIX
 
-from .fixtures.make_pdf import synthetic_statement, write_pdf
+from .fixtures.make_pdf import synthetic_signature, synthetic_statement, write_pdf
 from .test_pipeline import SyntheticAdapter
 
 from app.parsers import fingerprint as fingerprinting
@@ -23,9 +23,9 @@ from app.parsers import pdfio
 from app.parsers.registry import AdapterRegistry
 
 
-def _registry_for(path):
+def _registry_for(path=None):
     registry = AdapterRegistry()
-    registry.register(SyntheticAdapter(), [fingerprinting.fingerprint_pdf(pdfio.load(path))])
+    registry.register(SyntheticAdapter(), synthetic_signature())
     return registry
 
 

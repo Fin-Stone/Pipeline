@@ -67,12 +67,27 @@ class TestTrustSavings:
         assert account.closing_balance_minor == 400000
         assert account.opening_balance_minor + sum(t.amount_minor for t in account.txns) == 400000
 
-    def test_both_years_share_one_fingerprint(self, dummy_root):
+    def test_both_years_route_to_the_same_adapter(self, dummy_root):
         """Layout identity must survive a change in pocket count (1 vs 3)."""
-        a = fingerprinting.fingerprint_pdf(pdfio.load(_require(dummy_root, TRUST_ACC_2024)))
-        b = fingerprinting.fingerprint_pdf(pdfio.load(_require(dummy_root, TRUST_ACC_2025)))
-        assert a == b
-        assert build_default_registry().resolve(a).name == "trust.acc"
+        registry = build_default_registry()
+        for relpath in (TRUST_ACC_2024, TRUST_ACC_2025):
+            document = pdfio.load(_require(dummy_root, relpath))
+            assert registry.resolve(document).name == "trust.acc"
+
+    def test_routing_does_not_depend_on_customer_data(self, dummy_root):
+        """The signature must name only the bank's own words. Requiring a name
+        or an address would mean moving house broke the adapter — and would put
+        personal data in the routing table."""
+        from app.parsers.trust.acc import SIGNATURE
+
+        document = pdfio.load(_require(dummy_root, TRUST_ACC_2025))
+        labels = set(fingerprinting.label_lines(document.pages[0]))
+        customer_lines = labels - set(SIGNATURE.requires)
+
+        assert SIGNATURE.matches(document)
+        # There is customer text in the header band, and none of it is required.
+        assert customer_lines
+        assert not any("example" in line for line in SIGNATURE.requires)
 
 
 class TestTrustCard:
@@ -135,4 +150,4 @@ class TestUnregisteredLayouts:
         document = pdfio.load(_require(dummy_root, relpath))
         assert document.pages
         with pytest.raises(UnknownLayout):
-            build_default_registry().resolve(fingerprinting.fingerprint_pdf(document))
+            build_default_registry().resolve(document)

@@ -15,7 +15,7 @@ import pytest
 from app.domain.models import DEPOSIT, DOC_TYPE_ACCOUNT, ParsedAccount, ParsedDocument, ParsedTxn
 from app.parsers import fingerprint as fingerprinting
 from app.parsers import pdfio
-from app.parsers.registry import AdapterRegistry, UnknownLayout
+from app.parsers.registry import AdapterRegistry, AmbiguousLayout, UnknownLayout
 from app.pipeline.ingest import ingest_inbox, reparse
 from app.pipeline.quarantine import REASON_SUFFIX
 from app.pipeline.stage import stage
@@ -23,7 +23,7 @@ from app.pipeline.validate import validate
 from app.ports.parser import ParseError
 from app.ports.repository import STATUS_IMPORTED, STATUS_IMPORTED_UNVERIFIED
 
-from .fixtures.make_pdf import synthetic_statement, write_pdf
+from .fixtures.make_pdf import synthetic_signature, synthetic_statement, write_pdf
 
 
 def _statement_pdf(path: Path, rows, *, opening="1,000.00", closing="1,000.00", **kwargs) -> Path:
@@ -76,9 +76,9 @@ class SyntheticAdapter:
 
 @pytest.fixture
 def registry_for(config):
-    def build(path: Path) -> AdapterRegistry:
+    def build(path: Path | None = None) -> AdapterRegistry:
         registry = AdapterRegistry()
-        registry.register(SyntheticAdapter(), [fingerprinting.fingerprint_pdf(pdfio.load(path))])
+        registry.register(SyntheticAdapter(), synthetic_signature())
         return registry
     return build
 
@@ -296,9 +296,7 @@ class TestReparse:
             opening="1,000.00", closing="3,000.00",
         )
         registry_with_adapter = AdapterRegistry()
-        registry_with_adapter.register(
-            SyntheticAdapter(), [fingerprinting.fingerprint_pdf(pdfio.load(path))]
-        )
+        registry_with_adapter.register(SyntheticAdapter(), synthetic_signature())
         # Ingest with an empty registry so it quarantines as an unknown layout.
         _run(config, context, repository, blob_store, notifier, AdapterRegistry())
         return registry_with_adapter
@@ -406,19 +404,51 @@ class TestValidation:
 
 
 class TestRegistry:
-    def test_many_fingerprints_may_map_to_one_adapter(self):
+    """Routing matches on the header lines an adapter declares, not on an
+    exact hash of everything in the header band."""
+
+    def _document(self, tmp_path, **kwargs):
+        path = _statement_pdf(tmp_path / "s.pdf", [], closing="1,000.00", **kwargs)
+        return pdfio.load(path)
+
+    def test_a_declared_layout_is_matched(self, tmp_path):
         registry = AdapterRegistry()
         adapter = SyntheticAdapter()
-        registry.register(adapter, ["a" * 40, "b" * 40])
-        assert registry.resolve("a" * 40) is adapter
-        assert registry.resolve("b" * 40) is adapter
+        registry.register(adapter, synthetic_signature())
+        assert registry.resolve(self._document(tmp_path)) is adapter
 
-    def test_two_adapters_cannot_claim_one_layout(self):
+    def test_extra_header_lines_do_not_break_matching(self, tmp_path):
+        """The real failure this replaced: a customer moving house added
+        'EXAMPLE ROAD' to the header band and invalidated the layout."""
         registry = AdapterRegistry()
-        registry.register(SyntheticAdapter(), ["a" * 40])
-        with pytest.raises(ValueError, match="already registered"):
-            registry.register(SyntheticAdapter(), ["a" * 40])
+        registry.register(SyntheticAdapter(), synthetic_signature())
+        moved = self._document(tmp_path, extra_header="EXAMPLE ROAD")
+        assert registry.resolve(moved).name == "test.synthetic"
 
-    def test_unknown_fingerprint_raises(self):
+    def test_a_missing_required_line_does_not_match(self, tmp_path):
+        registry = AdapterRegistry()
+        registry.register(SyntheticAdapter(), synthetic_signature())
         with pytest.raises(UnknownLayout):
-            AdapterRegistry().resolve("f" * 40)
+            registry.resolve(self._document(tmp_path, strapline="SOMETHING ELSE ENTIRELY"))
+
+    def test_two_adapters_claiming_one_document_is_an_error(self, tmp_path):
+        """Never a coin toss: if two signatures both match, they are wrong and
+        that needs fixing rather than one winning arbitrarily."""
+        registry = AdapterRegistry()
+        registry.register(SyntheticAdapter(), synthetic_signature())
+        registry.register(SyntheticAdapter(), synthetic_signature())
+        with pytest.raises(AmbiguousLayout):
+            registry.resolve(self._document(tmp_path))
+
+    def test_explain_names_the_missing_line(self, tmp_path):
+        """A routing failure has to say *why*, or every one needs the file."""
+        registry = AdapterRegistry()
+        registry.register(SyntheticAdapter(), synthetic_signature())
+        candidates = registry.explain(self._document(tmp_path, strapline="SOMETHING ELSE"))
+        assert candidates[0]["matches"] is False
+        assert "synthetic test statement" in candidates[0]["missing"]
+
+    def test_a_signature_must_require_something(self):
+        from app.parsers.fingerprint import LayoutSignature
+        with pytest.raises(ValueError):
+            LayoutSignature(requires=())

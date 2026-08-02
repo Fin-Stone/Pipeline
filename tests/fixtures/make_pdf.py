@@ -16,6 +16,16 @@ from pathlib import Path
 PAGE_WIDTH = 595
 PAGE_HEIGHT = 842
 
+#: Header lines both synthetic layouts carry, and what an adapter for them
+#: declares. Deliberately the placeholder bank's own words: nothing here is
+#: customer data, which is the property real signatures must also have.
+SYNTHETIC_REQUIRES = ("test bank placeholder limited", "synthetic test statement")
+
+
+def synthetic_signature():
+    from app.parsers.fingerprint import LayoutSignature
+    return LayoutSignature(requires=SYNTHETIC_REQUIRES, page_size=(PAGE_WIDTH, PAGE_HEIGHT))
+
 
 def _escape(text: str) -> str:
     return text.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
@@ -78,6 +88,7 @@ def synthetic_statement(
     account_ref: str = "01-1234567-8",
     pocket: str = "Main Account",
     strapline: str = "SYNTHETIC TEST STATEMENT",
+    extra_header: str | None = None,
 ) -> list[tuple[float, float, str]]:
     """Build placements for a one-pocket statement.
 
@@ -96,6 +107,10 @@ def synthetic_statement(
         (HEADER_X, 250.0, strapline),
         (HEADER_X, 128.0 + 800.0, ""),  # keeps the page tall enough
     ]
+    if extra_header is not None:
+        # An additional digit-free line in the header band — a street name, a
+        # new marketing line. Exactly what used to invalidate a layout.
+        placements.append((HEADER_X, 200.0, extra_header))
 
     top = 400.0
     placements.append((HEADER_X, top, "TRANSACTION DETAILS"))

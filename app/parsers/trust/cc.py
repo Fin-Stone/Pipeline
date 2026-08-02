@@ -24,14 +24,22 @@ from pathlib import Path
 from ...domain.models import CARD, DOC_TYPE_CARD, ParsedAccount, ParsedDocument
 from ...ports.parser import ParseError
 from .. import pdfio
+from ..fingerprint import LayoutSignature
 from . import base
 
-FINGERPRINTS = [
-    # Observed on the July 2022 and June 2023 statements. Statements from 2025
-    # onward add a transaction-date column but keep the same header, so they
-    # share this fingerprint; see base._resolve_dates.
-    "8a34842de6ba5bab81cb13b67ec6f70ac82024dd",
-]
+#: What identifies a Trust credit card statement.
+#:
+#: The strapline is what separates a card statement from a savings one, so it
+#: carries the discrimination. Nothing customer-specific is required; see
+#: acc.py for why.
+SIGNATURE = LayoutSignature(
+    producer="skia/pdf m",
+    requires=(
+        "trust bank singapore limited",
+        "hello your trust credit card statement is ready",
+    ),
+    page_size=(595, 842),
+)
 
 #: The card product, which is the account's stable identity. See the module
 #: docstring for why this is not a card number.

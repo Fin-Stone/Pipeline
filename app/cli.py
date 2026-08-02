@@ -98,18 +98,34 @@ def _print_summary(summary) -> None:
 
 
 def cmd_fingerprint(args) -> int:
+    """Show how a document is identified, and which adapter claims it."""
+    from .pipeline import diagnostics
+
     path = Path(args.path)
     config = load_config()
     document = pdfio.load(path, password=config.pdf_password_for(path.parent.name))
-    described = fingerprinting.describe(document)
     registry = build_default_registry()
-    known = registry.known_fingerprints()
-    described["registered_adapter"] = known.get(described["fingerprint"])
+
+    described = fingerprinting.describe(document)
+    if args.redact:
+        # Header lines are lifted straight off page 1 and routinely contain the
+        # customer's name and address, which is exactly why they no longer
+        # decide routing.
+        described["label_lines"] = [
+            diagnostics.describe(line, True) for line in described["label_lines"]
+        ]
+    try:
+        described["routes_to"] = registry.resolve(document).name
+    except Exception as exc:
+        described["routes_to"] = None
+        described["why_not"] = str(exc)
+    described["candidates"] = registry.explain(document)
+
     print(json.dumps(described, indent=2, ensure_ascii=False))
-    if described["registered_adapter"] is None:
+    if described["routes_to"] is None:
         print(
-            "\nNo adapter is registered for this layout. Add the fingerprint above to the "
-            "FINGERPRINTS list of the matching adapter.",
+            "\nNo adapter claims this document. `candidates` lists what each one "
+            "required and did not find.",
             file=sys.stderr,
         )
     return 0
@@ -168,8 +184,15 @@ def cmd_reparse(args) -> int:
 
 
 def cmd_adapters(args) -> int:
-    for fp, name in build_default_registry().known_fingerprints().items():
-        print(f"{fp}  {name}")
+    """List what each adapter claims, so routing is inspectable."""
+    for registration in build_default_registry().registrations():
+        signature = registration.signature
+        print(f"{registration.adapter.name}@{registration.adapter.version}")
+        print(f"  producer   {signature.producer or '(any)'}")
+        size = signature.page_size
+        print(f"  page size  {f'{size[0]:.0f}x{size[1]:.0f}' if size else '(any)'}")
+        print("  requires   " + "\n             ".join(signature.requires))
+        print()
     return 0
 
 
@@ -209,22 +232,29 @@ def cmd_doctor(args) -> int:
     print(f"layout      {layout}")
 
     try:
-        adapter = registry.resolve(layout)
-    except Exception:
-        print("adapter     NONE REGISTERED\n")
+        adapter = registry.resolve(document)
+    except Exception as exc:
+        print("adapter     NONE\n")
         print(diagnostics.RULE)
-        print("UNKNOWN LAYOUT")
+        print("UNROUTABLE")
         print(diagnostics.RULE)
-        print("This layout has no adapter, so the document would be quarantined.")
-        print("To add one, put this fingerprint in the adapter's FINGERPRINTS list:\n")
-        print(f"    {layout}\n")
-        # These are lines lifted straight off page 1. They usually contain only
-        # static layout labels, but a name or address line without digits in it
-        # would be included verbatim, so they are redacted like any other
-        # document text.
-        print("Header lines the fingerprint was computed from:")
+        print(f"{exc}\n")
+        print("This document would be quarantined. Each adapter below shows what it")
+        print("required and did not find:\n")
+        for candidate in registry.explain(document):
+            print(f"  {candidate['adapter']}")
+            print(f"    expects producer  {candidate['expects_producer']}  "
+                  f"(this document: {fingerprinting.normalise_producer(document.producer) or '(none)'})")
+            for missing in candidate["missing"]:
+                print(f"    missing line      {diagnostics.describe(missing, args.redact)}")
+        # Lifted straight off page 1, so routinely containing the customer's
+        # name and address — which is exactly why they no longer decide
+        # routing, and why they are redacted here.
+        print("\nHeader lines this document actually carries:")
         for label in fingerprinting.describe(document)["label_lines"]:
             print(f"    {diagnostics.describe(label, args.redact)}")
+        print("\nTo add an adapter, pick the lines above that are the *bank's* words —")
+        print("never the customer's — and declare them as its LayoutSignature.")
         return 1
 
     print(f"adapter     {adapter.name}@{adapter.version}\n")
@@ -371,8 +401,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.set_defaults(func=cmd_run)
 
-    p = sub.add_parser("fingerprint", help="print a document's layout fingerprint")
+    p = sub.add_parser("fingerprint", help="show how a document is identified and routed")
     p.add_argument("path")
+    p.add_argument("--redact", action="store_true", help="mask header lines before printing")
     p.set_defaults(func=cmd_fingerprint)
 
     p = sub.add_parser("status", help="ledger and quarantine counts")

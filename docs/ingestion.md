@@ -170,55 +170,61 @@ describing a failure that has since been fixed. The stored bytes are never touch
 
 ---
 
-## 4. Fingerprinting and the adapter registry
+## 4. Routing to an adapter
 
-One adapter per `(institution, doc_type, layout_version)`, routed by fingerprint.
+One adapter per `(institution, doc_type, layout)`. An adapter declares a
+**`LayoutSignature`** — the header lines that identify its format — and a document routes to
+it when it contains all of them.
 
-**The fingerprint is `sha1` over the producer, the creator, the page size, and the
-digit-free lines in the top 35% of page 1.** Architecture §2.3 suggested header text plus
-column x-positions; both were measured against the real corpus and rejected:
+```python
+SIGNATURE = LayoutSignature(
+    producer="skia/pdf m",
+    requires=(
+        "trust bank singapore limited",
+        "your savings account by trust statement is ready",
+    ),
+    page_size=(595, 842),
+)
+```
 
-- **Column x-positions are not stable.** A Trust savings statement renders one summary row
-  per pocket, so adding a pocket shifts the geometry without changing the layout.
-- **Raw page-1 text is not stable either** — it contains the balances themselves, so every
-  month is a new fingerprint.
-- **Whole-page digit-free text is still not stable**, because statements whose transaction
-  descriptions render on their own line leak those descriptions into the label set.
+Matching is a **subset** test, not equality: extra lines are ignored. That is the whole
+point, and it was arrived at the hard way.
 
-Filtering to digit-free lines removes everything carrying data (amounts, dates, account
-numbers, addresses, page numbers all contain digits), and banding to the header removes
-transaction text. Measured over the corpus, that took Trust card statements from two
-fingerprints to one and MariBank savings from two to one, with no collisions between
-institutions — eight distinct fingerprints across eleven documents, exactly one per
-`(institution, doc_type)` except one issuer whose layout genuinely changed between 2025 and
-2026.
+### Why not an exact fingerprint
 
-A new digit-free header line — a new marketing strapline — will produce a new fingerprint
-and quarantine the document. That is the intended loud, boring failure, and the registry
-maps many fingerprints onto one adapter so registering the variant is a one-line change.
+Routing was originally an exact hash of the header band. It broke twice in production, both
+times for reasons that had nothing to do with any layout:
 
-### Unknown fingerprint is a loud, boring failure
+1. **The producer version moved.** Trust renders through headless Chromium, and an upgrade
+   took `Skia/PDF m80` to `Skia/PDF m141`. Producer version digits are now stripped.
+2. **The customer moved house.** The header band excludes data by dropping any line
+   containing a digit — which caught `Block 000`, `EXAMPLE AVENUE 2` and
+   `Singapore 000000`, but not a street name with no number in it. A new address line
+   appeared, and an otherwise identical statement quarantined.
 
-This is the single most important behaviour in the routing layer. A statement whose layout
-has changed must quarantine and notify — never fall through to a "best effort" or
-"close enough" adapter. Silent corruption of the ledger is far worse than a failed import,
-because a failed import is visible today and a corrupted ledger is discovered years later.
+The second one exposed something worse than brittleness: **every fingerprint in the corpus
+contained the customer's name.** Layout identity depended on who the customer was and where
+they lived, and that identity was stored in the ledger.
 
-### Adding an adapter
+A signature fixes both by naming only what the *bank* says about its own format. A change of
+address, a new marketing line, a renamed customer — none of them touch routing.
 
-Additive. No refactor, no changes to pipeline code.
+### What is still a loud failure
 
-1. Drop a redacted sample into `uploads/dummy/`.
-2. Run `finstone fingerprint <path>` to print the fingerprint and whether anything currently
-   matches it.
-3. Write the adapter class in `app/parsers/csv/` or `app/parsers/pdf/` and register it
-   against that fingerprint.
-4. Add a small fixture to `tests/fixtures/` so the layout is covered by the test suite from
-   birth.
+- **No adapter claims the document → quarantine.** Never a nearest match.
+- **More than one claims it → error.** If two signatures both match, they are not distinct
+  enough; picking a winner would be a guess. Fixing the signatures is the answer.
 
-**There are currently zero registered real-bank layouts.** Until redacted samples exist,
-every real statement will quarantine on step 3 of `ingest` — which is the designed and
-correct behaviour, not a bug.
+Writing a signature is a judgement call by whoever adds the adapter, and a wrong one is
+caught by the balance check rather than silently importing. `finstone doctor <path> --redact`
+prints exactly what each adapter required and did not find, plus the lines the document does
+carry, so a new layout can be added from a pasted report.
+
+### The fingerprint still exists
+
+`fingerprint_pdf` is retained as a *record* — stored on `source_document.layout_fingerprint`
+and printed in failure reports so a layout can be referred to precisely. It no longer decides
+anything.
 
 ### Debugging a failure without the statement
 

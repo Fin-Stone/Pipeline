@@ -32,7 +32,7 @@ from ..domain.models import IngestOutcome, ParsedDocument
 from ..domain.normalise import normalise_counterparty, normalise_description
 from ..parsers import fingerprint as fingerprinting
 from ..parsers import pdfio
-from ..parsers.registry import AdapterRegistry, UnknownLayout, build_default_registry
+from ..parsers.registry import AdapterRegistry, AmbiguousLayout, LayoutError, build_default_registry
 from ..ports.notifier import SEVERITY_ERROR, SEVERITY_WARNING
 from ..ports.parser import ParseError
 from ..ports.repository import (
@@ -148,14 +148,16 @@ def ingest_file(
         return fail("fingerprint_failed", f"cannot fingerprint {path.name}", error=exc)
 
     try:
-        adapter = registry.resolve(layout)
-    except UnknownLayout as exc:
-        # The designed outcome for a layout nobody has written an adapter for.
-        # The fingerprint is recorded so registering it is a one-line change.
+        adapter = registry.resolve(document)
+    except LayoutError as exc:
+        # The designed outcome for a document no adapter claims — or one that
+        # several claim, which means the signatures are wrong and picking a
+        # winner would be a guess. `explain` records which required line each
+        # adapter was missing, which is the actionable half of the failure.
         return fail(
-            "unknown_layout",
-            f"no adapter registered for layout {layout}",
-            detail=fingerprinting.describe(document),
+            "ambiguous_layout" if isinstance(exc, AmbiguousLayout) else "unknown_layout",
+            str(exc),
+            detail={**fingerprinting.describe(document), "candidates": registry.explain(document)},
             error=exc,
         )
 
