@@ -53,9 +53,13 @@ DATE_COL = "date"
 DESC_COL = "description"
 AMOUNT_COL = "amount"
 
-#: An amount, with the credit marker OCBC prints after it.
-_AMOUNT_IN_CELL = re.compile(r"[\d,]*\d\.\d{2}(?:\s*CR)?", re.IGNORECASE)
+#: An amount, with either marker OCBC uses for a credit: a CR suffix, or
+#: accounting parentheses around the figure.
+_AMOUNT_IN_CELL = re.compile(r"\(?[\d,]*\d\.\d{2}\)?(?:\s*CR)?", re.IGNORECASE)
 _IS_CREDIT = re.compile(r"\bCR\b", re.IGNORECASE)
+
+#: What a transaction row's date cell looks like: day and month, no year.
+_ROW_DATE = re.compile(r"^\d{1,2}[/-]\d{1,2}$")
 
 _HEADER = re.compile(r"\bTRANSACTION\s+DATE\b.*\bDESCRIPTION\b.*\bAMOUNT\b", re.IGNORECASE)
 _STATEMENT_DATE = re.compile(r"^\s*(\d{2}-\d{2}-\d{4})\b")
@@ -66,7 +70,8 @@ _SUBTOTAL = re.compile(r"^sub\s*-?\s*total\b", re.IGNORECASE)
 _TOTAL = re.compile(r"^total\b(?!\s+amount\s+due)", re.IGNORECASE)
 
 #: A card section opens with its product name; the holder and number follow.
-_CARD_NUMBER = re.compile(r"\b(?:\d{4}[- ]){3}\d{4}\b")
+#: Digits may be masked, and statements differ about how.
+_CARD_NUMBER = re.compile(r"\b(?:[\dX*]{4}[- ]){3}[\dX*]{4}\b", re.IGNORECASE)
 
 #: Where the table stops. Everything past it is prose and mirrored furniture.
 _SECTION_END = re.compile(r"^\s*(NEWS & INFORMATION|IMPORTANT NOTICE)", re.IGNORECASE)
@@ -138,12 +143,13 @@ class OcbcCardAdapter:
         sections: dict[str, dict] = {}
         current = None
 
-        for line in self._table_lines(document):
+        lines = self._table_lines(document)
+        for index, line in enumerate(lines):
             text = line.text.strip()
             if _SKIP.match(text):
                 continue
 
-            product = self._product(line, spec)
+            product = self._product(line, lines[index + 1:index + 3])
             if product is not None:
                 current = sections.setdefault(
                     product, {"opening": None, "closing": None, "rows": []}
@@ -172,16 +178,23 @@ class OcbcCardAdapter:
         return [self._build(name, s, spec, period_start, period_end)
                 for name, s in sections.items()]
 
-    def _product(self, line, spec) -> str | None:
-        """A card section's opening line: its product name, alone.
+    def _product(self, line, following) -> str | None:
+        """A card section's opening line: its product name.
 
-        Recognised by what it is not — it carries no amount, no date and no
-        card number, and sits flush at the description's left edge.
+        Identified by what comes *after* it — the cardholder and card number,
+        which OCBC always prints directly beneath a product. Recognising it by
+        its own shape instead is not enough: a statement long enough to run
+        past page one repeats the bank's address block inside the table, and
+        "1800 363 3333" is as capitalised-and-numeric as a card name is. It
+        became a card section with no balances, and the real card's balances
+        then attached to the phone number instead.
         """
         text = line.text.strip()
         if not text or _CARD_NUMBER.search(text) or _AMOUNT_IN_CELL.search(text):
             return None
         if not re.match(r"^[A-Z0-9][A-Z0-9 &'/.-]{4,}$", text):
+            return None
+        if not any(_CARD_NUMBER.search(nxt.text) for nxt in following):
             return None
         return " ".join(text.split()).title()
 
@@ -218,6 +231,13 @@ class OcbcCardAdapter:
 
         column, text = amounts[0]
         date_text = row.cell(DATE_COL)
+        if not _ROW_DATE.match(date_text.strip()):
+            # Not a transaction. A statement running past one page repeats the
+            # bank's contact block inside the table, and "Phone Banking" landed
+            # in the date column of a line that happened to carry a figure.
+            # Anything genuinely dropped here still has to reconcile, and the
+            # balance check is what says so.
+            return None
         try:
             # Widened backwards: OCBC prints no period, so the month before the
             # statement date is only a guess at where the cycle opened. A
@@ -233,13 +253,16 @@ class OcbcCardAdapter:
             }) from exc
 
         minor = _to_minor(text, row.line)
-        # CR is the only thing that makes a row money in. Without it every
-        # payment to the card would read as another purchase.
-        sign = 1 if _IS_CREDIT.search(text) else column.sign
+        # Two ways OCBC marks money coming back, and both must be read. A CR
+        # suffix says so outright. Parentheses say it the accountant's way, and
+        # `minor` already carries that as a negative, so applying the column's
+        # direction to it reverses the purchase rather than adding one. Taking
+        # abs() here counted every refund as another purchase.
+        amount = abs(minor) if _IS_CREDIT.search(text) else column.sign * minor
 
         return ParsedTxn(
             posted_date=posted,
-            amount_minor=sign * abs(minor),
+            amount_minor=amount,
             currency=BASE_CURRENCY,
             description_raw=row.description(DESC_COL),
         )
@@ -266,7 +289,16 @@ class OcbcCardAdapter:
 
 
 def _to_minor(text: str, line) -> int:
-    cleaned = re.sub(r"\s*CR\s*$", "", text.strip(), flags=re.IGNORECASE)
+    """The amount inside a cell, which is not always the whole of it.
+
+    OCBC prints its company name rotated down the right margin, and on a full
+    page one of those words lands on a transaction's baseline and inside the
+    amount column — mirrored, so the cell reads "53.13 detimiL". Taking the
+    amount-shaped token rather than the cell is what dbs/acc.py does for the
+    same reason, and it costs nothing where the cell is already clean.
+    """
+    found = _AMOUNT_IN_CELL.findall(text or "")
+    cleaned = re.sub(r"\s*CR\s*$", "", (found[-1] if found else text).strip(), flags=re.IGNORECASE)
     try:
         minor, _ = parse_amount(cleaned, default_currency=BASE_CURRENCY)
     except AmountParseError as exc:

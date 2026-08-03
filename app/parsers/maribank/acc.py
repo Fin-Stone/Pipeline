@@ -55,6 +55,7 @@ DESC_COL = "description"
 OUT_COL = "outgoing"
 IN_COL = "incoming"
 BALANCE_COL = "balance"
+RATE_COL = "rate"
 INTEREST_COL = "interest"
 
 #: The reference under a row sits about 12pt below it; the next row is 26pt
@@ -82,6 +83,9 @@ _OTHER_PRODUCTS = ("fixed deposit", "investments")
 #: Summaries repeat figures the detail tables carry; only the savings one is
 #: read, and that is read as balances rather than as rows.
 _SUMMARY_SECTIONS = ("account summary",)
+
+#: The optional rate column between the balance and the interest amount.
+_RATE_COLUMN = re.compile(r"\bINTEREST\s+RATE\b", re.IGNORECASE)
 
 _NOTHING_HERE = re.compile(r"^\s*NO (RECENT )?TRANSACTION", re.IGNORECASE)
 #: A month with no day: the aggregate posting whose daily breakdown is the
@@ -253,12 +257,25 @@ class MariBankAccountAdapter:
             return []
 
         header = self._header(lines, r"\bDATE\b.*\bPREVIOUS\b.*\bINTEREST\b")
+
+        columns = [
+            (DATE_COL, "Date", tables.DATE, 0),
+            (BALANCE_COL, "Previous", tables.BALANCE, 0),
+        ]
+        if _RATE_COLUMN.search(header.text):
+            # Some statements print the rate accrued at, between the balance
+            # and the amount. Two things follow. Both headings begin
+            # "Interest" and are matched left to right, so the rate must be
+            # claimed or the amount column binds to it. And it has to be
+            # claimed as a *value* column: cells right of the money zone are
+            # shared out among value columns only, so a text column declared
+            # there receives nothing and "0.88% p.a." lands on the amount
+            # anyway. BALANCE is the role for a value that is not a movement.
+            columns.append((RATE_COL, "Interest", tables.BALANCE, 0))
+        columns.append((INTEREST_COL, "Interest", tables.MONEY, +1))
+
         spec = tables.TableSpec(
-            columns=tables.columns_from_header(header, [
-                (DATE_COL, "Date", tables.DATE, 0),
-                (BALANCE_COL, "Previous", tables.BALANCE, 0),
-                (INTEREST_COL, "Interest", tables.MONEY, +1),
-            ]),
+            columns=tables.columns_from_header(header, columns),
             money_pattern=_AMOUNT_IN_CELL,
         )
 
