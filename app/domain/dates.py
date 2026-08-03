@@ -17,6 +17,8 @@ _MONTHS = {
 }
 
 _DAY_MONTH_YEAR = re.compile(r"^\s*(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})\s*$")
+#: "01/12/2021". Day first — see parse_numeric_date.
+_NUMERIC = re.compile(r"^\s*(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\s*$")
 _DAY_MONTH = re.compile(r"^\s*(\d{1,2})\s+([A-Za-z]{3,9})\.?\s*$")
 
 
@@ -46,6 +48,30 @@ def parse_full_date(text: str) -> date:
         raise DateParseError(f"{text!r} is not a real date") from exc
 
 
+def parse_numeric_date(text: str) -> date:
+    """Parse "01/12/2021", day first.
+
+    Day-first because every institution in this corpus is Singaporean and
+    prints DD/MM/YYYY. Ambiguity is *not* resolved by falling back to
+    month-first: "01/12" quietly becoming 12 January would be invisible and
+    wrong, and a wrong date in a ledger is worse than a rejected document. An
+    impossible day raises.
+    """
+    match = _NUMERIC.match(text)
+    if not match:
+        raise DateParseError(f"cannot read {text!r} as a numeric date")
+    day, month, year = (int(part) for part in match.groups())
+    if year < 100:
+        year += 2000
+    try:
+        return date(year, month, day)
+    except ValueError as exc:
+        raise DateParseError(
+            f"{text!r} is not a real date read day-first; month-first is not attempted "
+            "because a silently swapped day and month is invisible"
+        ) from exc
+
+
 def resolve_period_date(text: str, period_start: date, period_end: date) -> date:
     """Resolve a year-less "01 Jun" against the statement period it belongs to.
 
@@ -62,6 +88,9 @@ def resolve_period_date(text: str, period_start: date, period_end: date) -> date
     """
     if period_start > period_end:
         raise DateParseError(f"period start {period_start} is after end {period_end}")
+
+    if _NUMERIC.match(text):
+        return parse_numeric_date(text)
 
     m = _DAY_MONTH.match(text)
     if not m:

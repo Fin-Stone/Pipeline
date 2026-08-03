@@ -1,8 +1,8 @@
 # Phase 1 — Ingestion and Storage
 
 **Status: implemented.** The flow described here runs end to end. Trust Bank savings and
-credit card statements import and reconcile; every other institution quarantines as an
-unknown layout until its adapter is written.
+credit card statements and DBS consolidated statements import and reconcile; MariBank and
+OCBC quarantine as unroutable until their adapters are written.
 
 Scope is steps 1–5 of the build order in
 [finance-pipeline-architecture.md](../finance-pipeline-architecture.md) §11: schema and
@@ -422,6 +422,34 @@ statement ordering is nearly always stable — and monthly reconciliation agains
 closing balance (architecture §8.2) catches the resulting drift. The alternative designs
 (assigning `seq` from what is already in the database) break idempotency outright, which is
 a worse trade.
+
+### Reading the transaction table
+
+`app/parsers/tables.py` holds what the institutions genuinely share, written
+only after all six layouts were measured:
+
+| Layout | Dates | Amount columns | Direction from |
+|---|---|---|---|
+| Trust acc / cc | 1–2 | FCY + SGD | leading `+` |
+| DBS acc | 1 | Withdrawal, Deposit, Balance | which column |
+| DBS cc | 1 | Amount | `CR` suffix |
+| MariBank acc | 1 | Outgoing, Incoming | which column |
+| MariBank cc | 2 | Amount | explicit `-` |
+| OCBC cc | 1 | Amount | `CR` suffix |
+
+Shared: a header row fixes the columns; a line is a row when it carries a value
+in a money column; descriptions wrap onto neighbouring lines.
+
+**Cells are cut by two rules, because the two halves of these tables are
+aligned differently.** Left of the money columns, a word joins the text column
+whose left edge it sits at — descriptions are left-aligned and run long. At or
+right of them, a word joins the money column whose *right* edge is nearest:
+amounts are right-aligned independently of their headings, and a DBS balance
+begins 8pt left of the word "Balance" while a withdrawal begins 30pt right of
+"Withdrawal". One rule for both misfiles data.
+
+Not shared, and left to adapters: how direction is read, which labels mean
+opening and closing, and how a period or account reference is found.
 
 ### A statement's identity is its accounts and period
 

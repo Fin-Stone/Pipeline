@@ -135,9 +135,88 @@ class TestTrustCard:
         assert "indianvisaonline" in row.description_raw
 
 
+DBS_ACC = "DBS/acc/-2.pdf"
+
+
+class TestDbsSavings:
+    """DBS differs from Trust in every way that matters to a table reader:
+    two amount columns, right-aligned values, a running balance, numeric
+    dates, and references trailing under each row."""
+
+    def test_reconciles(self, dummy_root):
+        from app.parsers.dbs.acc import DbsAccountAdapter
+
+        parsed = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC))
+        assert parsed.institution == "DBS"
+        assert len(parsed.accounts) == 1
+
+        account = parsed.accounts[0]
+        assert account.account_ref_masked == "96-5432109-2"
+        assert account.opening_balance_minor == 5000000
+        assert account.closing_balance_minor == 5000000
+        assert account.opening_balance_minor + sum(
+            t.amount_minor for t in account.txns
+        ) == account.closing_balance_minor
+
+    def test_the_column_decides_the_direction(self, dummy_root):
+        """DBS never signs an amount; withdrawals and deposits are separate
+        columns."""
+        from app.parsers.dbs.acc import DbsAccountAdapter
+
+        account = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC)).accounts[0]
+        amounts = {t.description_raw.split()[0]: t.amount_minor for t in account.txns}
+        assert account.txns[0].amount_minor == -54180        # Withdrawal column
+        assert any(t.amount_minor == 4700 for t in account.txns)   # Deposit column
+        assert "Interest" in amounts
+
+    def test_period_is_inferred_from_the_as_at_date(self, dummy_root):
+        """DBS prints no period, only "as at 31 Dec 2021"."""
+        from datetime import date as _date
+        from app.parsers.dbs.acc import DbsAccountAdapter
+
+        parsed = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC))
+        assert parsed.period_start == _date(2021, 12, 1)
+        assert parsed.period_end == _date(2021, 12, 31)
+
+    def test_pages_of_one_account_are_merged(self, dummy_root):
+        """The Account No. header repeats per page. Treating each page as its
+        own account splits the month and each fragment then disagrees with the
+        totals the statement declares."""
+        from app.parsers.dbs.acc import DbsAccountAdapter
+
+        parsed = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC))
+        assert len(parsed.accounts) == 1
+        assert len(parsed.accounts[0].txns) == 20
+
+    def test_trailing_references_stay_on_their_own_row(self, dummy_root):
+        """The last reference sits 42pt under its row against a 48pt pitch;
+        a fixed gap leaked it onto the following transaction."""
+        from app.parsers.dbs.acc import DbsAccountAdapter
+
+        account = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC)).accounts[0]
+        assert not any(t.description_raw.startswith("OTHER") for t in account.txns)
+
+    def test_routes_to_the_dbs_adapter(self, dummy_root):
+        document = pdfio.load(_require(dummy_root, DBS_ACC))
+        assert build_default_registry().resolve(document).name == "dbs.acc"
+
+    def test_routing_does_not_depend_on_customer_data(self, dummy_root):
+        """DBS puts the customer's name, their joint holder's name and their
+        street in the header band. None may be required."""
+        from app.parsers.dbs.acc import SIGNATURE
+
+        document = pdfio.load(_require(dummy_root, DBS_ACC))
+        assert SIGNATURE.matches(document)
+        assert not any(
+            token in line
+            for line in SIGNATURE.requires
+            for token in ("example", "lucy", "horizon", "green")
+        )
+
+
 class TestUnregisteredLayouts:
     @pytest.mark.parametrize("relpath", [
-        "DBS/acc/-2.pdf",
+        "DBS/cc/-1.pdf",
         "OCBC Bank/cc/OCBC+REWARDS+CARD-0000-Jan-26.pdf",
         "Maribank/acc/Aug2025_MariBank_e-Statement.pdf",
     ])

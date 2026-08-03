@@ -165,6 +165,10 @@ class LayoutSignature:
     #: Normalised producer. Empty means "do not test", for issuers that ship no
     #: metadata at all.
     producer: str = ""
+    #: Normalised creator. Some issuers leave Producer empty and put the
+    #: rendering tool in Creator instead — DBS ships
+    #: "Quadient Group AG~Inspire~12.5.33.0" with no producer at all.
+    creator: str = ""
     #: Header lines that must all be present, already normalised.
     requires: tuple[str, ...] = ()
     #: Expected page size, compared within PAGE_TOLERANCE. None means any.
@@ -180,6 +184,9 @@ class LayoutSignature:
         first = document.pages[0]
 
         if self.producer and normalise_producer(document.producer) != self.producer:
+            return False
+
+        if self.creator and normalise_producer(document.creator) != self.creator:
             return False
 
         if self.page_size is not None:

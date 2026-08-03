@@ -104,10 +104,12 @@ def build_default_registry() -> AdapterRegistry:
     Adding an institution means importing its adapter here and declaring the
     header lines that identify it. Nothing else in the pipeline changes.
     """
+    from .dbs.acc import SIGNATURE as DBS_ACC_SIGNATURE, DbsAccountAdapter
     from .trust.acc import SIGNATURE as TRUST_ACC_SIGNATURE, TrustAccountAdapter
     from .trust.cc import SIGNATURE as TRUST_CC_SIGNATURE, TrustCardAdapter
 
     registry = AdapterRegistry()
     registry.register(TrustAccountAdapter(), TRUST_ACC_SIGNATURE)
     registry.register(TrustCardAdapter(), TRUST_CC_SIGNATURE)
+    registry.register(DbsAccountAdapter(), DBS_ACC_SIGNATURE)
     return registry
