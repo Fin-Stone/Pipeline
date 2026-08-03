@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import sys
+import textwrap
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -236,7 +237,8 @@ def cmd_status(args) -> int:
         print("\nquarantined by folder (nothing was parsed from these):")
         for name, count in sorted(counts.quarantined_by_institution.items()):
             print(f"  {name:<24} {count}")
-        print("\n  finstone report                  why each one failed")
+        print("\n  finstone quarantine              which files they are")
+        print("  finstone report                  why each one failed")
         print("  finstone reparse --quarantined   retry after adding an adapter")
     return 0
 
@@ -430,6 +432,85 @@ def _print_parsed(parsed, *, redact: bool) -> None:
             print("  reconciles: N/A (statement states no balances)")
 
 
+def _why_it_failed(payload: dict, redact: bool) -> str:
+    """The shortest true answer to "what went wrong", for one line of a table."""
+    from .pipeline import diagnostics
+
+    checks = [
+        failure["check"]
+        for failure in payload.get("detail", {}).get("failures", [])
+        if failure.get("check")
+    ]
+    if checks:
+        # Check names are this codebase's own words, never the document's, so
+        # they stay legible under --redact. Several accounts can fail the same
+        # one; fromkeys dedupes without losing the order they were found in.
+        return ",".join(dict.fromkeys(checks))
+
+    if payload.get("failure_class") in ("unknown_layout", "ambiguous_layout"):
+        # No check ran, because nothing was read out of the document at all.
+        # The class already says that; the message only restates it.
+        return ""
+
+    return diagnostics.describe(
+        textwrap.shorten(payload.get("message") or "", 44, placeholder="..."), redact,
+    )
+
+
+def cmd_quarantine(args) -> int:
+    """List what is quarantined, and optionally copy the originals out.
+
+    `finstone report` explains *why* each document failed. This answers the
+    question that comes first — which files they are — because the report a run
+    writes is redacted by design, and the store names originals by digest. Both
+    are correct, and between them an operator could not find the file to open.
+    """
+    from .pipeline import diagnostics
+    from .pipeline.quarantine import REASON_SUFFIX
+
+    config = load_config()
+    reasons = sorted(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+    if not reasons:
+        print("quarantine is empty")
+        return 0
+
+    header = ("sha256", "class", "check", "source")
+    rows = []
+    for reason_file in reasons:
+        payload = json.loads(reason_file.read_text(encoding="utf-8"))
+        rows.append((
+            payload.get("sha256", "")[:8],
+            payload.get("failure_class") or "",
+            _why_it_failed(payload, args.redact),
+            diagnostics.describe(payload.get("source_relpath") or "", args.redact),
+        ))
+
+    widths = [max(len(row[i]) for row in (header, *rows)) for i in range(3)]
+
+    def line(row):
+        return "  ".join(row[i].ljust(widths[i]) for i in range(3)) + "  " + row[3]
+
+    print(f"{len(rows)} quarantined   {config.quarantine_dir}\n")
+    print(line(header))
+    for row in rows:
+        print(line(row))
+
+    if not args.export:
+        print("\n  finstone quarantine --export   copy the originals out to open them")
+        print("  finstone report                why each one failed")
+        return 0
+
+    written = quarantine.export_originals(
+        config.quarantine_dir, config.quarantine_files_dir, build_blob_store(config),
+    )
+    print(f"\n{len(written)} original(s) -> {config.quarantine_files_dir}")
+    for path in written:
+        print(f"  {diagnostics.describe(path.name, args.redact)}")
+    if len(written) < len(rows):
+        print(f"  {len(rows) - len(written)} not exported: no original in the store")
+    return 0
+
+
 def cmd_report(args) -> int:
     """Render every quarantined document as a readable, pasteable report."""
     from .pipeline import diagnostics
@@ -516,6 +597,14 @@ def build_parser() -> argparse.ArgumentParser:
              "so a failure on a real statement is safe to paste",
     )
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("quarantine", help="list quarantined documents and which files they are")
+    p.add_argument(
+        "--export", action="store_true",
+        help="copy the originals out of the store under openable names",
+    )
+    p.add_argument("--redact", action="store_true", help="mask filenames, for pasting elsewhere")
+    p.set_defaults(func=cmd_quarantine)
 
     p = sub.add_parser("report", help="render every quarantined document as a readable report")
     p.add_argument("--redact", action="store_true", help="mask descriptions and references")

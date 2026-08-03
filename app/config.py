@@ -61,6 +61,16 @@ class Config:
         return self.data_dir / "quarantine"
 
     @property
+    def quarantine_files_dir(self) -> Path:
+        """Where `finstone quarantine --export` puts openable originals.
+
+        Holds real statements under recognisable names, which is the whole point
+        and also why it is denied to agents alongside uploads/prod — see
+        docs/development-rules.md Rule 2.
+        """
+        return self.quarantine_dir / "files"
+
+    @property
     def learned_rules_path(self) -> Path:
         """Vendor strings proven to belong to an adapter.
 

@@ -366,7 +366,9 @@ def reparse(
             continue
 
         repository.delete_document(context, target["sha256"])
-        quarantine.clear_reason(config.quarantine_dir, target["sha256"])
+        quarantine.clear_reason(
+            config.quarantine_dir, target["sha256"], config.quarantine_files_dir,
+        )
         # drain=False: the file being read *is* the stored original, and the
         # store is immutable.
         #

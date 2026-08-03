@@ -153,6 +153,36 @@ at all. `finstone status` reports these separately from imported documents for t
 **One bad document never stops the run.** Every other file in the batch still imports.
 Quarantine depth is a metric worth alerting on (architecture §8.2), not a silent state.
 
+### Finding the document behind a failure
+
+Two commands, because "why did it fail" and "which file is it" are different questions and
+the answer to the first is deliberately redacted:
+
+```
+finstone quarantine            one line each: digest, failure class, check, source file
+finstone quarantine --export   copy the originals out under openable names
+finstone report                the full arithmetic of each failure
+```
+
+The listing prints the real source path, since it runs on the operator's own terminal against
+their own data; `--redact` masks it for pasting elsewhere. Check names like
+`balance_reconciliation` are this codebase's words rather than the document's and stay legible
+either way.
+
+`--export` writes each failed original to `data/quarantine/files/` as
+`<first 8 of digest>-<source path, flattened>`, keeping the extension so the file opens. It
+reads through the `BlobStore` port rather than from `uploads/`, because the store is the
+immutable record of what actually failed — the upload may since have been re-downloaded,
+renamed or moved, at which point it is no longer evidence.
+
+It **syncs rather than accumulates**: an export whose reason file has gone is deleted, and
+`reparse` removes a document's export along with its reason. A stale export is the same lie
+as a stale `reason.json`, in a form someone can double-click.
+
+Because that folder holds real statements under recognisable names, it is denied to agents
+alongside `uploads/prod/` and `data/store/` — see
+[development-rules.md](development-rules.md) Rule 2.
+
 ### `reparse`
 
 Because originals are immutable and content-addressed, fixing an adapter and re-running it

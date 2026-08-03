@@ -8,6 +8,8 @@ original is already in the content-addressed store, so nothing is lost and
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import traceback
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone
@@ -15,6 +17,11 @@ from decimal import Decimal
 from pathlib import Path
 
 REASON_SUFFIX = ".reason.json"
+
+#: Characters that cannot appear inside a single filename on every filesystem
+#: this runs on. Path separators are in the set, which is what collapses a
+#: relative path into one recognisable name rather than a tree of directories.
+_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def _plain(value):
@@ -69,12 +76,69 @@ def write_reason(
     return target
 
 
-def clear_reason(quarantine_dir: Path, sha256: str) -> bool:
-    """Remove a document's reason file, before it is reparsed.
+def export_name(sha256: str, source_relpath: str | None) -> str:
+    """A name saying which document this is, and which reason file it belongs to.
+
+    The digest prefix ties the file to its `<sha256>.reason.json` neighbour; the
+    flattened source path is the half a person recognises. The original
+    extension rides along on the end of the path, so the file still opens.
+    """
+    stem = _ILLEGAL.sub("-", (source_relpath or sha256).strip()).strip("-")
+    return f"{sha256[:8]}-{stem or sha256}"
+
+
+def export_originals(quarantine_dir: Path, files_dir: Path, blob_store) -> list[Path]:
+    """Copy every quarantined original out under a name a person can recognise.
+
+    Read from the blob store rather than from uploads/, because the store is the
+    immutable record of what actually failed. The upload may since have been
+    re-downloaded, renamed or moved, and then it is no longer evidence.
+
+    Syncs rather than accumulates, for the reason `clear_reason` gives: an export
+    whose reason file has gone describes a failure that no longer exists.
+    """
+    wanted: dict[Path, str] = {}
+    if quarantine_dir.exists():
+        for reason_file in sorted(quarantine_dir.glob(f"*{REASON_SUFFIX}")):
+            try:
+                payload = json.loads(reason_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            sha256 = payload.get("sha256")
+            if sha256:
+                wanted[files_dir / export_name(sha256, payload.get("source_relpath"))] = sha256
+
+    files_dir.mkdir(parents=True, exist_ok=True)
+    for present in files_dir.iterdir():
+        # Never a reason file, whatever the two directories are configured to
+        # be: sweeping away the record of a failure is not this function's job.
+        if present.is_file() and present not in wanted and not present.name.endswith(REASON_SUFFIX):
+            present.unlink()
+
+    written = []
+    for target, sha256 in sorted(wanted.items()):
+        # The store is content-addressed, so a file already at this name holds
+        # exactly these bytes. Re-exporting is a no-op rather than a rewrite.
+        if not target.exists():
+            if not blob_store.exists(sha256):
+                continue
+            with blob_store.open(sha256) as source, target.open("wb") as sink:
+                shutil.copyfileobj(source, sink)
+        written.append(target)
+    return written
+
+
+def clear_reason(quarantine_dir: Path, sha256: str, files_dir: Path | None = None) -> bool:
+    """Remove a document's reason file and any export of it, before reparsing.
 
     A stale reason describing a failure that has since been fixed is worse
-    than none: it makes `finstone report` lie about the current state.
+    than none: it makes `finstone report` lie about the current state. An
+    exported original is the same lie in a form someone can double-click.
     """
+    if files_dir is not None and files_dir.exists():
+        for export in files_dir.glob(f"{sha256[:8]}-*"):
+            export.unlink()
+
     target = quarantine_dir / f"{sha256}{REASON_SUFFIX}"
     if target.exists():
         target.unlink()

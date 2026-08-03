@@ -26,6 +26,7 @@ behaviour, not a gap. See [docs/ingestion.md](docs/ingestion.md).
 finstone run --profile dummy      stage and ingest
 finstone status                   ledger and quarantine counts
 finstone doctor <path>            parse one document and explain the result
+finstone quarantine               which documents failed, and which files they are
 finstone report                   why every quarantined document failed
 ```
 

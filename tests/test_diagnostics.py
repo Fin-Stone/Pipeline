@@ -192,3 +192,97 @@ class TestQuarantineRecordsEnoughToDebug:
         # The header lines the fingerprint was derived from, so a mismatch
         # between two months can be compared without opening either file.
         assert payload["detail"]["label_lines"]
+
+
+class TestQuarantineListing:
+    """`report` says why a document failed. This says *which file* it is.
+
+    Both are needed and neither substitutes for the other: the report a run
+    writes is redacted by design, and the store names originals by digest, so
+    between them an operator holding a failed statement twice over had no way
+    to reach it.
+    """
+
+    NAME = "MyBank_Statement.pdf"
+
+    def _quarantine_one(self, config, repository, context, blob_store, notifier):
+        write_pdf(
+            config.inbox_dir / "dummy" / self.NAME,
+            synthetic_statement(
+                [("03 Jun", "Salary", "+2,000.00")], opening="1,000.00", closing="9,999.00",
+            ),
+        )
+        ingest_inbox(config, context, repository, blob_store, notifier, _registry_for())
+        reason = next(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+        return json.loads(reason.read_text(encoding="utf-8"))
+
+    def _quarantine_cmd(self, config, monkeypatch, capsys, **overrides):
+        import app.cli as cli
+
+        monkeypatch.setattr(cli, "load_config", lambda: config)
+        args = {"export": False, "redact": False, **overrides}
+        cli.cmd_quarantine(type("Args", (), args)())
+        return capsys.readouterr().out
+
+    def test_names_the_file_and_the_check_it_failed(
+        self, config, repository, context, blob_store, notifier, monkeypatch, capsys
+    ):
+        self._quarantine_one(config, repository, context, blob_store, notifier)
+        out = self._quarantine_cmd(config, monkeypatch, capsys)
+
+        assert self.NAME in out
+        assert "validation_failed" in out
+        assert "balance_reconciliation" in out
+
+    def test_redact_masks_the_filename(
+        self, config, repository, context, blob_store, notifier, monkeypatch, capsys
+    ):
+        """Same guarantee every other report path carries: safe to paste."""
+        self._quarantine_one(config, repository, context, blob_store, notifier)
+        out = self._quarantine_cmd(config, monkeypatch, capsys, redact=True)
+
+        assert "MyBank" not in out and "Statement" not in out
+        # A check name is this codebase's own word, never the document's, so it
+        # stays legible — masking it would cost the diagnosis and protect nothing.
+        assert "balance_reconciliation" in out
+
+    def test_export_writes_an_openable_copy_of_the_original(
+        self, config, repository, context, blob_store, notifier, monkeypatch, capsys
+    ):
+        payload = self._quarantine_one(config, repository, context, blob_store, notifier)
+        self._quarantine_cmd(config, monkeypatch, capsys, export=True)
+
+        exported = list(config.quarantine_files_dir.iterdir())
+        assert len(exported) == 1
+        # The digest prefix ties it to its reason file; the rest is recognisable.
+        assert exported[0].name == f"{payload['sha256'][:8]}-{self.NAME}"
+        with blob_store.open(payload["sha256"]) as original:
+            assert exported[0].read_bytes() == original.read()
+
+    def test_exporting_twice_changes_nothing(
+        self, config, repository, context, blob_store, notifier, monkeypatch, capsys
+    ):
+        self._quarantine_one(config, repository, context, blob_store, notifier)
+
+        def snapshot():
+            return {p.name: p.read_bytes() for p in config.quarantine_files_dir.iterdir()}
+
+        self._quarantine_cmd(config, monkeypatch, capsys, export=True)
+        first = snapshot()
+        self._quarantine_cmd(config, monkeypatch, capsys, export=True)
+        assert snapshot() == first
+
+    def test_an_export_whose_reason_is_gone_is_swept_up(
+        self, config, repository, context, blob_store, notifier, monkeypatch, capsys
+    ):
+        """An export outliving its reason file describes a failure that no
+        longer exists — the same lie `clear_reason` was written to prevent."""
+        self._quarantine_one(config, repository, context, blob_store, notifier)
+        self._quarantine_cmd(config, monkeypatch, capsys, export=True)
+
+        orphan = config.quarantine_files_dir / "deadbeef-AnOldStatement.pdf"
+        orphan.write_bytes(b"%PDF-stale")
+        self._quarantine_cmd(config, monkeypatch, capsys, export=True)
+
+        assert not orphan.exists()
+        assert len(list(config.quarantine_files_dir.iterdir())) == 1

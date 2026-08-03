@@ -326,6 +326,22 @@ class TestReparse:
         reparse(config, context, repository, blob_store, notifier, fixed, quarantined_only=True)
         assert not list(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
 
+    def test_clears_the_exported_original_too(
+        self, config, repository, context, blob_store, notifier
+    ):
+        """An exported original is the same stale claim in a form someone can
+        double-click, so it goes when the reason does."""
+        from app.pipeline import quarantine
+
+        fixed = self._quarantine_one(config, repository, context, blob_store, notifier)
+        exported = quarantine.export_originals(
+            config.quarantine_dir, config.quarantine_files_dir, blob_store,
+        )
+        assert len(exported) == 1
+
+        reparse(config, context, repository, blob_store, notifier, fixed, quarantined_only=True)
+        assert not list(config.quarantine_files_dir.iterdir())
+
     def test_replacing_an_imported_document_does_not_duplicate_it(
         self, config, repository, context, blob_store, notifier, registry_for
     ):
