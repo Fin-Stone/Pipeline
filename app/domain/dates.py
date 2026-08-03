@@ -20,6 +20,9 @@ _DAY_MONTH_YEAR = re.compile(r"^\s*(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})\s*$"
 #: "01/12/2021". Day first — see parse_numeric_date.
 _NUMERIC = re.compile(r"^\s*(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\s*$")
 _DAY_MONTH = re.compile(r"^\s*(\d{1,2})\s+([A-Za-z]{3,9})\.?\s*$")
+#: "20/01" — day and month with no year at all. OCBC prints card transaction
+#: dates this way. Day first, for the reason `parse_numeric_date` gives.
+_DAY_MONTH_NUMERIC = re.compile(r"^\s*(\d{1,2})[/-](\d{1,2})\s*$")
 
 
 class DateParseError(ValueError):
@@ -34,6 +37,22 @@ def _month(name: str) -> int:
     if key in _MONTHS:
         return _MONTHS[key]
     raise DateParseError(f"unknown month name {name!r}")
+
+
+def _day_and_month(text: str) -> tuple[int, int] | None:
+    """Day and month from a year-less date, in either form statements print.
+
+    "01 Jun" and "20/01" are the same problem — the year is missing and has to
+    come from the statement period — so they resolve through one path rather
+    than each institution inventing its own.
+    """
+    m = _DAY_MONTH.match(text)
+    if m:
+        return int(m.group(1)), _month(m.group(2))
+    m = _DAY_MONTH_NUMERIC.match(text)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None
 
 
 def parse_full_date(text: str) -> date:
@@ -92,11 +111,10 @@ def resolve_period_date(text: str, period_start: date, period_end: date) -> date
     if _NUMERIC.match(text):
         return parse_numeric_date(text)
 
-    m = _DAY_MONTH.match(text)
-    if not m:
+    parts = _day_and_month(text)
+    if parts is None:
         return parse_full_date(text)
-    day, month_name = m.groups()
-    month = _month(month_name)
+    day, month = parts
 
     candidates = []
     for year in range(period_start.year, period_end.year + 1):

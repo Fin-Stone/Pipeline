@@ -214,10 +214,80 @@ class TestDbsSavings:
         )
 
 
+OCBC_CC = "OCBC Bank/cc/OCBC+REWARDS+CARD-0000-Jan-26.pdf"
+
+
+class TestOcbcCard:
+    """The simplest layout in the corpus, with three traps in it: an amount
+    column that carries no sign, dates with no year, and a cardholder line that
+    is not a row."""
+
+    def _account(self, dummy_root):
+        from app.parsers.ocbc.cc import OcbcCardAdapter
+
+        return OcbcCardAdapter().parse(_require(dummy_root, OCBC_CC)).accounts[0]
+
+    def test_reconciles(self, dummy_root):
+        from app.parsers.ocbc.cc import OcbcCardAdapter
+
+        parsed = OcbcCardAdapter().parse(_require(dummy_root, OCBC_CC))
+        assert parsed.institution == "OCBC"
+        account = parsed.accounts[0]
+        # Owed, so negated: a card reconciles on the deposit formula.
+        assert account.opening_balance_minor == 0
+        assert account.closing_balance_minor == -161150
+        assert account.opening_balance_minor + sum(
+            t.amount_minor for t in account.txns
+        ) == account.closing_balance_minor
+
+    def test_the_account_is_the_card_product_not_its_number(self, dummy_root):
+        """A card number changes on reissue while the account continues, so
+        keying on it would fork one history in two."""
+        account = self._account(dummy_root)
+        assert account.account_ref_masked == "Ocbc Rewards Card"
+        assert "5400" not in account.account_ref_masked
+
+    def test_the_cardholder_line_is_not_part_of_a_description(self, dummy_root):
+        """It sits between the product name and the first row, carries no
+        amount, and holds the two things a description must never carry."""
+        account = self._account(dummy_root)
+        for txn in account.txns:
+            assert "5400" not in txn.description_raw
+            assert "example" not in txn.description_raw.upper()
+
+    def test_an_unsigned_amount_is_a_purchase(self, dummy_root):
+        """Nothing in the column says which way; without the CR rule every
+        payment would read as another purchase."""
+        account = self._account(dummy_root)
+        assert all(t.amount_minor < 0 for t in account.txns)
+        assert account.txns[0].amount_minor == -7508
+
+    def test_the_year_comes_from_the_statement(self, dummy_root):
+        """OCBC prints "20/01" and no year anywhere near the row."""
+        from datetime import date
+
+        account = self._account(dummy_root)
+        assert account.txns[0].posted_date == date(2026, 1, 20)
+
+    def test_routing_does_not_depend_on_customer_data(self, dummy_root):
+        from app.parsers.ocbc.cc import SIGNATURE
+
+        document = pdfio.load(_require(dummy_root, OCBC_CC))
+        assert SIGNATURE.matches(document)
+        assert not any(
+            token in line
+            for line in SIGNATURE.requires
+            for token in ("example", "sim", "EXAMPLE ROAD", "7552")
+        )
+
+    def test_routes_to_the_ocbc_adapter(self, dummy_root):
+        document = pdfio.load(_require(dummy_root, OCBC_CC))
+        assert build_default_registry().resolve(document).name == "ocbc.cc"
+
+
 class TestUnregisteredLayouts:
     @pytest.mark.parametrize("relpath", [
         "DBS/cc/-1.pdf",
-        "OCBC Bank/cc/OCBC+REWARDS+CARD-0000-Jan-26.pdf",
         "Maribank/acc/Aug2025_MariBank_e-Statement.pdf",
     ])
     def test_open_but_route_nowhere(self, dummy_root, relpath):
