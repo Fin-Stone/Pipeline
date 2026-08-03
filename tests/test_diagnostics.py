@@ -142,7 +142,7 @@ class TestRedactionCoversEveryReportPath:
         original = cli.load_config
         cli.load_config = lambda: config
         try:
-            cmd_report(type("Args", (), {"redact": True, "out": None})())
+            cmd_report(type("Args", (), {"redact": True, "out": None, "profile": "dummy"})())
             out = capsys.readouterr().out
         finally:
             cli.load_config = original
@@ -168,7 +168,7 @@ class TestQuarantineRecordsEnoughToDebug:
         )
         ingest_inbox(config, context, repository, blob_store, notifier, _registry_for(path))
 
-        payload = json.loads(next(config.quarantine_dir.glob(f"*{REASON_SUFFIX}")).read_text(encoding="utf-8"))
+        payload = json.loads(next(config.quarantine_dir_for("dummy").glob(f"*{REASON_SUFFIX}")).read_text(encoding="utf-8"))
         assert payload["failure_class"] == "validation_failed"
         rows = payload["detail"]["accounts"]["01-1234567-8/Main Account"]
         assert {r["description"] for r in rows} == {"Salary", "Netflix"}
@@ -187,7 +187,7 @@ class TestQuarantineRecordsEnoughToDebug:
         write_pdf(config.inbox_dir / "dummy" / "a.pdf", synthetic_statement([], closing="1,000.00"))
         ingest_inbox(config, context, repository, blob_store, notifier, AdapterRegistry())
 
-        payload = json.loads(next(config.quarantine_dir.glob(f"*{REASON_SUFFIX}")).read_text(encoding="utf-8"))
+        payload = json.loads(next(config.quarantine_dir_for("dummy").glob(f"*{REASON_SUFFIX}")).read_text(encoding="utf-8"))
         assert len(payload["detail"]["fingerprint"]) == 40
         # The header lines the fingerprint was derived from, so a mismatch
         # between two months can be compared without opening either file.
@@ -213,14 +213,14 @@ class TestQuarantineListing:
             ),
         )
         ingest_inbox(config, context, repository, blob_store, notifier, _registry_for())
-        reason = next(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+        reason = next(config.quarantine_dir_for("dummy").glob(f"*{REASON_SUFFIX}"))
         return json.loads(reason.read_text(encoding="utf-8"))
 
     def _quarantine_cmd(self, config, monkeypatch, capsys, **overrides):
         import app.cli as cli
 
         monkeypatch.setattr(cli, "load_config", lambda: config)
-        args = {"export": False, "redact": False, **overrides}
+        args = {"export": False, "redact": False, "profile": "dummy", **overrides}
         cli.cmd_quarantine(type("Args", (), args)())
         return capsys.readouterr().out
 
@@ -252,7 +252,7 @@ class TestQuarantineListing:
         payload = self._quarantine_one(config, repository, context, blob_store, notifier)
         self._quarantine_cmd(config, monkeypatch, capsys, export=True)
 
-        exported = list(config.quarantine_files_dir.iterdir())
+        exported = list(config.quarantine_files_dir_for("dummy").iterdir())
         assert len(exported) == 1
         # The digest prefix ties it to its reason file; the rest is recognisable.
         assert exported[0].name == f"{payload['sha256'][:8]}-{self.NAME}"
@@ -265,7 +265,7 @@ class TestQuarantineListing:
         self._quarantine_one(config, repository, context, blob_store, notifier)
 
         def snapshot():
-            return {p.name: p.read_bytes() for p in config.quarantine_files_dir.iterdir()}
+            return {p.name: p.read_bytes() for p in config.quarantine_files_dir_for("dummy").iterdir()}
 
         self._quarantine_cmd(config, monkeypatch, capsys, export=True)
         first = snapshot()
@@ -280,9 +280,9 @@ class TestQuarantineListing:
         self._quarantine_one(config, repository, context, blob_store, notifier)
         self._quarantine_cmd(config, monkeypatch, capsys, export=True)
 
-        orphan = config.quarantine_files_dir / "deadbeef-AnOldStatement.pdf"
+        orphan = config.quarantine_files_dir_for("dummy") / "deadbeef-AnOldStatement.pdf"
         orphan.write_bytes(b"%PDF-stale")
         self._quarantine_cmd(config, monkeypatch, capsys, export=True)
 
         assert not orphan.exists()
-        assert len(list(config.quarantine_files_dir.iterdir())) == 1
+        assert len(list(config.quarantine_files_dir_for("dummy").iterdir())) == 1

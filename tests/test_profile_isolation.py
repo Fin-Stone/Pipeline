@@ -8,11 +8,14 @@ deduplicated away, leaving a document with balances and no transactions.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlalchemy import func, select
 
 from app.config import PROFILE_DUMMY, PROFILE_PROD, ConfigError
 from app.pipeline.ingest import ingest_inbox
+from app.pipeline.quarantine import REASON_SUFFIX, export_originals
 from app.pipeline.stage import stage
 from app.storage import schema
 
@@ -142,3 +145,68 @@ class TestIsolation:
 
         assert repository.counts(dummy_ctx).accounts == 1
         assert repository.counts(prod_ctx).accounts == 0
+
+
+class TestQuarantineIsolation:
+    """Separating the ledger is worth nothing if the failure detail beside it is
+    shared. A reason file carries the document's real filename, the rows parsed
+    out of it, its balances and its account references — the same data the
+    tenant split exists to keep apart.
+    """
+
+    def _fail_under(self, prod_config, repository, blob_store, notifier, profile, ctx):
+        _place(prod_config, profile)
+        stage(prod_config, profile, repository=repository, context=ctx)
+        # An empty registry claims nothing, so the document quarantines.
+        return ingest_inbox(prod_config, ctx, repository, blob_store, notifier,
+                            AdapterRegistry(), profile=profile)
+
+    def test_one_failure_per_tenant_directory_and_none_at_the_root(
+        self, prod_config, repository, blob_store, notifier
+    ):
+        """The documents here are byte-identical, so they share a digest — and a
+        reason file is named by digest. Flat, the second overwrote the first and
+        production's failure silently became the dummy one."""
+        dummy_ctx, prod_ctx = _contexts(repository, prod_config)
+        for profile, ctx in ((PROFILE_DUMMY, dummy_ctx), (PROFILE_PROD, prod_ctx)):
+            summary = self._fail_under(prod_config, repository, blob_store, notifier, profile, ctx)
+            assert summary.quarantined == 1
+
+        dummy_reasons = list(prod_config.quarantine_dir_for(PROFILE_DUMMY).glob(f"*{REASON_SUFFIX}"))
+        prod_reasons = list(prod_config.quarantine_dir_for(PROFILE_PROD).glob(f"*{REASON_SUFFIX}"))
+
+        assert len(dummy_reasons) == 1 and len(prod_reasons) == 1
+        assert dummy_reasons[0].name == prod_reasons[0].name, "same bytes, same digest"
+        assert dummy_reasons[0].parent != prod_reasons[0].parent
+        # Nothing may sit in the shared root, which is what the split replaced.
+        assert not list(prod_config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+
+    def test_a_reason_file_records_which_profile_it_came_from(
+        self, prod_config, repository, blob_store, notifier
+    ):
+        """So a reason says whose it is without relying on where it sits."""
+        _, prod_ctx = _contexts(repository, prod_config)
+        self._fail_under(prod_config, repository, blob_store, notifier, PROFILE_PROD, prod_ctx)
+
+        reason = next(prod_config.quarantine_dir_for(PROFILE_PROD).glob(f"*{REASON_SUFFIX}"))
+        assert json.loads(reason.read_text(encoding="utf-8"))["source_profile"] == PROFILE_PROD
+
+    def test_exported_originals_do_not_mix(
+        self, prod_config, repository, blob_store, notifier
+    ):
+        """The export is where a real statement becomes a recognisable file, so
+        it is the place a leak would actually be readable."""
+        dummy_ctx, prod_ctx = _contexts(repository, prod_config)
+        for profile, ctx in ((PROFILE_DUMMY, dummy_ctx), (PROFILE_PROD, prod_ctx)):
+            self._fail_under(prod_config, repository, blob_store, notifier, profile, ctx)
+
+        for profile in (PROFILE_DUMMY, PROFILE_PROD):
+            written = export_originals(
+                prod_config.quarantine_dir_for(profile),
+                prod_config.quarantine_files_dir_for(profile),
+                blob_store,
+            )
+            assert len(written) == 1
+
+        assert (prod_config.quarantine_files_dir_for(PROFILE_DUMMY)
+                != prod_config.quarantine_files_dir_for(PROFILE_PROD))

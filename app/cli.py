@@ -81,7 +81,7 @@ def cmd_ingest(args) -> int:
         )
     finally:
         repository.close()
-    _print_summary(summary, config)
+    _print_summary(summary, config, args.profile)
     return 0
 
 
@@ -103,11 +103,11 @@ def cmd_run(args) -> int:
         )
     finally:
         repository.close()
-    _print_summary(summary, config)
+    _print_summary(summary, config, args.profile)
     return 0
 
 
-def _print_summary(summary, config=None) -> None:
+def _print_summary(summary, config=None, profile=PROFILE_DUMMY) -> None:
     """Three lines: what happened, what failed, where the detail is.
 
     Anything longer gets skimmed. The per-document detail lives in the report
@@ -138,12 +138,12 @@ def _print_summary(summary, config=None) -> None:
     print("  failures: " + ", ".join(f"{count} {reason}" for reason, count in reasons.most_common()))
 
     if config is not None:
-        written = _write_run_report(config, summary)
+        written = _write_run_report(config, summary, profile)
         if written is not None:
             print(f"  report:   {written}")
 
 
-def _write_run_report(config, summary) -> Path | None:
+def _write_run_report(config, summary, profile) -> Path | None:
     """Write this run's failures to a file, redacted and ready to send.
 
     Redacted by default: the whole point is that it can be handed to someone
@@ -153,9 +153,10 @@ def _write_run_report(config, summary) -> Path | None:
     from .pipeline.quarantine import REASON_SUFFIX
 
     digests = [o.sha256 for o in summary.outcomes if o.status == "quarantined"]
+    quarantine_dir = config.quarantine_dir_for(profile)
     blocks = []
     for digest in digests:
-        reason_file = config.quarantine_dir / f"{digest}{REASON_SUFFIX}"
+        reason_file = quarantine_dir / f"{digest}{REASON_SUFFIX}"
         if not reason_file.exists():
             continue
         payload = json.loads(reason_file.read_text(encoding="utf-8"))
@@ -164,9 +165,10 @@ def _write_run_report(config, summary) -> Path | None:
     if not blocks:
         return None
 
-    config.reports_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir = config.reports_dir_for(profile)
+    reports_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    target = config.reports_dir / f"{stamp}-failures.txt"
+    target = reports_dir / f"{stamp}-failures.txt"
     header = (
         f"finstone failure report  {datetime.now().isoformat(timespec='seconds')}\n"
         f"{len(blocks)} of {summary.processed} documents failed.\n"
@@ -226,7 +228,7 @@ def cmd_status(args) -> int:
     print(f"accounts             {counts.accounts}")
     print(f"transactions         {counts.txns}")
     print(f"quarantined          {counts.documents_quarantined}")
-    print(f"quarantine reports   {quarantine.depth(config.quarantine_dir)}")
+    print(f"quarantine reports   {quarantine.depth(config.quarantine_dir_for(args.profile))}")
     if counts.by_institution:
         print("\nimported by institution:")
         for name, count in sorted(counts.by_institution.items()):
@@ -262,7 +264,7 @@ def cmd_reparse(args) -> int:
     if summary.processed == 0:
         print("nothing to reparse")
         return 0
-    _print_summary(summary, config)
+    _print_summary(summary, config, args.profile)
     return 0
 
 
@@ -432,6 +434,32 @@ def _print_parsed(parsed, *, redact: bool) -> None:
             print("  reconciles: N/A (statement states no balances)")
 
 
+def _warn_about_unscoped(config) -> None:
+    """Point at reason files written before quarantine was split by tenant.
+
+    They sit loose at the root, and nothing in them says which tenant they
+    belong to — the payload only started recording the profile at the split. So
+    they are not silently adopted into a tenant that may not own them.
+
+    Nothing is lost by discarding them: a reason file is derived state. The
+    ledger holds the authoritative quarantined status and the store holds the
+    bytes, so `reparse` rebuilds the reason in the right place.
+    """
+    from .pipeline.quarantine import REASON_SUFFIX
+
+    loose = sorted(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+    if not loose:
+        return
+    # The listing above went to stdout; without this the note lands before it.
+    sys.stdout.flush()
+    print(
+        f"\n  note: {len(loose)} reason file(s) at {config.quarantine_dir} predate the split\n"
+        "  by tenant and are not listed above. Rebuild them where they belong with\n"
+        "  `finstone reparse --quarantined --profile <profile>`, then delete them.",
+        file=sys.stderr,
+    )
+
+
 def _why_it_failed(payload: dict, redact: bool) -> str:
     """The shortest true answer to "what went wrong", for one line of a table."""
     from .pipeline import diagnostics
@@ -469,9 +497,11 @@ def cmd_quarantine(args) -> int:
     from .pipeline.quarantine import REASON_SUFFIX
 
     config = load_config()
-    reasons = sorted(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+    quarantine_dir = config.quarantine_dir_for(args.profile)
+    reasons = sorted(quarantine_dir.glob(f"*{REASON_SUFFIX}"))
     if not reasons:
-        print("quarantine is empty")
+        print(f"quarantine is empty for profile {args.profile}")
+        _warn_about_unscoped(config)
         return 0
 
     header = ("sha256", "class", "check", "source")
@@ -490,7 +520,7 @@ def cmd_quarantine(args) -> int:
     def line(row):
         return "  ".join(row[i].ljust(widths[i]) for i in range(3)) + "  " + row[3]
 
-    print(f"{len(rows)} quarantined   {config.quarantine_dir}\n")
+    print(f"{len(rows)} quarantined   profile {args.profile}   {quarantine_dir}\n")
     print(line(header))
     for row in rows:
         print(line(row))
@@ -498,16 +528,17 @@ def cmd_quarantine(args) -> int:
     if not args.export:
         print("\n  finstone quarantine --export   copy the originals out to open them")
         print("  finstone report                why each one failed")
+        _warn_about_unscoped(config)
         return 0
 
-    written = quarantine.export_originals(
-        config.quarantine_dir, config.quarantine_files_dir, build_blob_store(config),
-    )
-    print(f"\n{len(written)} original(s) -> {config.quarantine_files_dir}")
+    files_dir = config.quarantine_files_dir_for(args.profile)
+    written = quarantine.export_originals(quarantine_dir, files_dir, build_blob_store(config))
+    print(f"\n{len(written)} original(s) -> {files_dir}")
     for path in written:
         print(f"  {diagnostics.describe(path.name, args.redact)}")
     if len(written) < len(rows):
         print(f"  {len(rows) - len(written)} not exported: no original in the store")
+    _warn_about_unscoped(config)
     return 0
 
 
@@ -517,9 +548,10 @@ def cmd_report(args) -> int:
     from .pipeline.quarantine import REASON_SUFFIX
 
     config = load_config()
-    reasons = sorted(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+    reasons = sorted(config.quarantine_dir_for(args.profile).glob(f"*{REASON_SUFFIX}"))
     if not reasons:
-        print("quarantine is empty")
+        print(f"quarantine is empty for profile {args.profile}")
+        _warn_about_unscoped(config)
         return 0
 
     blocks = [
@@ -599,6 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("quarantine", help="list quarantined documents and which files they are")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.add_argument(
         "--export", action="store_true",
         help="copy the originals out of the store under openable names",
@@ -607,6 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_quarantine)
 
     p = sub.add_parser("report", help="render every quarantined document as a readable report")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.add_argument("--redact", action="store_true", help="mask descriptions and references")
     p.add_argument("--out", help="write to a file instead of stdout")
     p.set_defaults(func=cmd_report)

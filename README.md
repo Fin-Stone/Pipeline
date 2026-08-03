@@ -30,6 +30,10 @@ finstone quarantine               which documents failed, and which files they a
 finstone report                   why every quarantined document failed
 ```
 
+Every command that touches the ledger takes `--profile dummy|prod`. It selects the uploads
+tree, the tenant, and that tenant's quarantine — real and synthetic documents share none of
+the three.
+
 ## Repo shape
 
 - `app/` contains the pipeline core logic

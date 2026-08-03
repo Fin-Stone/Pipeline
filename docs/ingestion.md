@@ -54,7 +54,7 @@ sha256 ──▶ data/store/ab/cd/<sha256>     immutable original, never mutated
         │        │                                   │
         │        └─ fails ──────────────────────────┤
         │                                            ▼
-        └─▶ persist (one transaction)      data/quarantine/<sha256>.reason.json
+        └─▶ persist (one transaction)      data/quarantine/<tenant>/<sha256>.reason.json
                                                      │
                                                      └─▶ notify, continue the run
 ```
@@ -137,9 +137,22 @@ ingestion ignored it.
 
 ### Quarantine
 
-A failure at any step writes `data/quarantine/<sha256>.reason.json` containing the failure
-class, the adapter and fingerprint involved, expected versus actual balances where relevant,
-and the traceback. The original is already in `data/store/`, so nothing is lost.
+A failure at any step writes `data/quarantine/<tenant>/<sha256>.reason.json` containing the
+failure class, the adapter and fingerprint involved, expected versus actual balances where
+relevant, and the traceback. The original is already in `data/store/`, so nothing is lost.
+
+**Quarantine is scoped by tenant, like the ledger.** A reason file is not a bare error code:
+it carries the document's real filename, the rows parsed out of it, its balances and its
+account references. Pooling that in one directory would undo the separation
+`Config.tenant_for` provides everywhere else — and, because a reason file is named by digest,
+two households holding the same statement would have overwritten each other's failures. Run
+reports are scoped the same way, under `data/reports/<tenant>/`.
+
+Reason files written before that split sit loose at the quarantine root. Nothing records
+which tenant they belong to, so they are not adopted into one; `finstone quarantine` and
+`finstone report` name them and move on. They are derived state — the ledger holds the
+authoritative quarantined status and the store holds the bytes — so
+`finstone reparse --quarantined --profile <profile>` rebuilds them in the right place.
 
 **It also writes a `source_document` row with `parse_status='quarantined'`.** Recording the
 failure in the ledger rather than only on disk is what stops the same document being
@@ -159,17 +172,17 @@ Two commands, because "why did it fail" and "which file is it" are different que
 the answer to the first is deliberately redacted:
 
 ```
-finstone quarantine            one line each: digest, failure class, check, source file
-finstone quarantine --export   copy the originals out under openable names
-finstone report                the full arithmetic of each failure
+finstone quarantine --profile prod            digest, failure class, check, source file
+finstone quarantine --profile prod --export   copy the originals out, openable
+finstone report --profile prod                the full arithmetic of each failure
 ```
 
-The listing prints the real source path, since it runs on the operator's own terminal against
-their own data; `--redact` masks it for pasting elsewhere. Check names like
-`balance_reconciliation` are this codebase's words rather than the document's and stay legible
-either way.
+Both take `--profile`, because both read one tenant's quarantine. The listing prints the real
+source path, since it runs on the operator's own terminal against their own data; `--redact`
+masks it for pasting elsewhere. Check names like `balance_reconciliation` are this codebase's
+words rather than the document's and stay legible either way.
 
-`--export` writes each failed original to `data/quarantine/files/` as
+`--export` writes each failed original to `data/quarantine/<tenant>/files/` as
 `<first 8 of digest>-<source path, flattened>`, keeping the extension so the file opens. It
 reads through the `BlobStore` port rather than from `uploads/`, because the store is the
 immutable record of what actually failed — the upload may since have been re-downloaded,

@@ -8,6 +8,7 @@ seams in app/ports/ actually swappable.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,15 @@ class ConfigError(RuntimeError):
 def _path(name: str, default: Path) -> Path:
     raw = os.environ.get(name)
     return Path(raw).expanduser().resolve() if raw else default
+
+
+def _slug(value: str) -> str:
+    """A tenant slug reduced to one safe path segment.
+
+    Tenant slugs arrive from the environment today and from a provisioning
+    system later, so neither is trusted to be a legal directory name.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "-", value).strip("-.") or DEFAULT_TENANT_SLUG
 
 
 #: The tenant and member a single-user installation resolves to. Real values
@@ -60,15 +70,29 @@ class Config:
     def quarantine_dir(self) -> Path:
         return self.data_dir / "quarantine"
 
-    @property
-    def quarantine_files_dir(self) -> Path:
+    def quarantine_dir_for(self, profile: str) -> Path:
+        """One tenant's quarantine.
+
+        Split by tenant for the same reason the ledger is. A reason file is not
+        a bare error code: it carries the document's real filename, the rows
+        parsed out of it, its balances and its account references. That is
+        precisely the data `tenant_for` exists to keep apart, and leaving it in
+        one shared directory would undo the separation everywhere else.
+        """
+        return self.quarantine_dir / _slug(self.tenant_for(profile))
+
+    def quarantine_files_dir_for(self, profile: str) -> Path:
         """Where `finstone quarantine --export` puts openable originals.
 
         Holds real statements under recognisable names, which is the whole point
         and also why it is denied to agents alongside uploads/prod — see
         docs/development-rules.md Rule 2.
         """
-        return self.quarantine_dir / "files"
+        return self.quarantine_dir_for(profile) / "files"
+
+    def reports_dir_for(self, profile: str) -> Path:
+        """One tenant's run reports. Redacted, but still that tenant's failures."""
+        return self.reports_dir / _slug(self.tenant_for(profile))
 
     @property
     def learned_rules_path(self) -> Path:

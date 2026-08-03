@@ -234,7 +234,7 @@ class TestIngest:
         counts = repository.counts(context)
         assert counts.txns == 0 and counts.documents == 0
 
-        reason_files = list(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+        reason_files = list(config.quarantine_dir_for("dummy").glob(f"*{REASON_SUFFIX}"))
         assert len(reason_files) == 1
         reason = json.loads(reason_files[0].read_text(encoding="utf-8"))
         assert reason["failure_class"] == "validation_failed"
@@ -249,7 +249,7 @@ class TestIngest:
         summary = _run(config, context, repository, blob_store, notifier, AdapterRegistry())
 
         assert summary.quarantined == 1
-        reason = json.loads(next(config.quarantine_dir.glob(f"*{REASON_SUFFIX}")).read_text(encoding="utf-8"))
+        reason = json.loads(next(config.quarantine_dir_for("dummy").glob(f"*{REASON_SUFFIX}")).read_text(encoding="utf-8"))
         assert reason["failure_class"] == "unknown_layout"
         # The computed fingerprint is recorded so registering it is a one-liner.
         assert len(reason["detail"]["fingerprint"]) == 40
@@ -321,10 +321,10 @@ class TestReparse:
         """A reason describing a failure that has since been fixed makes
         `finstone report` lie about the current state."""
         fixed = self._quarantine_one(config, repository, context, blob_store, notifier)
-        assert list(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+        assert list(config.quarantine_dir_for("dummy").glob(f"*{REASON_SUFFIX}"))
 
         reparse(config, context, repository, blob_store, notifier, fixed, quarantined_only=True)
-        assert not list(config.quarantine_dir.glob(f"*{REASON_SUFFIX}"))
+        assert not list(config.quarantine_dir_for("dummy").glob(f"*{REASON_SUFFIX}"))
 
     def test_clears_the_exported_original_too(
         self, config, repository, context, blob_store, notifier
@@ -335,12 +335,13 @@ class TestReparse:
 
         fixed = self._quarantine_one(config, repository, context, blob_store, notifier)
         exported = quarantine.export_originals(
-            config.quarantine_dir, config.quarantine_files_dir, blob_store,
+            config.quarantine_dir_for("dummy"), config.quarantine_files_dir_for("dummy"),
+            blob_store,
         )
         assert len(exported) == 1
 
         reparse(config, context, repository, blob_store, notifier, fixed, quarantined_only=True)
-        assert not list(config.quarantine_files_dir.iterdir())
+        assert not list(config.quarantine_files_dir_for("dummy").iterdir())
 
     def test_replacing_an_imported_document_does_not_duplicate_it(
         self, config, repository, context, blob_store, notifier, registry_for

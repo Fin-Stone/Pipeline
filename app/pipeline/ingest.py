@@ -366,8 +366,14 @@ def reparse(
             continue
 
         repository.delete_document(context, target["sha256"])
+        # The profile comes off the row being replaced rather than from an
+        # argument: `reparse` is scoped by tenant already, and the document
+        # knows which of that tenant's profiles filed it.
+        profile = target["source_profile"]
         quarantine.clear_reason(
-            config.quarantine_dir, target["sha256"], config.quarantine_files_dir,
+            config.quarantine_dir_for(profile),
+            target["sha256"],
+            config.quarantine_files_dir_for(profile),
         )
         # drain=False: the file being read *is* the stored original, and the
         # store is immutable.
@@ -579,10 +585,11 @@ def _quarantine(
     institution=None, doc_type=None, period_start=None, period_end=None,
 ) -> IngestOutcome:
     reason_path = quarantine.write_reason(
-        config.quarantine_dir,
+        config.quarantine_dir_for(profile),
         digest,
         failure_class=failure_class,
         message=message,
+        source_profile=profile,
         source_relpath=relpath,
         detail=detail,
         error=error,

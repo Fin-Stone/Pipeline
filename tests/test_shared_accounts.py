@@ -161,7 +161,7 @@ class TestConflictingStatement:
 
         payload = next(
             json.loads(f.read_text(encoding="utf-8"))
-            for f in config.quarantine_dir.glob(f"*{REASON_SUFFIX}")
+            for f in config.quarantine_dir_for("dummy").glob(f"*{REASON_SUFFIX}")
             if json.loads(f.read_text(encoding="utf-8"))["failure_class"] == "conflicting_statement"
         )
         detail = payload["detail"]

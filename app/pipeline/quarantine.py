@@ -46,6 +46,7 @@ def write_reason(
     *,
     failure_class: str,
     message: str,
+    source_profile: str | None = None,
     source_relpath: str | None = None,
     detail: dict | None = None,
     error: BaseException | None = None,
@@ -62,6 +63,9 @@ def write_reason(
         "quarantined_at": datetime.now(timezone.utc).isoformat(),
         "failure_class": failure_class,
         "message": message,
+        # Recorded so a reason file says which tenant's it is without relying on
+        # the directory it happens to be sitting in.
+        "source_profile": source_profile,
         "source_relpath": source_relpath,
         "detail": _plain(detail or {}),
     }
