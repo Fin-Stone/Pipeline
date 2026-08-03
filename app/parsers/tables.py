@@ -262,7 +262,8 @@ def assemble_rows(
     `description_norm` feeds the dedupe key.
     """
     rows: list[Row] = []
-    pending: list[str] = []
+    #: Carried with its position: a fragment only leads into a row it is near.
+    pending: list[tuple[float, str]] = []
     last_top: float | None = None
     text_names = [c.name for c in spec.text_columns]
     value_names = [c.name for c in spec.value_columns]
@@ -289,10 +290,18 @@ def assemble_rows(
                     previous.fragments + (fragment,), previous.lead_ins,
                 )
             else:
-                pending.append(fragment)
+                pending.append((line.top, fragment))
             continue
 
-        rows.append(Row(line, cells, tuple(pending), len(pending)))
+        # A fragment above the row joins it only if it is as close as one below
+        # would have to be. Without the distance test a category heading
+        # printed over the first row of its section — MariBank's "Purchase" —
+        # became the start of that row's description.
+        lead_ins = tuple(
+            text for top, text in pending
+            if spec.continuation_gap is None or line.top - top <= spec.continuation_gap
+        )
+        rows.append(Row(line, cells, lead_ins, len(lead_ins)))
         pending = []
         last_top = line.top
 

@@ -285,6 +285,81 @@ class TestOcbcCard:
         assert build_default_registry().resolve(document).name == "ocbc.cc"
 
 
+MARI_CC = "Maribank/cc/Aug2025_Mari_Credit_Card_E-Statement.pdf"
+MARI_CC_GROUPED = "Maribank/cc/Feb2026_Mari_Credit_Card_E-Statement.pdf"
+
+
+class TestMariBankCard:
+    """A row printed as three lines, with the values on the middle one and the
+    description wrapped above and below it."""
+
+    def _parse(self, dummy_root, relpath=MARI_CC):
+        from app.parsers.maribank.cc import MariBankCardAdapter
+
+        return MariBankCardAdapter().parse(_require(dummy_root, relpath))
+
+    @pytest.mark.parametrize("relpath", [MARI_CC, MARI_CC_GROUPED])
+    def test_reconciles(self, dummy_root, relpath):
+        account = self._parse(dummy_root, relpath).accounts[0]
+        assert account.opening_balance_minor + sum(
+            t.amount_minor for t in account.txns
+        ) == account.closing_balance_minor
+
+    def test_the_description_joins_from_both_sides_of_the_row(self, dummy_root):
+        """The merchant is printed above the dated line and the type below."""
+        account = self._parse(dummy_root).accounts[0]
+        first = account.txns[0]
+        assert "zhangjihui002.sg" in first.description_raw
+        assert "Instant Checkout" in first.description_raw
+
+    def test_a_category_heading_is_not_part_of_a_description(self, dummy_root):
+        """"Purchase" sits over the first row of its section, far enough above
+        it that it is a heading and not a wrapped line."""
+        account = self._parse(dummy_root).accounts[0]
+        assert not account.txns[0].description_raw.startswith("Purchase")
+
+    def test_the_statement_s_own_grouping_is_kept(self, dummy_root):
+        """MariBank classifies each row, which is evidence about the row and
+        is also what makes the ordering check meaningful."""
+        account = self._parse(dummy_root, MARI_CC_GROUPED).accounts[0]
+        sections = {t.section for t in account.txns}
+        assert "Purchase" in sections and "Repayment/Conversion" in sections
+
+        repayments = [t for t in account.txns if t.section == "Repayment/Conversion"]
+        assert repayments and all(t.amount_minor > 0 for t in repayments)
+
+    def test_a_type_line_is_not_mistaken_for_a_heading(self, dummy_root):
+        """A repayment is filed under "Repayment/Conversion" and carries the
+        type "Repayment" on the line below it. Only position tells them
+        apart, and reading the type as a heading loses it from the row."""
+        account = self._parse(dummy_root, MARI_CC_GROUPED).accounts[0]
+        repayment = next(t for t in account.txns if t.section == "Repayment/Conversion")
+        assert "Repayment" in repayment.description_raw
+
+    def test_amounts_carry_their_own_sign(self, dummy_root):
+        account = self._parse(dummy_root).accounts[0]
+        assert account.txns[0].amount_minor == -4534
+
+    def test_routing_needs_no_vendor_string(self, dummy_root):
+        """MariBank publishes neither producer nor creator, so the header
+        lines carry routing on their own."""
+        from app.parsers.maribank.cc import SIGNATURE
+
+        document = pdfio.load(_require(dummy_root, MARI_CC))
+        assert not (document.producer or "").strip()
+        assert SIGNATURE.matches(document)
+        assert build_default_registry().resolve(document).name == "maribank.cc"
+
+    def test_routing_does_not_depend_on_customer_data(self, dummy_root):
+        from app.parsers.maribank.cc import SIGNATURE
+
+        assert not any(
+            token in line
+            for line in SIGNATURE.requires
+            for token in ("example", "sim", "EXAMPLE AVENUE", "000000")
+        )
+
+
 class TestUnregisteredLayouts:
     @pytest.mark.parametrize("relpath", [
         "DBS/cc/-1.pdf",

@@ -439,7 +439,46 @@ class TestValidation:
         assert "amount_ceiling" in checks
 
     def test_out_of_order_dates_fail(self):
-        doc = self._document([self._txn(10, 0), self._txn(3, 0)], 0, 0)
+        """A row where the table did not put it: the run starts upward and
+        then drops, which is the shape a misread table makes."""
+        doc = self._document([self._txn(3, 0), self._txn(10, 0), self._txn(5, 0)], 0, 0)
+        checks = {f.check for f in validate(doc, amount_ceiling_minor=10**9).failures}
+        assert "date_monotonicity" in checks
+
+    def test_newest_first_is_accepted(self):
+        """Descending is a presentation choice, not disorder. MariBank prints
+        its card rows newest first and reads correctly."""
+        doc = self._document([self._txn(10, 0), self._txn(5, 0), self._txn(3, 0)], 0, 0)
+        checks = {f.check for f in validate(doc, amount_ceiling_minor=10**9).failures}
+        assert "date_monotonicity" not in checks
+
+    def test_each_section_is_ordered_on_its_own(self):
+        """A statement that files rows under headings orders each heading
+        separately: MariBank lists a month's repayments before its purchases,
+        so the two runs together are not one sequence."""
+        txns = [
+            ParsedTxn(posted_date=date(2024, 6, 2), amount_minor=0, currency="SGD",
+                      description_raw="a", section="Repayment"),
+            ParsedTxn(posted_date=date(2024, 6, 20), amount_minor=0, currency="SGD",
+                      description_raw="b", section="Purchase"),
+            ParsedTxn(posted_date=date(2024, 6, 18), amount_minor=0, currency="SGD",
+                      description_raw="c", section="Purchase"),
+        ]
+        doc = self._document(txns, 0, 0)
+        checks = {f.check for f in validate(doc, amount_ceiling_minor=10**9).failures}
+        assert "date_monotonicity" not in checks
+
+    def test_disorder_inside_one_section_still_fails(self):
+        """Grouping must not become a way to opt out of the check."""
+        txns = [
+            ParsedTxn(posted_date=date(2024, 6, 3), amount_minor=0, currency="SGD",
+                      description_raw="a", section="Purchase"),
+            ParsedTxn(posted_date=date(2024, 6, 20), amount_minor=0, currency="SGD",
+                      description_raw="b", section="Purchase"),
+            ParsedTxn(posted_date=date(2024, 6, 10), amount_minor=0, currency="SGD",
+                      description_raw="c", section="Purchase"),
+        ]
+        doc = self._document(txns, 0, 0)
         checks = {f.check for f in validate(doc, amount_ceiling_minor=10**9).failures}
         assert "date_monotonicity" in checks
 
@@ -459,12 +498,15 @@ class TestValidation:
         assert "date_monotonicity" not in {f.check for f in result.failures}
 
     def test_disorder_in_both_orderings_still_fails(self):
-        """Loosening the check must not disable it."""
+        """Loosening the check must not disable it: neither printed date can
+        explain the sequence."""
         txns = (
-            ParsedTxn(posted_date=date(2024, 6, 10), value_date=date(2024, 6, 10),
-                      amount_minor=0, currency="SGD", description_raw="a"),
             ParsedTxn(posted_date=date(2024, 6, 3), value_date=date(2024, 6, 3),
+                      amount_minor=0, currency="SGD", description_raw="a"),
+            ParsedTxn(posted_date=date(2024, 6, 20), value_date=date(2024, 6, 20),
                       amount_minor=0, currency="SGD", description_raw="b"),
+            ParsedTxn(posted_date=date(2024, 6, 10), value_date=date(2024, 6, 10),
+                      amount_minor=0, currency="SGD", description_raw="c"),
         )
         doc = self._document(list(txns), 0, 0)
         assert "date_monotonicity" in {f.check for f in validate(doc, amount_ceiling_minor=10**9).failures}

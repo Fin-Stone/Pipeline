@@ -46,6 +46,12 @@ class ParsedTxn:
     #: printed under "Withdrawal". A statement totals its columns as printed, so
     #: checking those totals needs to know where a row was, not which way it went.
     column_sign: int | None = None
+    #: The heading the statement filed this row under, where it groups them —
+    #: MariBank prints "Repayment", "Purchase" and "Cashback" as separate runs.
+    #: The institution's own classification, kept because it is evidence about
+    #: the row, and because each run is ordered on its own: a single ordering
+    #: across the whole table is not a property of a grouped statement.
+    section: str | None = None
     # Populated only for foreign-currency rows: the amount as originally
     # billed, plus the rate the institution settled it at. `amount_minor`
     # always remains the settled amount, so reconciliation is unaffected.

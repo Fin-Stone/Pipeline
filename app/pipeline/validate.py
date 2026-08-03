@@ -131,6 +131,53 @@ def validate(document: ParsedDocument, *, amount_ceiling_minor: int) -> Validati
     )
 
 
+def _ordering_groups(txns) -> list[list]:
+    """The rows as the statement grouped them, for the ordering check.
+
+    A statement that files its rows under headings orders each heading on its
+    own: MariBank lists a month's repayments before its purchases, and runs
+    both newest first. Asserting one ordering across the whole table is then a
+    claim about the document that is simply untrue, and it rejected statements
+    that had been read correctly.
+
+    Layouts that print one flat table set no section, so every row lands in a
+    single group and the check is exactly what it was.
+    """
+    groups: dict = {}
+    for txn in txns:
+        groups.setdefault(txn.section, []).append(txn)
+    return [g for g in groups.values() if g]
+
+
+def _direction(dates) -> int:
+    """Which way the sequence runs, from its first pair that moves at all."""
+    return next((1 if b > a else -1 for a, b in zip(dates, dates[1:]) if a != b), 0)
+
+
+def _is_ordered(dates) -> bool:
+    """True when the dates run consistently one way, either way.
+
+    Newest first is a presentation choice, not disorder: MariBank prints its
+    card rows in descending order and reads correctly. What the check is for is
+    a row appearing where the table did not put it, which means the table was
+    misread — and that shows up as a *change* of direction, whichever direction
+    the statement chose.
+    """
+    return dates == sorted(dates, reverse=_direction(dates) < 0)
+
+
+def _first_disorder(dates) -> int | None:
+    """Where the sequence stops going the way it started."""
+    direction = _direction(dates)
+    if direction == 0:
+        return None
+    return next(
+        (i for i in range(1, len(dates))
+         if (dates[i] - dates[i - 1]).days * direction < 0),
+        None,
+    )
+
+
 def _secondary_checks(account, document, name, amount_ceiling_minor) -> list[Failure]:
     failures: list[Failure] = []
 
@@ -162,18 +209,22 @@ def _secondary_checks(account, document, name, amount_ceiling_minor) -> list[Fai
     # The point of the check is to notice rows read out of sequence, which
     # would mean the table was misread. Ordering by either printed date
     # satisfies that.
-    orderings = {"posted_date": [t.posted_date for t in account.txns]}
-    if all(t.value_date is not None for t in account.txns) and account.txns:
-        orderings["value_date"] = [t.value_date for t in account.txns]
+    for group in _ordering_groups(account.txns):
+        orderings = {"posted_date": [t.posted_date for t in group]}
+        if group and all(t.value_date is not None for t in group):
+            orderings["value_date"] = [t.value_date for t in group]
 
-    if not any(dates == sorted(dates) for dates in orderings.values()):
+        if any(_is_ordered(dates) for dates in orderings.values()):
+            continue
+
         dates = orderings["posted_date"]
-        first_break = next((i for i in range(1, len(dates)) if dates[i] < dates[i - 1]), None)
+        first_break = _first_disorder(dates)
         failures.append(Failure(
             account=name,
             check="date_monotonicity",
             detail={
                 "checked": sorted(orderings),
+                "section": group[0].section,
                 "first_out_of_order_index": first_break,
                 "at": dates[first_break].isoformat() if first_break is not None else None,
             },
