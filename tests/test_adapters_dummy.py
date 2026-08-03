@@ -360,11 +360,78 @@ class TestMariBankCard:
         )
 
 
+MARI_ACC = "Maribank/acc/Aug2025_MariBank_e-Statement.pdf"
+MARI_ACC_FULL = "Maribank/acc/Feb2026_MariBank_e-Statement.pdf"
+
+
+class TestMariBankSavings:
+    """One document, three products. This reads the savings account and
+    recognises the rest by name rather than ignoring what it does not know."""
+
+    def _account(self, dummy_root, relpath=MARI_ACC):
+        from app.parsers.maribank.acc import MariBankAccountAdapter
+
+        return MariBankAccountAdapter().parse(_require(dummy_root, relpath)).accounts[0]
+
+    @pytest.mark.parametrize("relpath", [MARI_ACC, MARI_ACC_FULL])
+    def test_reconciles(self, dummy_root, relpath):
+        account = self._account(dummy_root, relpath)
+        assert account.opening_balance_minor + sum(
+            t.amount_minor for t in account.txns
+        ) == account.closing_balance_minor
+
+    def test_interest_is_recorded_daily(self, dummy_root):
+        """A month of accrual, at the resolution the statement published it."""
+        account = self._account(dummy_root)
+        interest = [t for t in account.txns if t.section == "Savings - Interest Details"]
+        assert len(interest) == 31
+        assert sum(t.amount_minor for t in interest) == 1598
+
+    def test_the_monthly_interest_posting_is_not_counted_twice(self, dummy_root):
+        """February prints the month's interest as a transaction *and* breaks
+        it down daily. Keeping both would count the same money twice."""
+        account = self._account(dummy_root, MARI_ACC_FULL)
+        interest = [t for t in account.txns if t.section == "Savings - Interest Details"]
+        assert sum(t.amount_minor for t in interest) == 316
+        # The aggregate row carries a month with no day, and is dropped.
+        rows = [t for t in account.txns if t.section == "Savings - Transaction Details"]
+        assert all("Interest" not in t.description_raw for t in rows)
+
+    def test_the_statement_s_own_totals_agree(self, dummy_root):
+        account = self._account(dummy_root, MARI_ACC_FULL)
+        assert account.declared_out_minor == 603064
+        assert account.declared_in_minor == 1000000
+
+    def test_a_fund_purchase_is_read_as_an_expense(self, dummy_root):
+        """Investments are cash flows here: the debit is already in the savings
+        table, so the units-and-price section adds nothing the ledger holds."""
+        account = self._account(dummy_root, MARI_ACC_FULL)
+        buys = [t for t in account.txns if "Mari Invest" in t.description_raw]
+        assert buys and all(t.amount_minor < 0 for t in buys)
+
+    def test_an_unknown_section_is_refused(self, dummy_root):
+        """A product this adapter has never seen must not vanish from a
+        document that then reports itself as fully imported."""
+        from app.parsers.maribank.acc import MariBankAccountAdapter
+        from app.ports.parser import ParseError
+
+        adapter = MariBankAccountAdapter()
+        with pytest.raises(ParseError, match="unknown statement section"):
+            adapter._classify("SAVINGS", "CRYPTO DETAILS", _FakeLine())
+
+    def test_routes_to_the_savings_adapter(self, dummy_root):
+        document = pdfio.load(_require(dummy_root, MARI_ACC))
+        assert build_default_registry().resolve(document).name == "maribank.acc"
+
+
+class _FakeLine:
+    page_number = 1
+    top = 0.0
+    text = "SAVINGS - CRYPTO DETAILS"
+
+
 class TestUnregisteredLayouts:
-    @pytest.mark.parametrize("relpath", [
-        "DBS/cc/-1.pdf",
-        "Maribank/acc/Aug2025_MariBank_e-Statement.pdf",
-    ])
+    @pytest.mark.parametrize("relpath", ["DBS/cc/-1.pdf"])
     def test_open_but_route_nowhere(self, dummy_root, relpath):
         """Institutions without an adapter must still open — several are
         owner-restricted PDFs — and must resolve to no adapter, which is what

@@ -1,10 +1,11 @@
 # Phase 1 — Ingestion and Storage
 
 **Status: implemented.** The flow described here runs end to end. Trust Bank savings and
-credit card statements, DBS consolidated statements, and MariBank and OCBC credit card
-statements import and reconcile. Two layouts are still unrouted: DBS's card statement, whose
-only sample has no activity in it at all, and MariBank's deposit-and-investment statement,
-which covers three products at once — see "MariBank's savings statement" below.
+card statements, DBS consolidated statements, MariBank's deposit-and-investment and card
+statements, and OCBC card statements all import and reconcile. One layout is still unrouted:
+DBS's card statement, whose only sample has no activity in it at all, so its row format,
+date format and debit/credit convention are unobservable. An adapter for it would be
+guessing at the only part that matters.
 
 Scope is steps 1–5 of the build order in
 [finance-pipeline-architecture.md](../finance-pipeline-architecture.md) §11: schema and
@@ -513,9 +514,9 @@ only after all six layouts were measured:
 | MariBank cc | 2 | Amount | explicit `-` |
 | OCBC cc | 1 | Amount | `CR` suffix |
 
-Implemented: `trust.acc`, `trust.cc`, `dbs.acc`, `ocbc.cc`, `maribank.cc`. See
-"Statements that group their rows" below for what MariBank forced, and
-[repo-structure.md](repo-structure.md) for where each lives.
+Implemented: `trust.acc`, `trust.cc`, `dbs.acc`, `ocbc.cc`, `maribank.cc`,
+`maribank.acc`. See "Statements that group their rows" below for what MariBank
+forced, and [repo-structure.md](repo-structure.md) for where each lives.
 
 Shared: a header row fixes the columns; a line is a row when it carries a value
 in a money column; descriptions wrap onto neighbouring lines.
@@ -531,7 +532,7 @@ begins 8pt left of the word "Balance" while a withdrawal begins 30pt right of
 Not shared, and left to adapters: how direction is read, which labels mean
 opening and closing, and how a period or account reference is found.
 
-### MariBank's savings statement, and why it is not just another adapter
+### MariBank's savings statement, and the three products in it
 
 The file is a **Deposit and Investment Statement**, and it carries three
 products in one document:
@@ -544,22 +545,30 @@ products in one document:
 | `INVESTMENTS - ACCOUNT SUMMARY` | Fund name, unit holdings, unit price, market value | **No.** A valuation, not a ledger |
 | `INVESTMENTS - TRANSACTION DETAILS` | Trade date, units, unit price, amount | **No.** Units are not minor units |
 
-The savings half is ordinary work. The investment half is not: `ParsedAccount.kind`
-is `deposit` or `card`, amounts are integer minor units of a currency, and
-nothing in the schema holds units, unit prices or a valuation date. Recording a
-fund purchase as a cash movement would lose the units, which are the only thing
-that makes the holding meaningful.
+**Investments are modelled as cash flows, not as holdings.** A purchase is an
+expense when it is bought and income when it is sold; tax on a return is its own
+expense where the statement charges it separately, and is ignored where it has
+already been deducted before the money arrives. Units, unit prices and
+valuations are deliberately not held — `ParsedAccount.kind` is `deposit` or
+`card`, and amounts are integer minor units of a currency.
 
-That matters because of the rule the DBS work established: **an unknown section
-is a `ParseError`, never a silent skip.** Parsing only the savings half and
-dropping the rest would import a document while discarding data from it, which
-is exactly the failure the reconciliation oracle exists to prevent. So this
-layout waits on a decision about how investments are modelled, not on parser
-work.
+**That is why skipping the investment sections loses nothing.** MariBank debits
+savings to buy a fund and prints the debit in the savings table: the same
+1,000.00 appears as an outgoing under `SAVINGS - TRANSACTION DETAILS` and again,
+with its unit count, under `INVESTMENTS - TRANSACTION DETAILS`. The cash
+movement is already captured. Fixed deposits work the same way.
 
-The interest table's daily rows are recorded as individual transactions, one
-per day, rather than collapsed into a monthly total — the statement's own
-figures, kept at the resolution it published them.
+The skip is therefore **by name and total**, which keeps the rule the DBS work
+established: an unknown section is a `ParseError`, never a silent pass. A future
+MariBank product cannot disappear from a document that then reports itself as
+fully imported.
+
+**Interest is recorded daily.** The interest table lists one row per day, and
+the transaction table *sometimes* also carries a single month-level posting of
+the same money — the February statement does, the August one does not. Keeping
+both would count it twice, so the aggregate row is dropped, recognised by
+carrying a month with no day. The daily rows are what remain: the resolution the
+statement published, and uniform across both formats.
 
 ### Statements that group their rows
 

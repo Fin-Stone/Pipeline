@@ -155,6 +155,7 @@ def build_default_registry(learned_path=None) -> AdapterRegistry:
     header lines that identify it. Nothing else in the pipeline changes.
     """
     from .dbs.acc import SIGNATURE as DBS_ACC_SIGNATURE, DbsAccountAdapter
+    from .maribank.acc import SIGNATURE as MARI_ACC_SIGNATURE, MariBankAccountAdapter
     from .maribank.cc import SIGNATURE as MARI_CC_SIGNATURE, MariBankCardAdapter
     from .ocbc.cc import SIGNATURE as OCBC_CC_SIGNATURE, OcbcCardAdapter
     from .trust.acc import SIGNATURE as TRUST_ACC_SIGNATURE, TrustAccountAdapter
@@ -166,4 +167,5 @@ def build_default_registry(learned_path=None) -> AdapterRegistry:
     registry.register(DbsAccountAdapter(), DBS_ACC_SIGNATURE)
     registry.register(OcbcCardAdapter(), OCBC_CC_SIGNATURE)
     registry.register(MariBankCardAdapter(), MARI_CC_SIGNATURE)
+    registry.register(MariBankAccountAdapter(), MARI_ACC_SIGNATURE)
     return registry
