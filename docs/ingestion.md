@@ -531,6 +531,24 @@ Phase 1 additions on top of it:
 `tests/test_migration.py` asserts that the migration and `app/storage/schema.py` agree,
 column for column, so the schema the tests exercise is the schema an operator actually runs.
 
+### The schema version is checked before anything runs
+
+Every command that touches the ledger compares the database's Alembic revision
+against the one the code was written for, and refuses to start if they differ:
+
+```
+error: the database schema is out of date.
+  database is at : 0001_initial
+  this code needs: 0003_statement_key
+  run:  alembic upgrade head
+```
+
+Without it a mismatch surfaces as a driver error naming a missing column,
+partway through a run, after files have already been staged. On a fresh install
+it is the first thing anyone would hit.
+
+**After pulling changes that add a migration, run `alembic upgrade head`.**
+
 ### Profiles are tenants
 
 `uploads/dummy` and `uploads/prod` resolve to **different tenants** — `default-dummy` and

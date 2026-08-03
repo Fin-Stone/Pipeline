@@ -21,7 +21,13 @@ from .parsers.registry import build_default_registry
 from .pipeline import quarantine
 from .pipeline.ingest import ingest_inbox, reparse
 from .pipeline.stage import stage
-from .storage.factory import build_blob_store, build_notifier, build_repository
+from .storage.factory import (
+    SchemaOutOfDate,
+    build_blob_store,
+    build_notifier,
+    build_repository,
+    check_schema,
+)
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -44,6 +50,7 @@ def cmd_stage(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
+        check_schema(repository)
         context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         result = stage(config, args.profile, repository=repository, context=context)
     finally:
@@ -60,6 +67,7 @@ def cmd_ingest(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
+        check_schema(repository)
         context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         summary = ingest_inbox(
             config, context, repository, build_blob_store(config), build_notifier(config),
@@ -75,6 +83,7 @@ def cmd_run(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
+        check_schema(repository)
         context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         staged = stage(config, args.profile, repository=repository, context=context)
         print(
@@ -195,6 +204,7 @@ def cmd_status(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
+        check_schema(repository)
         context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         counts = repository.counts(context)
     finally:
@@ -227,6 +237,7 @@ def cmd_reparse(args) -> int:
     config = load_config()
     repository = build_repository(config)
     try:
+        check_schema(repository)
         context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         summary = reparse(
             config, context, repository, build_blob_store(config), build_notifier(config),
@@ -486,6 +497,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except SchemaOutOfDate as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ tests pass against a schema nobody is running. This compares the two directly.
 
 from __future__ import annotations
 
+import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine, inspect
@@ -123,3 +124,54 @@ def test_migration_is_reversible(tmp_path):
     command.downgrade(config, "base")
     remaining = set(inspect(create_engine(url)).get_table_names()) - {"alembic_version"}
     assert remaining == set()
+
+
+class TestSchemaVersionGuard:
+    """A database the code does not match must fail immediately and say what
+    to do, not surface as a missing column partway through a run."""
+
+    def test_an_unmigrated_database_is_refused(self, tmp_path):
+        from app.storage.factory import SchemaOutOfDate, check_schema
+        from app.storage.sqlalchemy_repo import SqlAlchemyLedgerRepository
+
+        # create_schema builds the tables but records no revision, which is
+        # exactly what a database restored or hand-built looks like.
+        repo = SqlAlchemyLedgerRepository(f"sqlite:///{(tmp_path / 'x.db').as_posix()}")
+        repo.create_schema()
+        with pytest.raises(SchemaOutOfDate, match="alembic upgrade head"):
+            check_schema(repo)
+        repo.close()
+
+    def test_a_migrated_database_passes(self, tmp_path):
+        from sqlalchemy import create_engine
+        from app.storage.factory import check_schema
+        from app.storage.sqlalchemy_repo import SqlAlchemyLedgerRepository
+
+        url = f"sqlite:///{(tmp_path / 'y.db').as_posix()}"
+        config = AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+        config.set_main_option("script_location", str(REPO_ROOT / "app" / "migrations"))
+        config.set_main_option("sqlalchemy.url", url)
+        config.attributes["url_set_by_caller"] = True
+        command.upgrade(config, "head")
+
+        repo = SqlAlchemyLedgerRepository(url, engine=create_engine(url))
+        check_schema(repo)   # must not raise
+        repo.close()
+
+    def test_the_message_names_both_revisions(self, tmp_path):
+        from sqlalchemy import create_engine, text
+        from app.storage.factory import SchemaOutOfDate, check_schema, head_revision
+        from app.storage.sqlalchemy_repo import SqlAlchemyLedgerRepository
+
+        url = f"sqlite:///{(tmp_path / 'z.db').as_posix()}"
+        engine = create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
+            conn.execute(text("INSERT INTO alembic_version VALUES ('0001_initial')"))
+
+        repo = SqlAlchemyLedgerRepository(url, engine=engine)
+        with pytest.raises(SchemaOutOfDate) as caught:
+            check_schema(repo)
+        message = str(caught.value)
+        assert "0001_initial" in message and head_revision() in message
+        repo.close()
