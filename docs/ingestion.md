@@ -1,8 +1,10 @@
 # Phase 1 — Ingestion and Storage
 
 **Status: implemented.** The flow described here runs end to end. Trust Bank savings and
-credit card statements and DBS consolidated statements import and reconcile; MariBank and
-OCBC quarantine as unroutable until their adapters are written.
+credit card statements, DBS consolidated statements, and MariBank and OCBC credit card
+statements import and reconcile. Two layouts are still unrouted: DBS's card statement, whose
+only sample has no activity in it at all, and MariBank's deposit-and-investment statement,
+which covers three products at once — see "MariBank's savings statement" below.
 
 Scope is steps 1–5 of the build order in
 [finance-pipeline-architecture.md](../finance-pipeline-architecture.md) §11: schema and
@@ -511,6 +513,10 @@ only after all six layouts were measured:
 | MariBank cc | 2 | Amount | explicit `-` |
 | OCBC cc | 1 | Amount | `CR` suffix |
 
+Implemented: `trust.acc`, `trust.cc`, `dbs.acc`, `ocbc.cc`, `maribank.cc`. See
+"Statements that group their rows" below for what MariBank forced, and
+[repo-structure.md](repo-structure.md) for where each lives.
+
 Shared: a header row fixes the columns; a line is a row when it carries a value
 in a money column; descriptions wrap onto neighbouring lines.
 
@@ -524,6 +530,63 @@ begins 8pt left of the word "Balance" while a withdrawal begins 30pt right of
 
 Not shared, and left to adapters: how direction is read, which labels mean
 opening and closing, and how a period or account reference is found.
+
+### MariBank's savings statement, and why it is not just another adapter
+
+The file is a **Deposit and Investment Statement**, and it carries three
+products in one document:
+
+| Section | Shape | Fits the model? |
+|---|---|---|
+| `SAVINGS - TRANSACTION DETAILS` | Outgoing / Incoming columns | Yes, a deposit account |
+| `SAVINGS - INTEREST DETAILS` | One row per day: previous-day balance and that day's interest | Yes, as transactions |
+| `FIXED DEPOSIT - INTEREST DETAILS` | Its own balance and interest | A second deposit account |
+| `INVESTMENTS - ACCOUNT SUMMARY` | Fund name, unit holdings, unit price, market value | **No.** A valuation, not a ledger |
+| `INVESTMENTS - TRANSACTION DETAILS` | Trade date, units, unit price, amount | **No.** Units are not minor units |
+
+The savings half is ordinary work. The investment half is not: `ParsedAccount.kind`
+is `deposit` or `card`, amounts are integer minor units of a currency, and
+nothing in the schema holds units, unit prices or a valuation date. Recording a
+fund purchase as a cash movement would lose the units, which are the only thing
+that makes the holding meaningful.
+
+That matters because of the rule the DBS work established: **an unknown section
+is a `ParseError`, never a silent skip.** Parsing only the savings half and
+dropping the rest would import a document while discarding data from it, which
+is exactly the failure the reconciliation oracle exists to prevent. So this
+layout waits on a decision about how investments are modelled, not on parser
+work.
+
+The interest table's daily rows are recorded as individual transactions, one
+per day, rather than collapsed into a monthly total — the statement's own
+figures, kept at the resolution it published them.
+
+### Statements that group their rows
+
+MariBank files card rows under headings — `Repayment/Conversion`, `Purchase`,
+`Cashback` — and orders **each heading on its own**, newest first. Two rules
+follow from that, both learned by getting them wrong first.
+
+**One ordering across the whole table is not a property of a grouped
+statement.** `date_monotonicity` now checks each group separately and accepts
+either direction: newest first is a presentation choice, not disorder. What the
+check is really for is a row appearing where the table did not put it, and that
+shows up as a *change* of direction whichever way the statement runs.
+`ParsedTxn.section` carries the institution's own classification, which is also
+worth keeping for its own sake.
+
+**A heading is found by position, not wording.** The two are not separable by
+text: a repayment is filed under `Repayment/Conversion` and carries the type
+`Repayment` on the line directly below it. MariBank centres a heading over the
+description column so it overhangs the left edge, while every description and
+type line sits flush against it.
+
+Related, and the reason `assemble_rows` bounds its lead-ins: a description may
+wrap *above* its row as well as below — MariBank prints the merchant above the
+dated line and the type below, because the dates and amount are centred against
+a two-line description cell. A fragment above only joins a row if it is as
+close as a fragment below would have to be, or a category heading printed over
+the first row of its section becomes part of that row's description.
 
 **Where the column carries the direction, the amount can still overrule it.** A
 reversal is printed as a negative entry in the column it reverses — a rejected
