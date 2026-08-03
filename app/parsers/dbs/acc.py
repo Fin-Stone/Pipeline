@@ -63,7 +63,12 @@ DATE_COL, DESC_COL, WITHDRAWAL_COL, DEPOSIT_COL, BALANCE_COL = (
 #: The last amount-shaped token in a cell. DBS prefixes balances with their
 #: currency ("SGD 50,000.00") and its totals row reads "in SGD: 4,000.00", so a
 #: money cell is not always the amount by itself.
-_AMOUNT_IN_CELL = re.compile(r"[-+]?[\d,]*\d\.\d{2}")
+#:
+#: The trailing minus is part of the amount and must be captured with it. DBS
+#: prints a reversal as a negative entry in the column it is reversing —
+#: "100.00" out on one line, "100.00-" on the next — and matching only the
+#: digits turned a refund into a second withdrawal.
+_AMOUNT_IN_CELL = re.compile(r"[-+]?[\d,]*\d\.\d{2}-?")
 
 _HEADER = re.compile(r"\bDate\b.*\bDescription\b.*\bWithdrawal\b", re.IGNORECASE)
 _ACCOUNT_LINE = re.compile(r"Account\s+No\.?\s*[:.]?\s*([0-9][0-9\- ]{5,})", re.IGNORECASE)
@@ -302,9 +307,14 @@ class DbsAccountAdapter:
 
         return ParsedTxn(
             posted_date=posted,
-            amount_minor=column.sign * abs(minor),
+            # The column carries the direction, and the amount's own sign
+            # negates it: "100.00-" in the withdrawal column is a reversal, so
+            # money *in*. Taking abs() here discarded that and counted every
+            # reversal as a further withdrawal.
+            amount_minor=column.sign * minor,
             currency=BASE_CURRENCY,
             description_raw=row.description(DESC_COL),
+            column_sign=column.sign,
         )
 
     def _table_lines(self, lines: list[pdfio.Line]) -> list[pdfio.Line]:

@@ -41,6 +41,21 @@ class ValidationResult:
         return not self.failures
 
 
+def _printed_under(txn) -> int:
+    """Which column the statement printed this row in, not which way it went.
+
+    A statement totals its amount columns exactly as printed, and a reversal is
+    printed as a negative entry in the column it reverses. So a refund of a
+    withdrawal reduces the withdrawal total; it does not appear as a deposit.
+    Comparing against those totals has to follow the same rule, or every
+    statement containing a reversal disagrees with its own arithmetic.
+
+    Where a layout has a single amount column there is nothing to record, and
+    the amount's sign is the only thing the direction can come from.
+    """
+    return txn.column_sign or (-1 if txn.amount_minor < 0 else 1)
+
+
 def _label(account: ParsedAccount) -> str:
     if account.sub_account_label:
         return f"{account.account_ref_masked}/{account.sub_account_label}"
@@ -76,8 +91,8 @@ def validate(document: ParsedDocument, *, amount_ceiling_minor: int) -> Validati
             unverified.append(name)
 
         if account.declared_out_minor is not None and account.declared_in_minor is not None:
-            out = -sum(t.amount_minor for t in account.txns if t.amount_minor < 0)
-            into = sum(t.amount_minor for t in account.txns if t.amount_minor > 0)
+            out = -sum(t.amount_minor for t in account.txns if _printed_under(t) < 0)
+            into = sum(t.amount_minor for t in account.txns if _printed_under(t) > 0)
             if (out, into) != (account.declared_out_minor, account.declared_in_minor):
                 failures.append(Failure(
                     account=name,

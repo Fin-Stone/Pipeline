@@ -23,6 +23,7 @@ _AMOUNT_RE = re.compile(
     (?P<sign2>[-+])?\s*
     (?P<symbol>S\$|US\$|A\$|HK\$|NZ\$|RM|[£€¥$])?\s*
     (?P<digits>\d[\d,\s]*(?:\.\d+)?)\s*
+    (?P<trailing_sign>-)?\s*
     (?P<close_paren>\))?\s*
     (?P<code>[A-Z]{3})?\s*
     $""",
@@ -67,6 +68,12 @@ def parse_amount(text: str, *, default_currency: str | None = None) -> tuple[int
         "1,000.00"     -> (117903, None)
         "25.63 USD"    -> (2563, "USD")
         "(45.00)"      -> (-4500, None)
+        "100.00-"      -> (-10000, None)
+
+    The trailing minus is the accounting convention for a negative entry inside
+    a column that already has a direction — a reversal printed in a withdrawal
+    column, which the statement then nets off within that column's own total.
+    Reading it as a positive withdrawal counts the money out twice.
     """
     if text is None:
         raise AmountParseError("no amount given")
@@ -81,7 +88,7 @@ def parse_amount(text: str, *, default_currency: str | None = None) -> tuple[int
         raise AmountParseError(f"cannot read {text!r} as an amount") from exc
 
     negative = bool(m.group("open_paren")) and bool(m.group("close_paren"))
-    for group in ("sign", "sign2"):
+    for group in ("sign", "sign2", "trailing_sign"):
         if m.group(group) == "-":
             negative = not negative
     if negative:

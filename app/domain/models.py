@@ -37,6 +37,15 @@ class ParsedTxn:
     currency: str
     description_raw: str
     value_date: date | None = None
+    #: Which of a two-column layout's amount columns this was printed in: -1
+    #: for money out, +1 for money in, None where the layout has one column and
+    #: the direction is written in the amount itself.
+    #:
+    #: Not derivable from `amount_minor`, which is the point: a reversal prints
+    #: as a negative entry in the column it reverses, so it is money in that was
+    #: printed under "Withdrawal". A statement totals its columns as printed, so
+    #: checking those totals needs to know where a row was, not which way it went.
+    column_sign: int | None = None
     # Populated only for foreign-currency rows: the amount as originally
     # billed, plus the rate the institution settled it at. `amount_minor`
     # always remains the settled amount, so reconciliation is unaffected.

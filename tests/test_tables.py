@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from app.parsers import tables
+from app.parsers.dbs.acc import _AMOUNT_IN_CELL, _amount_text
 from app.parsers.pdfio import Line, Word
 
 
@@ -309,3 +310,92 @@ class TestDbsPeriodAndTotals:
             parser_version="t@1", accounts=(account,),
         )
         assert validate(document, amount_ceiling_minor=10**9).ok
+
+
+class TestReversals:
+    """A reversal is printed as a negative entry in the column it reverses.
+
+    DBS shows a rejected transfer as "100.00" in the Withdrawal column and
+    "100.00-" on the next line. Both halves of reading that were wrong: the
+    trailing minus was dropped from the cell, and the adapter then took abs()
+    of whatever survived. Each reversal became a second withdrawal, so a
+    statement was wrong by twice the amount, every time.
+    """
+
+    def _cells(self, withdrawal):
+        spec = _dbs_spec(money_pattern=_AMOUNT_IN_CELL)
+        row = _line([
+            ("04/12/2021", 45.4, 90.4), ("Transfer", 211.2, 241.7),
+            (withdrawal, 367.9, 385.9), ("53,398.18", 507.7, 547.8),
+        ])
+        return spec, tables.assemble_rows([row], spec)[0]
+
+    def test_a_trailing_minus_stays_with_its_amount(self):
+        """The cell regex matched the digits and left the sign behind."""
+        assert _AMOUNT_IN_CELL.findall("100.00-") == ["100.00-"]
+        assert _amount_text("100.00-") == "100.00-"
+
+    def test_a_reversal_in_the_withdrawal_column_is_money_in(self):
+        from app.domain.money import parse_amount
+
+        spec, row = self._cells("100.00-")
+        column, text = tables.money_cells(row, spec)[0]
+        minor, _ = parse_amount(_amount_text(text), default_currency="SGD")
+
+        assert column.name == "withdrawal" and column.sign == -1
+        # The column says out; the amount's own sign says undo that.
+        assert column.sign * minor == 10000
+
+    def test_an_ordinary_withdrawal_is_unaffected(self):
+        from app.domain.money import parse_amount
+
+        spec, row = self._cells("100.00")
+        column, text = tables.money_cells(row, spec)[0]
+        minor, _ = parse_amount(_amount_text(text), default_currency="SGD")
+        assert column.sign * minor == -10000
+
+    def test_a_reversal_nets_off_inside_its_own_column_total(self):
+        """The statement totals its columns as printed, so a refund reduces the
+        withdrawal total rather than appearing as a deposit. Counting it by the
+        sign of the amount put it on the wrong side and every statement holding
+        a reversal disagreed with its own arithmetic."""
+        from datetime import date
+        from app.domain.models import DEPOSIT, ParsedAccount, ParsedDocument, ParsedTxn
+        from app.pipeline.validate import validate
+
+        def txn(amount, column_sign):
+            return ParsedTxn(posted_date=date(2025, 9, 4), amount_minor=amount,
+                             currency="SGD", description_raw="a",
+                             column_sign=column_sign)
+
+        account = ParsedAccount(
+            account_ref_masked="x", currency="SGD", kind=DEPOSIT,
+            txns=(
+                txn(-50000, -1),   # a withdrawal
+                txn(+10000, -1),   # reversed, printed under Withdrawal
+                txn(+20000, +1),   # a deposit
+            ),
+            opening_balance_minor=100000,
+            closing_balance_minor=80000,
+            # 500.00 out less the 100.00 put back, and 200.00 in.
+            declared_out_minor=40000,
+            declared_in_minor=20000,
+        )
+        document = ParsedDocument(
+            institution="DBS", doc_type="acc",
+            period_start=date(2025, 9, 1), period_end=date(2025, 9, 30),
+            parser_version="t@1", accounts=(account,),
+        )
+        assert validate(document, amount_ceiling_minor=10**9).ok
+
+    def test_a_layout_with_one_amount_column_still_works(self):
+        """Where nothing was recorded, the amount's sign is all there is."""
+        from app.pipeline.validate import _printed_under
+        from datetime import date
+        from app.domain.models import ParsedTxn
+
+        out = ParsedTxn(posted_date=date(2025, 9, 4), amount_minor=-100,
+                        currency="SGD", description_raw="a")
+        into = ParsedTxn(posted_date=date(2025, 9, 4), amount_minor=100,
+                         currency="SGD", description_raw="b")
+        assert _printed_under(out) == -1 and _printed_under(into) == 1

@@ -24,6 +24,10 @@ class TestMoney:
         ("(45.00)", -4500, None),
         ("-12.50", -1250, None),
         ("S$4,400.00", 440000, "SGD"),
+        # The accounting trailing minus: a negative entry inside a column that
+        # already has a direction, which is how DBS prints a reversal.
+        ("100.00-", -10000, None),
+        ("1,234.56-", -123456, None),
     ])
     def test_parses_statement_amounts(self, text, minor, currency):
         assert parse_amount(text) == (minor, currency)

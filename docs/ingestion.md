@@ -505,7 +505,7 @@ only after all six layouts were measured:
 | Layout | Dates | Amount columns | Direction from |
 |---|---|---|---|
 | Trust acc / cc | 1–2 | FCY + SGD | leading `+` |
-| DBS acc | 1 | Withdrawal, Deposit, Balance | which column |
+| DBS acc | 1 | Withdrawal, Deposit, Balance | which column, trailing `-` reverses |
 | DBS cc | 1 | Amount | `CR` suffix |
 | MariBank acc | 1 | Outgoing, Incoming | which column |
 | MariBank cc | 2 | Amount | explicit `-` |
@@ -524,6 +524,19 @@ begins 8pt left of the word "Balance" while a withdrawal begins 30pt right of
 
 Not shared, and left to adapters: how direction is read, which labels mean
 opening and closing, and how a period or account reference is found.
+
+**Where the column carries the direction, the amount can still overrule it.** A
+reversal is printed as a negative entry in the column it reverses — a rejected
+transfer shows as `100.00` under Withdrawal and `100.00-` on the next line — so
+the column says which way and the amount's own trailing minus says *undo that*.
+Reading only the digits turns a refund into a second withdrawal, and the
+statement comes out wrong by twice the amount.
+
+That convention reaches the totals check as well. A statement sums its columns
+exactly as printed, so a reversal reduces the withdrawal total rather than
+appearing among the deposits. `ParsedTxn.column_sign` records which column a row
+was printed in, because that is not recoverable from the amount afterwards: a
+reversal is money in that was printed under "Withdrawal".
 
 ### A statement's identity is its accounts and period
 
