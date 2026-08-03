@@ -71,6 +71,11 @@ class ParsedAccount:
     sub_account_label: str | None = None
     opening_balance_minor: int | None = None
     closing_balance_minor: int | None = None
+    #: Totals the statement states for itself, where it prints them. An
+    #: independent check: a row read into the wrong column changes both totals
+    #: while leaving the net movement — and so the closing balance — correct.
+    declared_out_minor: int | None = None
+    declared_in_minor: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ACCOUNT_KINDS:

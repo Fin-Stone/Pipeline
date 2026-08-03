@@ -75,6 +75,24 @@ def validate(document: ParsedDocument, *, amount_ceiling_minor: int) -> Validati
             # recorded so the document is never mistaken for a reconciled one.
             unverified.append(name)
 
+        if account.declared_out_minor is not None and account.declared_in_minor is not None:
+            out = -sum(t.amount_minor for t in account.txns if t.amount_minor < 0)
+            into = sum(t.amount_minor for t in account.txns if t.amount_minor > 0)
+            if (out, into) != (account.declared_out_minor, account.declared_in_minor):
+                failures.append(Failure(
+                    account=name,
+                    check="declared_totals",
+                    detail={
+                        "out_parsed_minor": out,
+                        "out_stated_minor": account.declared_out_minor,
+                        "in_parsed_minor": into,
+                        "in_stated_minor": account.declared_in_minor,
+                        "out_difference_minor": out - account.declared_out_minor,
+                        "in_difference_minor": into - account.declared_in_minor,
+                        "txn_count": len(account.txns),
+                    },
+                ))
+
         failures.extend(_secondary_checks(account, document, name, amount_ceiling_minor))
 
     if document.declared_txn_count is not None and document.declared_txn_count != document.txn_count:

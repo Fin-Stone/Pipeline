@@ -229,3 +229,83 @@ class TestMoneyPattern:
         spec = _dbs_spec()
         line = _line([("x", 45.4, 60.0), ("4", 380.0, 385.0)], top=536.0)
         assert len(tables.assemble_rows([line], spec)) == 1
+
+
+class TestDbsPeriodAndTotals:
+    """Two things the real corpus forced, both about not inventing facts."""
+
+    def test_the_period_starts_where_the_rows_do(self):
+        """DBS prints only "as at <date>" and its cycles are not calendar
+        months: a September statement carries rows dated 31 August, because the
+        cycle runs from the day after the previous statement. Assuming the
+        first of the month rejected six correctly-read statements."""
+        from datetime import date
+        from app.domain.models import DEPOSIT, ParsedAccount, ParsedTxn
+        from app.parsers.dbs.acc import _period_start
+
+        account = ParsedAccount(
+            account_ref_masked="x", currency="SGD", kind=DEPOSIT,
+            txns=(
+                ParsedTxn(posted_date=date(2025, 8, 31), amount_minor=-100,
+                          currency="SGD", description_raw="a"),
+                ParsedTxn(posted_date=date(2025, 9, 4), amount_minor=-100,
+                          currency="SGD", description_raw="b"),
+            ),
+        )
+        assert _period_start([account], date(2025, 9, 30)) == date(2025, 8, 31)
+
+    def test_an_ordinary_month_still_starts_on_the_first(self):
+        from datetime import date
+        from app.domain.models import DEPOSIT, ParsedAccount, ParsedTxn
+        from app.parsers.dbs.acc import _period_start
+
+        account = ParsedAccount(
+            account_ref_masked="x", currency="SGD", kind=DEPOSIT,
+            txns=(ParsedTxn(posted_date=date(2025, 9, 4), amount_minor=-100,
+                            currency="SGD", description_raw="a"),),
+        )
+        assert _period_start([account], date(2025, 9, 30)) == date(2025, 9, 1)
+
+    def test_declared_totals_are_checked_by_the_validator(self):
+        """As a validation failure rather than a parse error, the balance check
+        still runs and the report shows the rows that disagree."""
+        from datetime import date
+        from app.domain.models import DEPOSIT, ParsedAccount, ParsedDocument, ParsedTxn
+        from app.pipeline.validate import validate
+
+        account = ParsedAccount(
+            account_ref_masked="x", currency="SGD", kind=DEPOSIT,
+            txns=(ParsedTxn(posted_date=date(2025, 9, 4), amount_minor=-60000,
+                            currency="SGD", description_raw="a"),),
+            opening_balance_minor=100000, closing_balance_minor=40000,
+            declared_out_minor=10000,      # statement says 100.00 went out
+            declared_in_minor=0,
+        )
+        document = ParsedDocument(
+            institution="DBS", doc_type="acc",
+            period_start=date(2025, 9, 1), period_end=date(2025, 9, 30),
+            parser_version="t@1", accounts=(account,),
+        )
+        result = validate(document, amount_ceiling_minor=10**9)
+        checks = {f.check for f in result.failures}
+        # The balances agree, so only the declared totals catch this.
+        assert checks == {"declared_totals"}
+
+    def test_matching_declared_totals_pass(self):
+        from datetime import date
+        from app.domain.models import DEPOSIT, ParsedAccount, ParsedDocument, ParsedTxn
+        from app.pipeline.validate import validate
+
+        account = ParsedAccount(
+            account_ref_masked="x", currency="SGD", kind=DEPOSIT,
+            txns=(ParsedTxn(posted_date=date(2025, 9, 4), amount_minor=-60000,
+                            currency="SGD", description_raw="a"),),
+            opening_balance_minor=100000, closing_balance_minor=40000,
+            declared_out_minor=60000, declared_in_minor=0,
+        )
+        document = ParsedDocument(
+            institution="DBS", doc_type="acc",
+            period_start=date(2025, 9, 1), period_end=date(2025, 9, 30),
+            parser_version="t@1", accounts=(account,),
+        )
+        assert validate(document, amount_ceiling_minor=10**9).ok

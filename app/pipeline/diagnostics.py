@@ -133,6 +133,23 @@ def reconciliation_report(
         detail = failure.get("detail", {})
         out += ["", THIN, f"ACCOUNT  {_describe(failure.get('account', '?'), redact)}", THIN]
 
+        if failure.get("check") == "declared_totals":
+            width = 34
+            out.append(f"  {'money out, parsed rows':<{width}}{_money(detail.get('out_parsed_minor'))}")
+            out.append(f"  {'money out, statement says':<{width}}{_money(detail.get('out_stated_minor'))}")
+            out.append(f"  {'money in, parsed rows':<{width}}{_money(detail.get('in_parsed_minor'))}")
+            out.append(f"  {'money in, statement says':<{width}}{_money(detail.get('in_stated_minor'))}")
+            out.append("")
+            out.append("  The statement states its own totals and they disagree with the rows")
+            out.append("  read from it. This catches what the balance check cannot: a row read")
+            out.append("  into the wrong column changes both totals while leaving the net")
+            out.append("  movement, and so the closing balance, correct.")
+            for side, key in (("out", "out_difference_minor"), ("in", "in_difference_minor")):
+                difference = detail.get(key) or 0
+                if difference:
+                    out.append(f"  money {side} differs by {_money(difference).strip()}")
+            continue
+
         if failure.get("check") != "balance_reconciliation":
             out.append(f"  check failed: {failure.get('check')}")
             for key, value in detail.items():

@@ -99,6 +99,25 @@ _SKIP = re.compile(
 CONTINUATION_GAP = None
 
 
+def _period_start(accounts, statement_date):
+    """Where the statement's period begins.
+
+    DBS prints only "as at <date>" and no period, and its cycles are **not
+    calendar months**: a September statement legitimately carries rows dated
+    31 August, because the cycle runs from the day after the previous
+    statement. Assuming the first of the month rejected six statements that
+    were read correctly.
+
+    So the start is taken from the document rather than invented: the earliest
+    posting date, or the first of the statement's month when that is earlier.
+    The upper bound stays the declared statement date, which is the half of the
+    period check that can still catch a misdated row.
+    """
+    dates = [t.posted_date for a in accounts for t in a.txns]
+    month_start = statement_date.replace(day=1)
+    return min([*dates, month_start]) if dates else month_start
+
+
 def _amount_text(cell: str) -> str:
     """Pull the amount out of a cell that may carry a currency alongside it."""
     matches = _AMOUNT_IN_CELL.findall(cell or "")
@@ -115,8 +134,6 @@ class DbsAccountAdapter:
         document = pdfio.load(Path(path), password=password)
 
         statement_date = self._statement_date(document)
-        period_start = statement_date.replace(day=1)
-
         header = self._header(document)
         spec = tables.TableSpec(
             columns=tables.columns_from_header(header, [
@@ -137,14 +154,14 @@ class DbsAccountAdapter:
             money_pattern=_AMOUNT_IN_CELL,
         )
 
-        accounts = self._parse_accounts(document, spec, statement_date, period_start)
+        accounts = self._parse_accounts(document, spec, statement_date, statement_date)
         if not accounts:
             raise ParseError("no accounts found in Transaction Details")
 
         return ParsedDocument(
             institution=self.institution,
             doc_type=self.doc_type,
-            period_start=period_start,
+            period_start=_period_start(accounts, statement_date),
             period_end=statement_date,
             statement_date=statement_date,
             parser_version=f"{self.name}@{self.version}",
@@ -241,7 +258,7 @@ class DbsAccountAdapter:
         if opening is None and closing is None and not txns:
             return None
 
-        account = ParsedAccount(
+        return ParsedAccount(
             account_ref_masked=account_ref,
             sub_account_label=None,
             currency=BASE_CURRENCY,
@@ -249,10 +266,9 @@ class DbsAccountAdapter:
             txns=tuple(txns),
             opening_balance_minor=opening,
             closing_balance_minor=closing,
+            declared_out_minor=declared[0] if declared else None,
+            declared_in_minor=declared[1] if declared else None,
         )
-        if declared is not None:
-            _check_declared_totals(account, declared)
-        return account
 
     def _txn(self, row, spec, period_start, statement_date) -> ParsedTxn | None:
         amounts = tables.money_cells(row, spec)
@@ -325,27 +341,3 @@ class DbsAccountAdapter:
         except AmountParseError:
             return None
         return abs(withdrawal), abs(deposit)
-
-
-def _check_declared_totals(account: ParsedAccount, declared: tuple[int, int]) -> None:
-    """Compare the parsed rows against the totals DBS states for itself.
-
-    Independent of the balance check, and catches something it cannot: a row
-    read into the wrong column changes both totals while leaving the net
-    movement — and therefore the closing balance — correct.
-    """
-    withdrawn = -sum(t.amount_minor for t in account.txns if t.amount_minor < 0)
-    deposited = sum(t.amount_minor for t in account.txns if t.amount_minor > 0)
-    if (withdrawn, deposited) != declared:
-        raise ParseError(
-            "parsed totals disagree with the totals the statement states for itself",
-            context={
-                "failed_on": "declared totals",
-                "columns": {
-                    "withdrawals_parsed": f"{withdrawn / 100:,.2f}",
-                    "withdrawals_stated": f"{declared[0] / 100:,.2f}",
-                    "deposits_parsed": f"{deposited / 100:,.2f}",
-                    "deposits_stated": f"{declared[1] / 100:,.2f}",
-                },
-            },
-        )
