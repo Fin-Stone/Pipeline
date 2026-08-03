@@ -48,15 +48,8 @@ def head_revision() -> str | None:
     ini = REPO_ROOT / "alembic.ini"
     if not ini.exists():
         return None
-    # Reading the script directory configures alembic's loggers, which then
-    # narrate to stderr. This is a silent lookup, not a migration run.
-    previous = logging.getLogger("alembic").level
-    logging.getLogger("alembic").setLevel(logging.WARNING)
-    try:
-        script = ScriptDirectory.from_config(AlembicConfig(str(ini)))
-        return script.get_current_head()
-    finally:
-        logging.getLogger("alembic").setLevel(previous)
+    script = ScriptDirectory.from_config(AlembicConfig(str(ini)))
+    return script.get_current_head()
 
 
 def current_revision(engine) -> str | None:

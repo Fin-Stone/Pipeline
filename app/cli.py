@@ -44,6 +44,11 @@ def _configure_logging(verbose: bool) -> None:
         stream=sys.stderr,
     )
     logging.getLogger("finstone").setLevel(logging.DEBUG if verbose else logging.ERROR + 1)
+    # Reading the migration head to check the schema version makes alembic
+    # narrate its plugin setup. Migrations are run through the `alembic`
+    # command, which has its own logging config; nothing alembic says belongs
+    # in this tool's output.
+    logging.getLogger("alembic").setLevel(logging.WARNING)
 
 
 def cmd_stage(args) -> int:
