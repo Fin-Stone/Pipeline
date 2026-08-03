@@ -126,6 +126,10 @@ def _print_summary(summary, config=None) -> None:
     print(f"processed {summary.processed}: {', '.join(parts)}; "
           f"{summary.txns_inserted} transaction(s) inserted")
 
+    if summary.healed:
+        print(f"  healed:   {summary.healed} document(s) matched a renamed vendor string "
+              f"and reconciled; see `finstone learned`")
+
     if not summary.quarantined:
         return
 
@@ -178,7 +182,7 @@ def cmd_fingerprint(args) -> int:
     path = Path(args.path)
     config = load_config()
     document = pdfio.load(path, password=config.pdf_password_for(path.parent.name))
-    registry = build_default_registry()
+    registry = build_default_registry(config.learned_rules_path)
 
     described = fingerprinting.describe(document)
     if args.redact:
@@ -260,6 +264,30 @@ def cmd_reparse(args) -> int:
     return 0
 
 
+def cmd_learned(args) -> int:
+    """List vendor strings the pipeline proved belong to an adapter."""
+    from .parsers.learned import LearnedRules
+
+    config = load_config()
+    learned = LearnedRules.load(config.learned_rules_path)
+    if not learned:
+        print("nothing learned yet")
+        return 0
+
+    print(f"{len(learned)} learned vendor string(s)  ({config.learned_rules_path})\n")
+    for vendor in learned.vendors:
+        print(f"{vendor.adapter}")
+        print(f"  producer  {vendor.producer or '(none)'}")
+        print(f"  creator   {vendor.creator or '(none)'}")
+        print(f"  learned   {vendor.learned_at}")
+        evidence = vendor.evidence or {}
+        print(f"  proved by {evidence.get('proved_by_sha256', '?')[:16]}  "
+              f"({evidence.get('accounts_reconciled', '?')} account(s) reconciled, "
+              f"{evidence.get('transactions', '?')} transactions)")
+        print()
+    return 0
+
+
 def cmd_adapters(args) -> int:
     """List what each adapter claims, so routing is inspectable."""
     for registration in build_default_registry().registrations():
@@ -291,7 +319,7 @@ def cmd_doctor(args) -> int:
 
     config = load_config()
     digest = sha256_file(path)
-    registry = build_default_registry()
+    registry = build_default_registry(config.learned_rules_path)
 
     try:
         document = pdfio.load(path, password=config.pdf_password_for(path.parent.name))
@@ -470,6 +498,9 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--sha256", help="one document")
     group.add_argument("--quarantined", action="store_true", help="every quarantined document")
     p.set_defaults(func=cmd_reparse)
+
+    p = sub.add_parser("learned", help="vendor strings proven to belong to an adapter")
+    p.set_defaults(func=cmd_learned)
 
     p = sub.add_parser("adapters", help="list registered layouts")
     p.set_defaults(func=cmd_adapters)

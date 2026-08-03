@@ -211,6 +211,15 @@ class LayoutSignature:
 
         return set(self.requires).issubset(set(label_lines(first)))
 
+    def page_matches(self, document: Document) -> bool:
+        """Whether the page size agrees, ignoring producer and header lines."""
+        if self.page_size is None or not document.pages:
+            return True
+        first = document.pages[0]
+        width, height = self.page_size
+        return (abs(first.width - width) <= PAGE_TOLERANCE
+                and abs(first.height - height) <= PAGE_TOLERANCE)
+
     def missing_from(self, document: Document) -> list[str]:
         """Which required lines a document lacks — the useful half of a failure."""
         if not document.pages:

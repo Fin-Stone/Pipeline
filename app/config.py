@@ -61,6 +61,15 @@ class Config:
         return self.data_dir / "quarantine"
 
     @property
+    def learned_rules_path(self) -> Path:
+        """Vendor strings proven to belong to an adapter.
+
+        Operator state, not code: deleting it costs only the shortcut, since
+        anything in it is relearned the next time such a statement arrives.
+        """
+        return self.data_dir / "learned-layouts.json"
+
+    @property
     def reports_dir(self) -> Path:
         """Where a run leaves a shareable write-up of its failures."""
         return self.data_dir / "reports"

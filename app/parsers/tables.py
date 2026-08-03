@@ -211,24 +211,33 @@ def columns_from_header(
 ) -> tuple[Column, ...]:
     """Locate each column by a word in the header row.
 
-    `spec` entries are (column name, header word prefix, role, sign). Each
-    prefix is matched against the header's words in order, so a heading that
-    appears twice — Trust prints "Amount" for both its currency columns —
+    `spec` entries are (column name, header word prefix or prefixes, role,
+    sign). Each is matched against the header's words in order, so a heading
+    that appears twice — Trust prints "Amount" for both its currency columns —
     resolves left to right.
+
+    A tuple of prefixes accepts synonyms. Institutions reword their headings
+    without changing the table: "Withdrawal" and "Debit" and "Money Out" are
+    the same column, and naming the alternatives here keeps a rewording out of
+    the code.
 
     The whole header word span is kept. Which edge matters depends on the
     column's role, and that is decided in `TableSpec.cells`.
     """
     columns: list[Column] = []
     used: set[int] = set()
-    for name, prefix, role, sign in spec:
+    for name, prefixes, role, sign in spec:
+        options = (prefixes,) if isinstance(prefixes, str) else tuple(prefixes)
         index = next(
             (i for i, w in enumerate(header.words)
-             if i not in used and w.text.lower().startswith(prefix.lower())),
+             if i not in used and any(w.text.lower().startswith(o.lower()) for o in options)),
             None,
         )
         if index is None:
-            raise LookupError(f"header has no column starting {prefix!r}: {header.text!r}")
+            raise LookupError(
+                f"header has no column starting {' or '.join(repr(o) for o in options)}: "
+                f"{header.text!r}"
+            )
         used.add(index)
         word = header.words[index]
         columns.append(Column(name, role, word.x0, word.x1, sign))

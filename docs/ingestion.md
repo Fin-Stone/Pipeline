@@ -190,6 +190,37 @@ SIGNATURE = LayoutSignature(
 Matching is a **subset** test, not equality: extra lines are ignored. That is the whole
 point, and it was arrived at the hard way.
 
+### An unrecognised vendor is treated as a rename
+
+Institutions rename the tool that renders their statements. DBS's creator went
+`Quadient Group AG~Inspire` → `Quadient CXM AG~Inspire` → `Quadient~Inspire`;
+Trust's producer went `Skia/PDF m80` → `m141`. Each time every header line still
+matched and only the vendor string had moved — and 107 statements stopped
+routing over it.
+
+Two layers now absorb that:
+
+1. **Producer and creator match on tokens**, not the whole string —
+   `("quadient", "inspire")` survives all three names.
+2. **Anything tokens miss is treated as a hypothesis.** If a document matches an
+   adapter's required header lines and differs *only* in producer or creator,
+   that adapter is tried, and accepted **only if the statement reconciles to
+   the cent**. What was proven is written to `data/learned-layouts.json` so the
+   next statement routes directly.
+
+This is not the "never guess" rule being relaxed. Guessing is choosing without
+evidence; this proposes and then verifies against an oracle the document
+carries with it. The refusals are the point:
+
+- **No balances, no healing.** A statement that would import as
+  `imported_unverified` has nothing to verify against — exactly where a wrong
+  adapter could pass unnoticed.
+- **Two adapters that both reconcile is a refusal**, never a tiebreak.
+- **Only the vendor string is relaxed.** The header lines that identify the
+  format still have to match, and are never inferred.
+- Healed documents are counted in the run summary and listed by
+  `finstone learned`, with the document that proved each rule.
+
 ### Why not an exact fingerprint
 
 Routing was originally an exact hash of the header band. It broke twice in production, both

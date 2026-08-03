@@ -54,7 +54,6 @@ BASE_CURRENCY = "SGD"
 SIGNATURE = LayoutSignature(
     creator=("quadient", "inspire"),
     requires=("account summary",),
-    page_size=(594, 792),
 )
 
 DATE_COL, DESC_COL, WITHDRAWAL_COL, DEPOSIT_COL, BALANCE_COL = (
@@ -69,8 +68,10 @@ _AMOUNT_IN_CELL = re.compile(r"[-+]?[\d,]*\d\.\d{2}")
 _HEADER = re.compile(r"\bDate\b.*\bDescription\b.*\bWithdrawal\b", re.IGNORECASE)
 _ACCOUNT_LINE = re.compile(r"Account\s+No\.?\s*[:.]?\s*([0-9][0-9\- ]{5,})", re.IGNORECASE)
 _AS_AT = re.compile(r"as\s+(?:at|of)\s+(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})", re.IGNORECASE)
-_BROUGHT = "balance brought forward"
-_CARRIED = "balance carried forward"
+#: Wording varies between issuers and over time; naming the alternatives
+#: keeps a rewording out of the code.
+_BROUGHT = re.compile(r"balance\s+brought\s+forward|opening\s+balance", re.IGNORECASE)
+_CARRIED = re.compile(r"balance\s+carried\s+forward|closing\s+balance", re.IGNORECASE)
 _TOTAL_CARRIED = re.compile(r"total\s+balance\s+carried\s+forward", re.IGNORECASE)
 #: Where a statement stops being a table and starts being prose.
 _SECTION_END = re.compile(r"^\s*Messages\s+For", re.IGNORECASE)
@@ -128,8 +129,8 @@ class DbsAccountAdapter:
                 # leftmost money heading, and "(-)" sits 50pt right of the
                 # column's own values — anchoring there would put every
                 # withdrawal into the description.
-                (WITHDRAWAL_COL, "Withdrawal", tables.MONEY, -1),
-                (DEPOSIT_COL, "Deposit", tables.MONEY, +1),
+                (WITHDRAWAL_COL, ("Withdrawal", "Debit", "Money Out"), tables.MONEY, -1),
+                (DEPOSIT_COL, ("Deposit", "Credit", "Money In"), tables.MONEY, +1),
                 (BALANCE_COL, "Balance", tables.BALANCE, 0),
             ]),
             continuation_gap=CONTINUATION_GAP,
@@ -222,13 +223,13 @@ class DbsAccountAdapter:
                 # statement's closing prose, which spans the full page width
                 # and would otherwise be cut into columns and read as rows.
                 break
-            if _BROUGHT in label:
+            if _BROUGHT.search(label):
                 # Repeats at the top of every page; the first one is the
                 # statement's opening balance.
                 if opening is None:
                     opening = self._balance(row)
                 continue
-            if _CARRIED in label:
+            if _CARRIED.search(label):
                 # Repeats at the foot of every page; the last one wins.
                 closing = self._balance(row)
                 continue

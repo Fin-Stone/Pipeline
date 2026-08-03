@@ -36,7 +36,6 @@ SIGNATURE = LayoutSignature(
         "trust bank singapore limited",
         "your savings account by trust statement is ready",
     ),
-    page_size=(595, 842),
 )
 
 _ACCOUNT_REF = re.compile(r"\b(\d{2}-\d{6,8}-\d)\b")

@@ -38,7 +38,6 @@ SIGNATURE = LayoutSignature(
         "trust bank singapore limited",
         "hello your trust credit card statement is ready",
     ),
-    page_size=(595, 842),
 )
 
 #: The card product, which is the account's stable identity. See the module

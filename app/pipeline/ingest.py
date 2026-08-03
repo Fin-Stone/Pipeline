@@ -32,7 +32,13 @@ from ..domain.models import IngestOutcome, ParsedDocument
 from ..domain.normalise import normalise_counterparty, normalise_description
 from ..parsers import fingerprint as fingerprinting
 from ..parsers import pdfio
-from ..parsers.registry import AdapterRegistry, AmbiguousLayout, LayoutError, build_default_registry
+from ..parsers.registry import (
+    AdapterRegistry,
+    AmbiguousLayout,
+    LayoutError,
+    UnknownLayout,
+    build_default_registry,
+)
 from ..ports.notifier import SEVERITY_ERROR, SEVERITY_WARNING
 from ..ports.parser import ParseError
 from ..ports.repository import (
@@ -60,6 +66,10 @@ class IngestSummary:
     duplicates: int = 0
     quarantined: int = 0
     txns_inserted: int = 0
+    #: Documents accepted by proving an unrecognised vendor string was a
+    #: rename. Surfaced because an automatic adaptation should be reviewable,
+    #: not invisible.
+    healed: int = 0
     outcomes: tuple[IngestOutcome, ...] = ()
 
 
@@ -79,7 +89,7 @@ def ingest_inbox(
     boundary enforced at `stage` has to be honoured here too or it means
     nothing.
     """
-    registry = registry or build_default_registry()
+    registry = registry or build_default_registry(config.learned_rules_path)
     root = config.inbox_dir / profile if profile else config.inbox_dir
     outcomes = []
 
@@ -99,6 +109,7 @@ def ingest_inbox(
         duplicates=sum(1 for o in outcomes if o.status == STATUS_DUPLICATE),
         quarantined=sum(1 for o in outcomes if o.status == STATUS_QUARANTINED_OUT),
         txns_inserted=sum(o.txns_inserted for o in outcomes),
+        healed=sum(1 for o in outcomes if o.detail.get("healed_vendor")),
         outcomes=tuple(outcomes),
     )
 
@@ -155,8 +166,21 @@ def ingest_file(
     except Exception as exc:
         return fail("fingerprint_failed", f"cannot fingerprint {path.name}", error=exc)
 
+    healed_from = None
     try:
         adapter = registry.resolve(document)
+    except UnknownLayout as exc:
+        # An unrecognised vendor string is treated as a rename to be proven
+        # or rejected, not as an unknown format. See _attempt_heal.
+        healed = _attempt_heal(config, document, path, registry, notifier)
+        if healed is None:
+            return fail(
+                "unknown_layout", str(exc),
+                detail={**fingerprinting.describe(document),
+                        "candidates": registry.explain(document)},
+                error=exc,
+            )
+        adapter, healed_from = healed
     except LayoutError as exc:
         # The designed outcome for a document no adapter claims — or one that
         # several claim, which means the signatures are wrong and picking a
@@ -302,6 +326,7 @@ def ingest_file(
             "adapter": adapter.name,
             "institution": parsed.institution,
             "unverified_accounts": list(result.unverified_accounts),
+            **({"healed_vendor": healed_from} if healed_from else {}),
         },
     )
 
@@ -318,7 +343,7 @@ def reparse(
     Existing rows for the document are deleted first, so a reparse is a
     replacement rather than a second import.
     """
-    registry = registry or build_default_registry()
+    registry = registry or build_default_registry(config.learned_rules_path)
 
     if sha256:
         targets = [d for d in repository.list_documents(context) if d["sha256"] == sha256]
@@ -361,6 +386,7 @@ def reparse(
         duplicates=sum(1 for o in outcomes if o.status == STATUS_DUPLICATE),
         quarantined=sum(1 for o in outcomes if o.status == STATUS_QUARANTINED_OUT),
         txns_inserted=sum(o.txns_inserted for o in outcomes),
+        healed=sum(1 for o in outcomes if o.detail.get("healed_vendor")),
         outcomes=tuple(outcomes),
     )
 
@@ -389,6 +415,77 @@ def _prune_empty_dirs(root: Path) -> None:
             directory.rmdir()
         except OSError:  # pragma: no cover
             pass
+
+
+def _attempt_heal(config, document, path, registry, notifier):
+    """Test whether an unrecognised vendor string is a rename.
+
+    Institutions rename the tool that renders their statements. DBS's went
+    "Quadient Group AG~Inspire" to "Quadient CXM AG~Inspire" to
+    "Quadient~Inspire"; Trust's went "Skia/PDF m80" to "m141". Each time, every
+    header line identifying the format still matched and only the vendor
+    string had moved.
+
+    So when a document matches an adapter's required header lines and differs
+    *only* in producer or creator, that adapter is a hypothesis. It is tested
+    by parsing the document and requiring the result to reconcile to the cent
+    against the balances the statement states for itself.
+
+    This is not the "never guess" rule being relaxed. Guessing is choosing
+    without evidence; this proposes and then verifies against an oracle the
+    document carries with it, and refuses in every case where the oracle is
+    absent or ambiguous:
+
+    - **No balances, no healing.** A statement that would import as
+      `imported_unverified` has nothing to verify against, so it is never
+      healed — that is exactly where a wrong adapter could pass unnoticed.
+    - **Two adapters that both reconcile is a refusal**, not a tiebreak.
+    - What was accepted is recorded, with the document that proved it, so the
+      decision can be audited rather than taken on trust.
+    """
+    candidates = registry.rename_candidates(document)
+    if not candidates:
+        return None
+
+    accepted = []
+    for registration in candidates:
+        adapter = registration.adapter
+        try:
+            parsed = adapter.parse(path, password=config.pdf_password_for(adapter.institution))
+        except Exception:
+            continue   # not this format; that is the hypothesis failing, not an error
+        result = validate(parsed, amount_ceiling_minor=config.amount_ceiling_minor)
+        # Every account must reconcile. `unverified_accounts` means at least
+        # one had no balances to check, which is not proof.
+        if result.ok and not result.unverified_accounts and parsed.accounts:
+            accepted.append((adapter, parsed))
+
+    if len(accepted) != 1:
+        if accepted:
+            log.warning(
+                "refusing to heal %s: %d adapters reconcile, which is ambiguous",
+                path.name, len(accepted),
+            )
+        return None
+
+    adapter, parsed = accepted[0]
+    producer = fingerprinting.normalise_producer(document.producer)
+    creator = fingerprinting.normalise_producer(document.creator)
+    registry.learned.record(
+        adapter.name, producer, creator,
+        evidence={
+            "proved_by_sha256": sha256_file(path),
+            "accounts_reconciled": len(parsed.accounts),
+            "transactions": parsed.txn_count,
+        },
+    )
+    notifier.notify(
+        "Layout healed",
+        f"{adapter.name} accepted a renamed vendor string "
+        f"(producer={producer!r}, creator={creator!r}); the statement reconciles",
+        severity=SEVERITY_WARNING,
+    )
+    return adapter, {"producer": producer, "creator": creator}
 
 
 def _to_records(parsed: ParsedDocument) -> tuple[list[BalanceRecord], list[TxnRecord]]:
