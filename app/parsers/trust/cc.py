@@ -33,7 +33,7 @@ from . import base
 #: carries the discrimination. Nothing customer-specific is required; see
 #: acc.py for why.
 SIGNATURE = LayoutSignature(
-    producer="skia/pdf m",
+    producer=("skia", "pdf"),
     requires=(
         "trust bank singapore limited",
         "hello your trust credit card statement is ready",

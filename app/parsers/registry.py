@@ -86,7 +86,7 @@ class AdapterRegistry:
                 "adapter": r.adapter.name,
                 "matches": r.signature.matches(document),
                 "missing": r.signature.missing_from(document),
-                "expects_producer": r.signature.producer or "(any)",
+                "expects_producer": " ".join(r.signature.producer or r.signature.creator) or "(any)",
             }
             for r in self._registrations
         ]

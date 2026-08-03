@@ -95,6 +95,20 @@ class TableSpec:
     #: fixed threshold either clips the last line or risks swallowing the next
     #: row's.
     continuation_gap: float | None = 9.0
+    #: What a money cell must look like for the line to count as a row.
+    #:
+    #: Without it, any stray mark landing in an amount column makes a row.
+    #: DBS renders part of its registration text as loose characters strewn
+    #: across the page, and a line reading "geR 4 4 4 4 4" put a "4" in both
+    #: the withdrawal and the deposit column — enough to fail nine statements
+    #: on a guard meant to catch genuine ambiguity. An amount in these layouts
+    #: always carries two decimal places; a bare "4" is not money.
+    money_pattern: "re.Pattern | None" = None
+
+    def is_money(self, text: str) -> bool:
+        if not text:
+            return False
+        return self.money_pattern is None or bool(self.money_pattern.search(text))
 
     def named(self, role: str) -> tuple[Column, ...]:
         return tuple(c for c in self.columns if c.role == role)
@@ -249,7 +263,7 @@ def assemble_rows(
             continue
 
         cells = spec.cells(line)
-        has_value = any(cells.get(name) for name in value_names)
+        has_value = any(spec.is_money(cells.get(name, "")) for name in value_names)
 
         if not has_value:
             fragment = " ".join(cells.get(name, "") for name in text_names).strip()
@@ -277,5 +291,9 @@ def assemble_rows(
 
 
 def money_cells(row: Row, spec: TableSpec) -> list[tuple[Column, str]]:
-    """The money columns this row has a value in, with their text."""
-    return [(c, row.cell(c.name)) for c in spec.money_columns if row.cell(c.name)]
+    """The money columns this row holds an actual amount in."""
+    return [
+        (c, row.cell(c.name))
+        for c in spec.money_columns
+        if spec.is_money(row.cell(c.name))
+    ]

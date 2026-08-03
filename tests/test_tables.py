@@ -192,3 +192,40 @@ class TestHeaderResolution:
         header = _line([("Date", 45.0, 65.0)])
         with pytest.raises(LookupError):
             tables.columns_from_header(header, [("x", "Nonexistent", tables.TEXT, 0)])
+
+
+class TestMoneyPattern:
+    """A stray mark in an amount column must not make a row.
+
+    DBS renders part of its registration text as loose characters strewn
+    across the page: a line reading "geR 4 4 4 4 4" put a bare "4" in both the
+    withdrawal and the deposit column, which failed nine statements on a guard
+    meant to catch genuine ambiguity.
+    """
+
+    import re as _re
+    PATTERN = _re.compile(r"[-+]?[\d,]*\d\.\d{2}")
+
+    def test_a_bare_digit_is_not_money(self):
+        spec = _dbs_spec(money_pattern=self.PATTERN)
+        line = _line([("geR", 45.4, 60.0), ("4", 380.0, 385.0), ("4", 460.0, 465.0)], top=536.0)
+        assert tables.assemble_rows([line], spec) == []
+
+    def test_a_real_amount_still_makes_a_row(self):
+        spec = _dbs_spec(money_pattern=self.PATTERN)
+        line = _line([("01/12/2021", 45.4, 90.4), ("541.80", 367.4, 394.9)], top=252.0)
+        assert len(tables.assemble_rows([line], spec)) == 1
+
+    def test_money_cells_ignores_non_amounts(self):
+        spec = _dbs_spec(money_pattern=self.PATTERN)
+        row = tables.Row(
+            _line([("x", 0, 1)]),
+            {"date": "", "description": "", "withdrawal": "4", "deposit": "47.00", "balance": ""},
+        )
+        assert [(c.name, t) for c, t in tables.money_cells(row, spec)] == [("deposit", "47.00")]
+
+    def test_without_a_pattern_any_text_counts(self):
+        """Layouts that have not needed the restriction keep the old behaviour."""
+        spec = _dbs_spec()
+        line = _line([("x", 45.4, 60.0), ("4", 380.0, 385.0)], top=536.0)
+        assert len(tables.assemble_rows([line], spec)) == 1

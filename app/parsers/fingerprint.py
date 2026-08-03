@@ -98,6 +98,14 @@ def normalise_producer(text: str) -> str:
     return _WS.sub(" ", re.sub(r"[\d.]+", "", text or "")).strip().lower()
 
 
+def _tokens(text: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", normalise_producer(text)) if t}
+
+
+def _has_tokens(text: str, required: tuple[str, ...]) -> bool:
+    return not required or set(required).issubset(_tokens(text))
+
+
 def label_lines(page: Page, band: float = HEADER_BAND_FRACTION) -> list[str]:
     """The digit-free header lines of a page, normalised, deduped and sorted.
 
@@ -162,13 +170,20 @@ class LayoutSignature:
     match loud instead of silent.
     """
 
-    #: Normalised producer. Empty means "do not test", for issuers that ship no
-    #: metadata at all.
-    producer: str = ""
-    #: Normalised creator. Some issuers leave Producer empty and put the
-    #: rendering tool in Creator instead — DBS ships
-    #: "Quadient Group AG~Inspire~12.5.33.0" with no producer at all.
-    creator: str = ""
+    #: Tokens that must all appear in the normalised producer. Empty means
+    #: "do not test", for issuers that ship no metadata at all.
+    #:
+    #: Tokens rather than the whole string, for the same reason header lines
+    #: are matched as a subset: the *tool* is a stable signal and its branding
+    #: is not. DBS's renderer was "Quadient Group AG~Inspire~12.5.33.0", then
+    #: "Quadient CXM AG~Inspire~15.0.681.5", then "Quadient~Inspire~17.0.612.15"
+    #: — one product, a company that renamed itself twice, and 107 statements
+    #: that stopped routing because of it. Requiring ("quadient", "inspire")
+    #: survives all three and the next rename too.
+    producer: tuple[str, ...] = ()
+    #: Tokens that must all appear in the normalised creator. Some issuers
+    #: leave Producer empty and put the rendering tool in Creator instead.
+    creator: tuple[str, ...] = ()
     #: Header lines that must all be present, already normalised.
     requires: tuple[str, ...] = ()
     #: Expected page size, compared within PAGE_TOLERANCE. None means any.
@@ -183,10 +198,10 @@ class LayoutSignature:
             return False
         first = document.pages[0]
 
-        if self.producer and normalise_producer(document.producer) != self.producer:
+        if not _has_tokens(document.producer, self.producer):
             return False
 
-        if self.creator and normalise_producer(document.creator) != self.creator:
+        if not _has_tokens(document.creator, self.creator):
             return False
 
         if self.page_size is not None:

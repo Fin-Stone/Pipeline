@@ -31,7 +31,7 @@ from . import base
 #: statements, which differ in pocket count, and the July 2026 one, which has a
 #: different address and a newer Chromium.
 SIGNATURE = LayoutSignature(
-    producer="skia/pdf m",
+    producer=("skia", "pdf"),
     requires=(
         "trust bank singapore limited",
         "your savings account by trust statement is ready",

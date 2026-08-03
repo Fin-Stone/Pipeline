@@ -162,3 +162,39 @@ class TestNoDateAtAll:
         broken = base.Row(rows[1].line, "", "Coffee", "", "4.50")
         with pytest.raises(ParseError, match="no date found"):
             base.build_txn(broken, date(2024, 6, 1), date(2024, 6, 30))
+
+
+class TestProducerTokens:
+    """The rendering tool is a stable signal; its branding is not."""
+
+    def test_a_renamed_vendor_still_matches(self):
+        """DBS's creator went from "Quadient Group AG~Inspire" to
+        "Quadient CXM AG~Inspire" to "Quadient~Inspire". One product, a company
+        that renamed itself twice, 107 statements that stopped routing."""
+        from app.parsers.fingerprint import _has_tokens
+
+        required = ("quadient", "inspire")
+        for creator in (
+            "Quadient Group AG~Inspire~12.5.33.0",
+            "Quadient CXM AG~Inspire~15.0.681.5",
+            "Quadient~Inspire~17.0.612.15",
+        ):
+            assert _has_tokens(creator, required), creator
+
+    def test_a_different_tool_does_not_match(self):
+        from app.parsers.fingerprint import _has_tokens
+
+        assert not _has_tokens("Skia/PDF m141", ("quadient", "inspire"))
+        assert not _has_tokens("Streamline PDFGen for OCBC Group", ("quadient", "inspire"))
+
+    def test_chromium_versions_still_match(self):
+        from app.parsers.fingerprint import _has_tokens
+
+        assert _has_tokens("Skia/PDF m80", ("skia", "pdf"))
+        assert _has_tokens("Skia/PDF m141", ("skia", "pdf"))
+
+    def test_absent_metadata_matches_only_an_empty_requirement(self):
+        from app.parsers.fingerprint import _has_tokens
+
+        assert _has_tokens("", ())
+        assert not _has_tokens("", ("quadient",))

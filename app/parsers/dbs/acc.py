@@ -38,8 +38,11 @@ BASE_CURRENCY = "SGD"
 #: What identifies a DBS consolidated statement.
 #:
 #: DBS leaves Producer empty and puts the rendering tool in Creator, so the
-#: signature matches on creator. Version digits are stripped, so 12.5.33.0 and
-#: 12.5.14.1 agree.
+#: signature matches on creator — and on tokens rather than the whole string.
+#: Across the corpus that string reads "Quadient Group AG~Inspire~12.5.33.0",
+#: "Quadient CXM AG~Inspire~15.0.681.5" and "Quadient~Inspire~17.0.612.15": one
+#: product, a company that renamed itself twice, 107 statements that stopped
+#: routing because of it.
 #:
 #: Only one non-customer line exists in the header band: everything else up
 #: there is the customer's name, their joint account holder's name and their
@@ -49,7 +52,7 @@ BASE_CURRENCY = "SGD"
 #: the corpus, including the DBS card statement, which says "statement of
 #: account" and never "account summary".
 SIGNATURE = LayoutSignature(
-    creator="quadient group ag~inspire~",
+    creator=("quadient", "inspire"),
     requires=("account summary",),
     page_size=(594, 792),
 )
@@ -130,6 +133,7 @@ class DbsAccountAdapter:
                 (BALANCE_COL, "Balance", tables.BALANCE, 0),
             ]),
             continuation_gap=CONTINUATION_GAP,
+            money_pattern=_AMOUNT_IN_CELL,
         )
 
         accounts = self._parse_accounts(document, spec, statement_date, period_start)
