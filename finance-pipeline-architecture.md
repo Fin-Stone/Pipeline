@@ -279,6 +279,42 @@ read before the UI is written:
   wrong in the direction that looks worst, which is exactly the direction (D) is sensitive
   to.
 
+### 5.2 Client and server are separate, and the server is the user's choice
+
+**The front end talks to the back end over an HTTP API and shares nothing else with it** —
+no template rendering, no server-side session coupling, no direct database access from the
+UI. The client is a first-class consumer of a documented API, and the same API is what any
+future client uses.
+
+**The hosting model is Bitwarden's.** A user signs in to *a server*, and which server that
+is belongs to them: their own on-premise install, or a hosted instance run for them. The
+client is configured with a server URL and is otherwise identical in both cases. This is a
+promise about the product, not only about the code, and it constrains the build now.
+
+What it rules out immediately:
+
+- **No endpoint may be hardcoded in the client.** Server address is user-supplied
+  configuration, entered at sign-in and stored per-profile, exactly as Bitwarden does it.
+- **No feature may exist only on the hosted instance.** The moment one does, self-hosting
+  becomes a degraded tier and the promise is broken. Hosted may differ in *operations* —
+  backups, availability, support — never in capability.
+- **The API is the contract, and it is versioned.** A self-hosted server will lag the hosted
+  one, so a client must state the version it speaks and a server must be explicit when it
+  cannot. Breaking a self-hoster's install with a client update is the failure mode this
+  guards against.
+- **Authentication is per-server.** Credentials, sessions and tokens belong to the server
+  signed into and never travel between them. Combined with the OIDC issuer/subject already
+  in `member` (Rule 3), the identity provider is a property of the deployment.
+
+What it costs, stated plainly so it is not discovered later: every capability needs an API
+surface before it has a UI, which is slower than rendering a page from the database. The
+return is that self-hosted and hosted stay the same product, and that a second client — a
+watch face, a CLI, someone else's — costs nothing extra to support.
+
+The tenancy work in Rule 3 already assumes this endpoint: a hosted server is several
+households on one deployment, and every ledger table is scoped from migration `0001`. What
+5.2 adds is that the *client* must not care which of the two it is talking to.
+
 ---
 
 ## 6. Phase 2 — Automated retrieval
