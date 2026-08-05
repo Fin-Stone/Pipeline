@@ -206,6 +206,35 @@ txn = Table(
 )
 
 Index("ix_txn_account_posted", txn.c.account_id, txn.c.posted_date)
+
+#: Two rows proven to be one movement between the household's own accounts.
+#:
+#: Beside the transactions rather than on them. Both rows are facts about what
+#: a statement said and must not be edited; whether a pair is a transfer is a
+#: judgement, and judgements get revised. Deleting every row here and running
+#: the pass again is a supported operation, which it would not be if the claim
+#: lived in a column on `txn`.
+#:
+#: `out_txn_id` is the leg that lost the money and `in_txn_id` the one that
+#: gained it, so the pair reads the way the movement happened.
+transfer_link = Table(
+    "transfer_link",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("out_txn_id", Integer, ForeignKey("txn.id"), nullable=False),
+    Column("in_txn_id", Integer, ForeignKey("txn.id"), nullable=False),
+    Column("amount_minor", BigInteger, nullable=False),
+    Column("days_apart", Integer, nullable=False, server_default="0"),
+    # Why the pair was accepted, so an operator can audit rather than trust.
+    Column("evidence", String(64), nullable=False),
+    Column("linked_at", DateTime(timezone=True), nullable=False),
+    # A transaction belongs to at most one movement. Without this a rebuild
+    # that ran twice would pair the same rows again and quietly double the
+    # amount excluded from spending.
+    UniqueConstraint("tenant_id", "out_txn_id", name="uq_transfer_link_out"),
+    UniqueConstraint("tenant_id", "in_txn_id", name="uq_transfer_link_in"),
+)
 Index("ix_txn_source_document", txn.c.source_document_id)
 Index("ix_txn_tenant", txn.c.tenant_id)
 
@@ -277,6 +306,7 @@ TENANT_SCOPED_TABLES = (
     source_document,
     account,
     txn,
+    transfer_link,
     statement_balance,
     txn_enrichment,
     recurrence_series,

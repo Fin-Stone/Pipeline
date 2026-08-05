@@ -203,6 +203,62 @@ class SqlAlchemyLedgerRepository:
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt.order_by(columns.source_relpath))]
 
+    def list_transfer_legs(self, context: TenantContext) -> list[dict]:
+        """Every transaction, with the account it belongs to, for matching.
+
+        The account reference comes along because it is evidence: DBS writes
+        the far account into the row, so one leg naming the other's number is
+        what turns a deduction into a reading.
+        """
+        txn, account = schema.txn.c, schema.account.c
+        stmt = (
+            select(
+                txn.id, txn.account_id, txn.posted_date, txn.amount_minor,
+                txn.description_raw, account.account_ref_masked,
+            )
+            .select_from(schema.txn.join(schema.account, txn.account_id == account.id))
+            .where(txn.tenant_id == context.tenant_id)
+            .order_by(txn.posted_date, txn.id)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def replace_transfer_links(self, context: TenantContext, links) -> int:
+        """Rebuild this tenant's links from scratch, atomically.
+
+        Replace rather than add: the pass is a pure function of the ledger, so
+        running it twice must leave the same result. Appending would pair rows
+        already paired and quietly double what is excluded from spending —
+        an error that flatters the total, so nobody would go looking for it.
+        """
+        rows = [
+            {
+                "tenant_id": context.tenant_id,
+                "out_txn_id": link.out_txn_id,
+                "in_txn_id": link.in_txn_id,
+                "amount_minor": link.amount_minor,
+                "days_apart": link.days_apart,
+                "evidence": link.evidence,
+                "linked_at": datetime.now(timezone.utc),
+            }
+            for link in links
+        ]
+        with self._engine.begin() as conn:
+            conn.execute(
+                schema.transfer_link.delete()
+                .where(schema.transfer_link.c.tenant_id == context.tenant_id)
+            )
+            if rows:
+                conn.execute(schema.transfer_link.insert(), rows)
+        return len(rows)
+
+    def count_transfer_links(self, context: TenantContext) -> int:
+        with self._engine.connect() as conn:
+            return conn.execute(
+                select(func.count()).select_from(schema.transfer_link)
+                .where(schema.transfer_link.c.tenant_id == context.tenant_id)
+            ).scalar_one()
+
     def delete_document(self, context: TenantContext, sha256: str) -> bool:
         """Remove a document and everything derived from it, atomically.
 
@@ -219,6 +275,23 @@ class SqlAlchemyLedgerRepository:
             if document_id is None:
                 return False
 
+            # Links first: they point at these rows, and a transfer link is a
+            # claim about a ledger that is about to change. Rebuilding it is a
+            # single command, so dropping it costs nothing and keeping it would
+            # block the delete on a foreign key.
+            doomed = select(schema.txn.c.id).where(
+                (schema.txn.c.tenant_id == context.tenant_id)
+                & (schema.txn.c.source_document_id == document_id)
+            )
+            conn.execute(
+                schema.transfer_link.delete().where(
+                    (schema.transfer_link.c.tenant_id == context.tenant_id)
+                    & (
+                        schema.transfer_link.c.out_txn_id.in_(doomed)
+                        | schema.transfer_link.c.in_txn_id.in_(doomed)
+                    )
+                )
+            )
             conn.execute(
                 schema.txn.delete().where(
                     (schema.txn.c.tenant_id == context.tenant_id)

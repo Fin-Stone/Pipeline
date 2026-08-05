@@ -268,6 +268,65 @@ def cmd_reparse(args) -> int:
     return 0
 
 
+def cmd_transfers(args) -> int:
+    """Find movements between the household's own accounts, and say so.
+
+    Reports by default and writes only with --apply, because the pass changes
+    what the ledger *means* — a linked pair stops counting as spending — and
+    that is worth reading before it is true.
+    """
+    from .domain.transfers import DEFAULT_WINDOW_DAYS, Leg, find_transfers
+    from .pipeline.diagnostics import _money
+
+    config = load_config()
+    repository = build_repository(config)
+    try:
+        check_schema(repository)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
+        rows = repository.list_transfer_legs(context)
+        result = find_transfers(
+            [
+                Leg(
+                    txn_id=row["id"],
+                    account_id=row["account_id"],
+                    account_ref=row["account_ref_masked"],
+                    posted_date=row["posted_date"],
+                    amount_minor=row["amount_minor"],
+                    description=row["description_raw"],
+                )
+                for row in rows
+            ],
+            window_days=args.window if args.window is not None else DEFAULT_WINDOW_DAYS,
+        )
+
+        excluded = sum(link.amount_minor for link in result.links)
+        print(f"profile              {args.profile}")
+        print(f"transactions         {len(rows)}")
+        print(f"transfers found      {len(result.links)}")
+        print(f"  by named account   {sum(1 for l in result.links if 'names' in l.evidence)}")
+        print(f"  by amount and date {sum(1 for l in result.links if 'names' not in l.evidence)}")
+        print(f"rows no longer spend {len(result.linked_txn_ids)}")
+        print(f"value moved, not spent{_money(excluded)}")
+
+        if result.ambiguous:
+            print(f"\nrefused as ambiguous {len(result.ambiguous)}")
+            print("  Each of these fits more than one counterpart equally well. A wrong")
+            print("  link removes real spending from the total, so none is guessed at.")
+            for item in result.ambiguous[:10]:
+                print(f"    txn {item.txn_id}  {item.posted_date}  {_money(item.amount_minor).strip()}"
+                      f"  could pair with {', '.join(str(i) for i in item.candidate_txn_ids)}")
+
+        if not args.apply:
+            print("\n  finstone transfers --apply   record these links")
+            return 0
+
+        written = repository.replace_transfer_links(context, result.links)
+        print(f"\n{written} link(s) recorded, replacing whatever was there before.")
+    finally:
+        repository.close()
+    return 0
+
+
 def cmd_learned(args) -> int:
     """List vendor strings the pipeline proved belong to an adapter."""
     from .parsers.learned import LearnedRules
@@ -615,6 +674,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="every document, to replay history through the current adapters",
     )
     p.set_defaults(func=cmd_reparse)
+
+    p = sub.add_parser("transfers", help="pair movements between your own accounts")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
+    p.add_argument("--apply", action="store_true", help="record the links, not just report them")
+    p.add_argument(
+        "--window", type=int, default=None,
+        help="days the two legs may be booked apart (default 4)",
+    )
+    p.set_defaults(func=cmd_transfers)
 
     p = sub.add_parser("learned", help="vendor strings proven to belong to an adapter")
     p.set_defaults(func=cmd_learned)

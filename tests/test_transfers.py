@@ -10,9 +10,40 @@ from __future__ import annotations
 
 from datetime import date
 
-from app.domain.transfers import Leg, find_transfers
+from app.domain.transfers import Leg, Link, find_transfers
 
 SAVINGS, CARD, OTHER = 1, 2, 3
+SHA = "d" * 64
+
+
+def _seed_two_txns(repository, context):
+    """A document with the two rows a link points at, so the ids exist."""
+    from datetime import datetime, timezone
+
+    from app.domain.models import DEPOSIT
+    from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+    account = AccountRecord(
+        institution="Test", account_ref_masked="acct", sub_account_label="",
+        currency="SGD", kind=DEPOSIT,
+    )
+    document = DocumentRecord(
+        sha256=SHA, institution="Test", doc_type="acc",
+        period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+        storage_path="x", parse_status="imported",
+        source_profile="dummy", source_relpath="a.pdf",
+        fetched_at=datetime.now(timezone.utc),
+    )
+    txns = [
+        TxnRecord(
+            account_key=account, posted_date=date(2026, 6, 3), amount_minor=amount,
+            currency="SGD", description_raw="t", description_norm="t",
+            counterparty_norm="", dedupe_key=f"k{amount}", seq=0,
+        )
+        for amount in (-10000, 10000)
+    ]
+    repository.insert_document(context, document, [], txns)
+    return SHA
 
 
 def _leg(txn_id, account_id, day, amount, description="", account_ref=""):
@@ -125,6 +156,32 @@ class TestRefusals:
         ])
         assert len(result.links) == 1
         assert len(result.linked_txn_ids) == 2
+
+    def test_a_link_survives_being_rebuilt(self, repository, context):
+        """The pass is a pure function of the ledger, so running it twice must
+        leave the same result. Appending would pair rows already paired and
+        quietly double what stops counting as spending."""
+        links = [Link(out_txn_id=1, in_txn_id=2, amount_minor=10000,
+                      days_apart=0, evidence="amount and date")]
+        _seed_two_txns(repository, context)
+
+        assert repository.replace_transfer_links(context, links) == 1
+        assert repository.replace_transfer_links(context, links) == 1
+        assert repository.count_transfer_links(context) == 1
+
+    def test_deleting_a_document_takes_its_links_with_it(self, repository, context):
+        """`reparse` deletes and rewrites every row. A link pointing at a row
+        that is about to go would block the delete on a foreign key, and the
+        claim it makes is about a ledger that no longer exists."""
+        sha = _seed_two_txns(repository, context)
+        repository.replace_transfer_links(context, [
+            Link(out_txn_id=1, in_txn_id=2, amount_minor=10000,
+                 days_apart=0, evidence="amount and date"),
+        ])
+        assert repository.count_transfer_links(context) == 1
+
+        assert repository.delete_document(context, sha) is True
+        assert repository.count_transfer_links(context) == 0
 
     def test_the_outcome_does_not_depend_on_row_order(self):
         """Rows arrive in whatever order the database returns them, and the
