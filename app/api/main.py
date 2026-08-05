@@ -24,7 +24,10 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Annotated
 
+import os
+
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import PROFILE_PROD, Config, load_config
 from ..domain.categories import DEFAULT_CATEGORIES, Rule, operator_rule, review_queue
@@ -38,6 +41,27 @@ app = FastAPI(
     title="Finstone",
     version=API_VERSION,
     summary="Self-hosted personal finance ledger",
+)
+
+#: The client is served from somewhere else by design — it is a separate
+#: application pointed at whichever server the user chose — so every browser
+#: call is cross-origin and without this none of them arrive.
+#:
+#: The default is permissive, and that is an honest default rather than a lax
+#: one: **there is no authentication yet**, so the API is open to anything that
+#: can reach it and CORS restricts only browsers, not the `curl` next to them.
+#: It buys nothing until auth exists, and pretending otherwise would be worse.
+#: Narrow it with FINSTONE_CORS_ORIGINS once there is something to protect.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in os.environ.get("FINSTONE_CORS_ORIGINS", "*").split(",")
+        if origin.strip()
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 

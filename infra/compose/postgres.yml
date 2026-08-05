@@ -1,0 +1,53 @@
+# Postgres instead of SQLite. An explicit overlay, not a profile:
+#
+#     POSTGRES_PASSWORD=... docker compose \
+#         -f docker-compose.yml -f infra/compose/postgres.yml up
+#
+# A profile would not do, because Compose interpolates every service in a file
+# whether or not its profile is selected — so a required password here would
+# make the ordinary `docker compose up` fail before starting. Demanding one is
+# right for Postgres and wrong for the default path, and a file is the only
+# place that distinction survives.
+#
+# pgvector rather than plain postgres so the later k-NN categorisation phase
+# needs no image change. The extension is not created yet: Phase 1 has no
+# vector columns, and adding one would break the SQLite run that keeps the
+# database seam honest.
+
+name: finstone
+
+x-postgres-url: &postgres_url
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-finstone}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-finstone}
+
+services:
+  api:
+    environment:
+      <<: *postgres_url
+    depends_on:
+      db:
+        condition: service_healthy
+
+  cli:
+    environment:
+      <<: *postgres_url
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-finstone}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-finstone}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finstone} -d ${POSTGRES_DB:-finstone}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  db_data:

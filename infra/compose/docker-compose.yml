@@ -1,51 +1,78 @@
-# Core stack: Postgres plus the pipeline runtime.
+# The whole stack: API, UI, and a container to run the CLI in.
 #
-# The image is pgvector/pgvector rather than plain postgres so the later
-# k-NN categorisation phase needs no image change. The extension is not
-# created yet — Phase 1 has no vector columns, and adding one would break the
-# SQLite test run that keeps the database seam honest.
+# `docker compose up` must work with no setup at all — Rule 3 counts every
+# manual step as a tax on every future install — so the default database is
+# SQLite in the data volume. Postgres is a profile, not a prerequisite:
+#
+#     docker compose up                        # SQLite, nothing to configure
+#     docker compose --profile postgres up     # Postgres, needs POSTGRES_PASSWORD
+#
+# The pgvector image rather than plain postgres so the later k-NN phase needs
+# no image change. The extension is not created yet: Phase 1 has no vector
+# columns, and adding one would break the SQLite run that keeps the database
+# seam honest.
 
 name: finstone
 
-services:
-  db:
-    image: pgvector/pgvector:pg17
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-finstone}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/env/.env}
-      POSTGRES_DB: ${POSTGRES_DB:-finstone}
-    volumes:
-      - db_data:/var/lib/postgresql/data
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finstone} -d ${POSTGRES_DB:-finstone}"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
+x-app: &app
+  build:
+    context: ../..
+    dockerfile: infra/compose/Dockerfile
+  environment:
+    # SQLite unless something overrides it. The postgres profile does.
+    DATABASE_URL: ${DATABASE_URL:-sqlite:////srv/finstone/data/finstone.db}
+    FINSTONE_DATA_DIR: /srv/finstone/data
+    FINSTONE_UPLOADS_DIR: /srv/finstone/uploads
+    FINSTONE_CORS_ORIGINS: ${FINSTONE_CORS_ORIGINS:-*}
+    # Deliberately absent: FINSTONE_ALLOW_PROD. Processing real data must be an
+    # explicit act. See docs/development-rules.md Rule 2.
+  volumes:
+    - ../../data:/srv/finstone/data
+    # Read-only: the pipeline copies out of uploads and must never write to the
+    # operator's own folder.
+    - ../../uploads:/srv/finstone/uploads:ro
 
-  app:
+services:
+  api:
+    <<: *app
+    restart: unless-stopped
+    ports:
+      - "${FINSTONE_API_PORT:-8000}:8000"
+    # Migrations first, every start. The schema guard refuses to run against a
+    # database at the wrong revision, so this is what makes an upgraded image
+    # come up rather than fail with a message nobody is watching for.
+    command:
+      - sh
+      - -c
+      - "alembic upgrade head && exec uvicorn app.api.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  ui:
     build:
       context: ../..
-      dockerfile: infra/compose/Dockerfile
+      dockerfile: infra/compose/ui.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${FINSTONE_UI_PORT:-8080}:80"
     depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-finstone}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-finstone}
-      FINSTONE_DATA_DIR: /srv/finstone/data
-      FINSTONE_UPLOADS_DIR: /srv/finstone/uploads
-      # Deliberately absent: FINSTONE_ALLOW_PROD. Processing real data must be
-      # an explicit act. See docs/development-rules.md Rule 2.
-    volumes:
-      - ../../data:/srv/finstone/data
-      # uploads is mounted read-only: the pipeline copies out of it and must
-      # never write to the operator's folder.
-      - ../../uploads:/srv/finstone/uploads:ro
-    # Applies migrations, then idles so `docker compose exec app finstone ...`
-    # is the working surface.
-    command: ["sh", "-c", "alembic upgrade head && echo 'migrations applied; container idle' && sleep infinity"]
+      api:
+        condition: service_started
 
-volumes:
-  db_data:
+  # Where `docker compose exec cli finstone ...` runs. Separate from the API so
+  # a long ingest cannot take the dashboard down with it.
+  cli:
+    <<: *app
+    profiles: ["cli"]
+    command: ["sleep", "infinity"]
+
+# Postgres is not here. It lives in postgres.yml as an explicit overlay,
+# because Compose interpolates every service whether or not its profile is
+# selected — so a required POSTGRES_PASSWORD in this file makes the plain
+# `docker compose up` fail before it starts, which is the one thing this stack
+# must not do.

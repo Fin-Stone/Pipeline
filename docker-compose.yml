@@ -1,0 +1,7 @@
+# `docker compose up` from the repository root.
+#
+# The stack itself lives in infra/, where the rest of the deployment does. This
+# file exists so the command works where an operator will actually type it,
+# rather than requiring them to know the layout first.
+include:
+  - infra/compose/docker-compose.yml

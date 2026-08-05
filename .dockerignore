@@ -1,0 +1,26 @@
+# Real financial data must never enter a build context. It would be baked into
+# an image layer and travel wherever that image goes.
+uploads/
+data/
+category/
+proposal*.json
+residual*.json
+
+.git/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+node_modules/
+ui/pwa/node_modules/
+ui/pwa/dist/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example

@@ -34,6 +34,18 @@ Every command that touches the ledger takes `--profile dummy|prod`. It selects t
 tree, the tenant, and that tenant's quarantine — real and synthetic documents share none of
 the three.
 
+## Running the whole thing
+
+```bash
+docker compose up
+```
+
+UI on http://localhost:8080, API on http://localhost:8000. Nothing to configure
+first: the database is SQLite inside `data/`, migrations run on start, and the UI asks
+for a server address rather than having one baked in. See
+[infra/compose/README.md](infra/compose/README.md) for the CLI container, Postgres, and
+what is mounted read-only.
+
 ## API
 
 The UI talks to the backend over HTTP and shares nothing else with it. The server address is
