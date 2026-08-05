@@ -97,6 +97,15 @@ export default function Dashboard() {
     }
   }
 
+  async function markTransfer(id: number) {
+    // Not spending: a movement between the operator's own accounts that the
+    // matcher could not prove. Excluded from every figure, and it survives a
+    // re-run of the matcher because a person decided it.
+    await api.markTransfer(id);
+    setTxns((t) => t.filter((x) => x.id !== id));
+    setMuted((m) => [...m]); // re-fetch totals with the new exclusion in place
+  }
+
   async function hideForGood(id: number) {
     await api.hide(id);
     // Dropped from the session list too, or it would be excluded twice and
@@ -244,7 +253,12 @@ export default function Dashboard() {
                         <VisibilityOffIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
-                    <Button size="small" onClick={() => hideForGood(t.id)}>forever</Button>
+                    <Tooltip title="Not spending — a move between your own accounts">
+                      <Button size="small" onClick={() => markTransfer(t.id)}>
+                        transfer
+                      </Button>
+                    </Tooltip>
+                    <Button size="small" onClick={() => hideForGood(t.id)}>hide</Button>
                   </Stack>
                 }
               >

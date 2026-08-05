@@ -34,7 +34,7 @@ from ..domain.categories import DEFAULT_CATEGORIES, Rule, operator_rule, review_
 from ..domain.networth import Declared, change, net_worth
 from ..domain.recurrence import Occurrence, find_series
 from ..storage.factory import build_repository
-from ..storage.sqlalchemy_repo import choose_bucket
+from ..storage.sqlalchemy_repo import choose_bucket, trend_centre
 
 API_VERSION = "v1"
 PREFIX = f"/api/{API_VERSION}"
@@ -240,13 +240,16 @@ def trend(
     days = ((until - since).days + 1) if since and until else None
     chosen = choose_bucket(days) if bucket == "auto" else bucket
 
+    points = handle.repository.spending_trend(handle.context, bucket=chosen, **filters)
     return {
         "currency": "SGD",
         "bucket": chosen,
         "range": {"since": since, "until": until, "days": days},
-        "points": handle.repository.spending_trend(
-            handle.context, bucket=chosen, **filters
-        ),
+        "points": points,
+        # Both, because the gap between them is the information. A household's
+        # spending is not symmetric, and where the mean sits well below the
+        # median it is being carried by a few large one-offs.
+        "centre": trend_centre(points),
     }
 
 
@@ -408,6 +411,32 @@ def transfers(handle: Session) -> dict:
     client should be able to show its user rather than merely assert.
     """
     return {"linked": handle.repository.count_transfer_links(handle.context)}
+
+
+@app.post(f"{PREFIX}/transfers/mark", tags=["ledger"], status_code=201)
+def mark_transfer(
+    handle: Session,
+    txn_id: int,
+    counterpart_id: Annotated[int | None, Query(description="The other leg, if held here")] = None,
+) -> dict:
+    """Say a row is a transfer when the matcher could not prove it.
+
+    The automatic pass pairs only what it can prove — equal magnitude, opposite
+    signs, a few days apart, across two accounts. A counterpart at a bank this
+    ledger does not hold, a partial payment, or two equally good candidates all
+    fall outside that and are all ordinary.
+
+    Marked links carry `origin: manual` and survive a re-run of the matcher,
+    which rebuilds only what it found itself.
+    """
+    marked = handle.repository.mark_transfer(handle.context, txn_id, counterpart_id)
+    return {"txn_id": txn_id, "counterpart_id": counterpart_id, "marked": marked}
+
+
+@app.delete(f"{PREFIX}/transfers/mark/{{txn_id}}", tags=["ledger"])
+def unmark_transfer(handle: Session, txn_id: int) -> dict:
+    """Undo an operator's mark. The matcher's own links are untouched."""
+    return {"txn_id": txn_id, "unmarked": handle.repository.unmark_transfer(handle.context, txn_id)}
 
 
 @app.get(f"{PREFIX}/growth", tags=["dashboard"])

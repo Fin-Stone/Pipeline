@@ -168,6 +168,19 @@ first day of the bucket; weeks start Monday.
 Periods with no spending are **absent** rather than zero. A client drawing a
 continuous axis fills the gaps itself.
 
+`centre` accompanies the points:
+
+```json
+"centre": { "mean_minor": -2228763, "median_minor": -2197123, "buckets": 12 }
+```
+
+**Both are given because the gap between them is the information.** A
+household's spending is not symmetric — one renovation drags a mean somewhere
+no ordinary month has been, while the median keeps describing a typical period.
+A reference line on the chart should use the **median**; the mean is there
+because it is what multiplies back out to the total. Where they diverge sharply,
+a few large one-offs are carrying the average, and a client may usefully say so.
+
 ### `GET /api/v1/hidden`
 
 ```json
@@ -260,6 +273,24 @@ decide freely and apply once at the end.
 `{ "linked": 206 }` — how many movements between the household's own accounts
 have been paired. Exposed so a client can *show* that spending figures exclude
 them rather than merely assert it.
+
+### `POST /api/v1/transfers/mark?txn_id=&counterpart_id=`
+
+`201 { "txn_id": 16964, "counterpart_id": null, "marked": true }`.
+
+For transfers the matcher could not prove: a counterpart at a bank this ledger
+does not hold, a partial payment, or two candidates that fitted equally well.
+`counterpart_id` is optional — a one-sided mark is the operator asserting where
+the money went where nothing here can corroborate it.
+
+Marked links carry `origin: "manual"` and **survive a re-run of the matcher**,
+which rebuilds only what it found itself. `marked` is `false` if the row is
+already part of a link.
+
+### `DELETE /api/v1/transfers/mark/{txn_id}`
+
+`{ "unmarked": true }`. Removes an operator's mark only; the matcher's own
+links are untouched.
 
 ### `GET /api/v1/growth`
 

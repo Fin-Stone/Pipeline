@@ -404,8 +404,14 @@ class SqlAlchemyLedgerRepository:
         averages rather than just the list.
         """
         txn, link, hidden = schema.txn.c, schema.transfer_link.c, schema.hidden_txn.c
+        # `in_txn_id` is nullable for a one-sided manual link, and a NULL inside
+        # a NOT IN makes the whole predicate NULL — which excludes every row
+        # rather than none. Marking a single transfer once emptied the entire
+        # dashboard this way, silently and to zero.
         linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
-            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
+            select(link.in_txn_id).where(
+                (link.tenant_id == context.tenant_id) & link.in_txn_id.isnot(None)
+            )
         )
         put_away = select(hidden.txn_id).where(hidden.tenant_id == context.tenant_id)
 
@@ -678,7 +684,11 @@ class SqlAlchemyLedgerRepository:
         """
         txn, link = schema.txn.c, schema.transfer_link.c
         linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
-            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
+            # NULL-safe: a one-sided manual link carries no in_txn_id, and a
+            # NULL inside NOT IN excludes every row instead of none.
+            select(link.in_txn_id).where(
+                (link.tenant_id == context.tenant_id) & link.in_txn_id.isnot(None)
+            )
         )
         stmt = (
             select(txn.id, txn.counterparty_norm, txn.amount_minor, txn.posted_date)
@@ -703,7 +713,11 @@ class SqlAlchemyLedgerRepository:
         """
         txn, link = schema.txn.c, schema.transfer_link.c
         linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
-            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
+            # NULL-safe: a one-sided manual link carries no in_txn_id, and a
+            # NULL inside NOT IN excludes every row instead of none.
+            select(link.in_txn_id).where(
+                (link.tenant_id == context.tenant_id) & link.in_txn_id.isnot(None)
+            )
         )
         stmt = (
             # counterparty_norm, not description_norm: the first is *who* the
@@ -722,6 +736,57 @@ class SqlAlchemyLedgerRepository:
         )
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def mark_transfer(
+        self, context: TenantContext, txn_id: int, counterpart_id: int | None = None,
+    ) -> bool:
+        """Record the operator's own claim that a row is a transfer.
+
+        Kept apart from the matcher's links by `origin`, because a re-run
+        rebuilds what the matcher found and must not erase what a person
+        decided — the same rule corrections follow.
+        """
+        link = schema.transfer_link.c
+        with self._engine.begin() as conn:
+            already = conn.execute(
+                select(link.id).where(
+                    (link.tenant_id == context.tenant_id)
+                    & ((link.out_txn_id == txn_id) | (link.in_txn_id == txn_id))
+                )
+            ).first()
+            if already:
+                return False
+            amount = conn.execute(
+                select(schema.txn.c.amount_minor).where(
+                    (schema.txn.c.tenant_id == context.tenant_id)
+                    & (schema.txn.c.id == txn_id)
+                )
+            ).scalar_one_or_none()
+            if amount is None:
+                return False
+            conn.execute(schema.transfer_link.insert(), [{
+                "tenant_id": context.tenant_id,
+                "out_txn_id": txn_id,
+                "in_txn_id": counterpart_id,
+                "amount_minor": abs(amount),
+                "days_apart": 0,
+                "evidence": "marked by operator",
+                "origin": "manual",
+                "linked_at": datetime.now(timezone.utc),
+            }])
+        return True
+
+    def unmark_transfer(self, context: TenantContext, txn_id: int) -> bool:
+        link = schema.transfer_link.c
+        with self._engine.begin() as conn:
+            removed = conn.execute(
+                schema.transfer_link.delete().where(
+                    (link.tenant_id == context.tenant_id)
+                    & (link.origin == "manual")
+                    & ((link.out_txn_id == txn_id) | (link.in_txn_id == txn_id))
+                )
+            ).rowcount
+        return bool(removed)
 
     def replace_transfer_links(self, context: TenantContext, links) -> int:
         """Rebuild this tenant's links from scratch, atomically.
@@ -744,9 +809,14 @@ class SqlAlchemyLedgerRepository:
             for link in links
         ]
         with self._engine.begin() as conn:
+            # Only what the matcher produced. A manual link is the operator's
+            # claim and is not regenerable, so a re-run must leave it alone —
+            # the same guarantee corrections have.
             conn.execute(
-                schema.transfer_link.delete()
-                .where(schema.transfer_link.c.tenant_id == context.tenant_id)
+                schema.transfer_link.delete().where(
+                    (schema.transfer_link.c.tenant_id == context.tenant_id)
+                    & (schema.transfer_link.c.origin == "auto")
+                )
             )
             if rows:
                 conn.execute(schema.transfer_link.insert(), rows)
@@ -1067,6 +1137,35 @@ def _bucket_start(day, bucket: str):
         # wherever the range happened to begin.
         return day - timedelta(days=day.weekday())
     return day.replace(day=1)
+
+
+def trend_centre(points: list[dict]) -> dict:
+    """Where the middle of a run of buckets sits.
+
+    Both the mean and the median are returned, and the gap between them is the
+    useful part. A household's spending is not symmetric: one renovation or one
+    insurance premium drags a mean somewhere no ordinary month has ever been,
+    while the median keeps describing a typical period. When the two are far
+    apart, the average is being carried by a handful of large one-offs — which
+    is worth showing rather than resolving by picking a favourite.
+
+    A reference line on a chart should use the median for that reason. The mean
+    is kept because it is what multiplies back out to the total.
+    """
+    if not points:
+        return {"mean_minor": None, "median_minor": None, "buckets": 0}
+
+    values = sorted(p["total_minor"] for p in points)
+    middle = len(values) // 2
+    median = (
+        values[middle] if len(values) % 2
+        else round((values[middle - 1] + values[middle]) / 2)
+    )
+    return {
+        "mean_minor": round(sum(values) / len(values)),
+        "median_minor": median,
+        "buckets": len(values),
+    }
 
 
 def _bucket(rows, bucket: str) -> list[dict]:

@@ -169,6 +169,33 @@ class TestRefusals:
         assert repository.replace_transfer_links(context, links) == 1
         assert repository.count_transfer_links(context) == 1
 
+    def test_a_one_sided_mark_excludes_only_itself(self, repository, context):
+        """A NULL inside NOT IN makes the whole predicate NULL, which excludes
+        every row rather than none. Marking one transfer once emptied the
+        entire dashboard to zero this way, silently."""
+        _seed_two_txns(repository, context)
+        before = repository.list_categorisation_targets(context)
+        assert len(before) == 1  # one of the two rows is money out
+
+        assert repository.mark_transfer(context, 1) is True
+        after = repository.list_categorisation_targets(context)
+
+        assert len(after) == 0, "the marked row is gone"
+        # And the rest of the ledger survives: seed a second outflow and check
+        # it is still visible with the one-sided link in place.
+        assert repository.count_transfer_links(context) == 1
+
+    def test_a_manual_mark_survives_the_matcher_rerunning(self, repository, context):
+        """A re-run rebuilds what the matcher found. What a person decided is
+        not regenerable and must not be swept away with it."""
+        _seed_two_txns(repository, context)
+        repository.mark_transfer(context, 1)
+
+        repository.replace_transfer_links(context, [])
+
+        assert repository.count_transfer_links(context) == 1
+        assert repository.unmark_transfer(context, 1) is True
+
     def test_deleting_a_document_takes_its_links_with_it(self, repository, context):
         """`reparse` deletes and rewrites every row. A link pointing at a row
         that is about to go would block the delete on a foreign key, and the

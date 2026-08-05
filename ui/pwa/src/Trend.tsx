@@ -29,8 +29,28 @@ export default function Trend({ data }: { data: TrendData }) {
   // Enough labels to orient, not so many they collide on a phone.
   const every = Math.ceil(data.points.length / 8);
 
+  // The line sits at the median, not the mean: one renovation drags a mean
+  // somewhere no ordinary period has been, while the median keeps describing a
+  // typical one. The mean is reported underneath so the gap is visible.
+  const median = data.centre.median_minor;
+  const mean = data.centre.mean_minor;
+  const medianPct = median ? (Math.abs(median) / largest) * 100 : null;
+  const skewed =
+    median !== null && mean !== null && Math.abs(mean - median) > Math.abs(median) * 0.25;
+
   return (
     <Box>
+      <Box sx={{ position: "relative" }}>
+        {medianPct !== null && (
+          <Tooltip title={`Median ${data.bucket}: ${magnitude(median)}`} arrow>
+            <Box sx={{
+              position: "absolute", left: 0, right: 0, zIndex: 1,
+              bottom: `calc(${medianPct}% * (180px - 20px) / 100 + 20px)`,
+              borderTop: "1px dashed", borderColor: "text.disabled",
+              pointerEvents: "auto",
+            }} />
+          </Tooltip>
+        )}
       <Stack
         direction="row" alignItems="flex-end" spacing={0.5}
         sx={{ height: 180, overflowX: "auto", pb: 1 }}
@@ -70,9 +90,18 @@ export default function Trend({ data }: { data: TrendData }) {
           );
         })}
       </Stack>
-      <Typography variant="caption" color="text.secondary">
-        One bar per {data.bucket} · tallest is {magnitude(-largest)}
+      </Box>
+      <Typography variant="caption" color="text.secondary" display="block">
+        One bar per {data.bucket} · dashed line is the median,{" "}
+        {magnitude(median)} · mean {magnitude(mean)}
       </Typography>
+      {skewed && (
+        <Typography variant="caption" color="warning.main" display="block">
+          The mean sits well away from the median, so a few large one-offs are
+          carrying the average. The median is the better description of a
+          typical {data.bucket}.
+        </Typography>
+      )}
     </Box>
   );
 }

@@ -282,7 +282,14 @@ transfer_link = Table(
     Column("id", Integer, primary_key=True),
     Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
     Column("out_txn_id", Integer, ForeignKey("txn.id"), nullable=False),
-    Column("in_txn_id", Integer, ForeignKey("txn.id"), nullable=False),
+    # Nullable for a one-sided link: the operator knows the money went to an
+    # account this ledger does not hold, so there is no row to pair with. A
+    # weaker claim than a matched pair, recorded as a different shape rather
+    # than dressed up as the same one.
+    Column("in_txn_id", Integer, ForeignKey("txn.id")),
+    # 'auto' is the matcher, 'manual' the operator. Only manual may be
+    # one-sided, and only auto is rebuilt by a re-run.
+    Column("origin", String(16), nullable=False, server_default="auto"),
     Column("amount_minor", BigInteger, nullable=False),
     Column("days_apart", Integer, nullable=False, server_default="0"),
     # Why the pair was accepted, so an operator can audit rather than trust.

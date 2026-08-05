@@ -103,6 +103,10 @@ export interface Trend {
   currency: string; bucket: "day" | "week" | "month";
   range: { since: string | null; until: string | null; days: number | null };
   points: TrendPoint[];
+  /** Both, because the gap between them is the information: a mean well below
+   *  the median is being carried by a few large one-offs. Draw the line at the
+   *  median. */
+  centre: { mean_minor: number | null; median_minor: number | null; buckets: number };
 }
 export interface Txn {
   id: number; posted_date: string; amount_minor: number; currency: string;
@@ -147,6 +151,8 @@ export const api = {
   hidden: () => call<Hidden>("/hidden"),
   hide: (txn_id: number, note = "") =>
     call<{ hidden: boolean }>("/hidden", { txn_id, note }, { method: "POST" }),
+  markTransfer: (txn_id: number) =>
+    call<{ marked: boolean }>("/transfers/mark", { txn_id }, { method: "POST" }),
   unhide: (txn_id: number) =>
     call<{ restored: boolean }>(`/hidden/${txn_id}`, {}, { method: "DELETE" }),
   recurring: () => call<Recurring>("/recurring"),
