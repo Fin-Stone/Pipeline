@@ -3,8 +3,18 @@
 Paste the block below into each model, and attach the file from:
 
 ```bash
-.venv/Scripts/python -m app.cli propose --profile prod --out proposal.json
+.venv/Scripts/python -m app.cli propose --profile prod --limit 250 --out proposal.json
 ```
+
+The list is **ranked by money at stake**, not by how often a name appears.
+Frequency ranking optimises the row count and systematically skips the large
+one-off spends where a household's money actually goes — on this corpus the top
+250 by value hold 81% of everything still uncategorised, while ranking by count
+kept offering another bus fare. That is also why a short reply is still useful:
+the first entries are the ones worth answering.
+
+Anything an existing rule already decides is left out, so each round asks only
+about what is still open.
 
 Send it to **several models separately** and keep each reply as its own file.
 Consolidation is a later step: unanimous answers become rules, disagreements go
@@ -42,6 +52,7 @@ category.
 | Electronics | Devices, components, peripherals, computer retailers |
 | Fashion | Clothing, footwear, bags, accessories |
 | Business services | Professional services, statutory payments, trades billed to a business |
+| Fees and charges | Bank and card fees, interest, late payment, FX margins, GST |
 | Others | Anything you cannot place |
 
 ## Fields
@@ -67,12 +78,17 @@ category.
    signal for this.
 3. **A mobile phone plan is Bills and utilities**, not Electronics.
 4. **A smart TV is Electronics; a lamp is Furnishing.**
-5. **Answer `Others` rather than guessing.** These answers become automated
+5. **A bank's own charge is Fees and charges**, not Bills and utilities. Interest,
+   annual fees, late payment and FX margins are money the bank took, not a
+   household bill.
+6. **Answer `Others` rather than guessing.** These answers become automated
    rules applied to years of history, so a confident wrong answer costs more
    than an honest blank. Local names you do not recognise are common here and
    `Others` is the correct response to them.
-6. **Do not invent categories** outside the table above.
-7. **Do not skip entries.** Return one object per input counterparty.
+7. **Do not invent categories** outside the table above.
+8. **Do not skip entries.** Return one object per input counterparty. If you
+   cannot finish the list, answer the entries in order and stop — they are
+   ranked so that the earliest are worth the most.
 
 ## Reply format
 

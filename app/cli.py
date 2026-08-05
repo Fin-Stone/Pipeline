@@ -437,10 +437,12 @@ def cmd_propose(args) -> int:
         ((t["counterparty_norm"], t["amount_minor"]) for t in targets),
         rules, suggest=seeds, by=args.by,
     )
-    suggested = sum(1 for p in proposals if p.suggested_category)
     if args.only_unknown:
         proposals = [p for p in proposals if not p.suggested_category]
     proposals = proposals[:args.limit]
+    # Counted after the limit, not before: the number describes the file that
+    # was written rather than the list it was cut from.
+    suggested = sum(1 for p in proposals if p.suggested_category)
 
     payload = {
         "instruction": (
