@@ -341,6 +341,11 @@ def cmd_rules(args) -> int:
 
     folder = Path(args.folder)
     replies: dict[str, dict] = {}
+    # One vote per *model*, not per file. A second round produces a second file
+    # from the same model, and counting both would let one model outvote two
+    # others while looking like corroboration — which is the single thing this
+    # consolidation exists to measure. A later round supersedes an earlier one,
+    # because it is the same model answering the same question again.
     for path in sorted(folder.glob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -353,10 +358,12 @@ def cmd_rules(args) -> int:
             for r in rows
             if isinstance(r, dict) and r.get("counterparty") and r.get("category")
         }
+        model = re.sub(r"[_-]?\d+$", "", path.stem)
         print(f"{path.stem:<24}{len(answers):>5} usable answer(s)"
-              f"{'   ignored: no categories assigned' if not answers else ''}")
+              f"{'' if answers else '   ignored: no categories assigned'}"
+              f"{f'   -> {model}' if model != path.stem else ''}")
         if answers:
-            replies[path.stem] = answers
+            replies.setdefault(model, {}).update(answers)
 
     if not replies:
         print("\nno usable replies found", file=sys.stderr)
