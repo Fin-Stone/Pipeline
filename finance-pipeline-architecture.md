@@ -1,11 +1,11 @@
-﻿# Self-Hosted Finance Pipeline â€” Technical Architecture
+# Self-Hosted Finance Pipeline — Technical Architecture
 
-Target host: Intel N95, 2Ã—1 TB, Omada ER707, managed switches, Asus Lyra APs.
+Target host: Intel N95, 2×1 TB, Omada ER707, managed switches, Asus Lyra APs.
 Constraint: all data on-prem; encrypted off-site backups permitted.
 Credential root of trust: existing Vaultwarden.
 
 > Assumption: "Trust" and "MariBank" place you in Singapore. That matters in two
-> places â€” SGFinDex (Â§10) and the mobile-only bank problem (Â§6b).
+> places — SGFinDex (§10) and the mobile-only bank problem (§6b).
 
 ---
 
@@ -55,40 +55,40 @@ Two details that prevent most of the pain later:
 - **`dedupe_key = hash(account_id, posted_date, amount_minor, description_norm, seq)`**
   where `seq` is a counter for genuine same-day identical transactions (two $4.50 coffees
   do happen). Unique index on it. Combined with `source_document.sha256`, re-importing the
-  same PDF is a guaranteed no-op â€” which is what makes every retry in the pipeline safe.
+  same PDF is a guaranteed no-op — which is what makes every retry in the pipeline safe.
 
 ---
 
-## 2. Phase 1 â€” Manual drop, deterministic parse
+## 2. Phase 1 — Manual drop, deterministic parse
 
 ### 2.1 Ingest surface
 
 One watched folder is the entire interface. Everything writes into it:
 
 ```
-/srv/finance/inbox/          â† drop zone (Syncthing / SMB / Nextcloud)
-/srv/finance/store/<sha256>  â† content-addressed originals, immutable
-/srv/finance/quarantine/     â† failed parses + reason.json
+/srv/finance/inbox/          ← drop zone (Syncthing / SMB / Nextcloud)
+/srv/finance/store/<sha256>  ← content-addressed originals, immutable
+/srv/finance/quarantine/     ← failed parses + reason.json
 ```
 
 Three feeds land there: manual downloads (phase 1), IMAP fetch from the `finance@` alias
-(cheapest automation available â€” do this before touching a browser), and later the
+(cheapest automation available — do this before touching a browser), and later the
 automated retrieval tier.
 
 **One addition in front of `inbox/`: a human staging surface, split by sensitivity.**
 
 ```
-uploads/dummy/   â† redacted or synthetic documents, safe for agents to read
-uploads/prod/    â† real statements, never read by agents, untracked
-        â”‚
-        â”‚  stage  â€” recursive, idempotent, preserves relative paths
-        â–¼
-   inbox/        â† unchanged; still the pipeline's entire machine interface
+uploads/dummy/   ← redacted or synthetic documents, safe for agents to read
+uploads/prod/    ← real statements, never read by agents, untracked
+        │
+        │  stage  — recursive, idempotent, preserves relative paths
+        ▼
+   inbox/        ← unchanged; still the pipeline's entire machine interface
 ```
 
 `inbox/` stays exactly what it was, and later feeds write into it directly without touching
 `uploads/`. The reason for the extra hop is that agent-driven development needs a folder of
-real-shaped documents that is provably *not* the real one â€” and putting that boundary at a
+real-shaped documents that is provably *not* the real one — and putting that boundary at a
 single, explicit step means the prod/dummy distinction is enforced in one place instead of
 being smeared through every downstream component. See
 [docs/development-rules.md](docs/development-rules.md) and
@@ -97,7 +97,7 @@ being smeared through every downstream component. See
 **Optional but recommended: Paperless-ngx as the document-of-record layer.** It already
 does consume-folder watching, OCRmyPDF, tagging, retention and full-text search, and
 exposes an API the parser can poll. If you want to find "that DBS statement from March
-2024" as a human, this is how. If you skip it, keep the content-addressed store â€” you
+2024" as a human, this is how. If you skip it, keep the content-addressed store — you
 still need the original bytes to re-parse after a parser bugfix.
 
 ### 2.2 Parser preference order
@@ -109,7 +109,7 @@ decision in the whole build.
 |---|---|---|---|
 | 1 | CSV / OFX / QFX / QIF / MT940 / CAMT.053 | `ofxtools`, `mt-940`, plain `csv` | Near-perfect |
 | 2 | Digital PDF with text layer | `pdfplumber` (word-level x/y), `camelot` (lattice for ruled tables, stream for whitespace) | Good, layout-specific |
-| 3 | Scanned PDF | `OCRmyPDF` to add a text layer â†’ tier 2 | Fair, needs validation |
+| 3 | Scanned PDF | `OCRmyPDF` to add a text layer → tier 2 | Fair, needs validation |
 | 4 | Unknown / novel layout | `Docling` (IBM, self-hosted, layout-aware) or a VLM | Fallback only |
 
 Multi-page tables are where general-purpose parsers break down: a table that starts
@@ -128,7 +128,7 @@ fingerprint = sha1(
 )
 ```
 
-Unknown fingerprint â†’ quarantine + notification. Never guess. A layout change should be a
+Unknown fingerprint → quarantine + notification. Never guess. A layout change should be a
 loud, boring failure, not a silent corruption of the ledger.
 
 ### 2.4 The validation that matters most
@@ -136,10 +136,10 @@ loud, boring failure, not a silent corruption of the ledger.
 **Statements carry their own checksum. Use it.**
 
 ```
-opening_balance + Î£(credits) âˆ’ Î£(debits) == closing_balance
+opening_balance + Σ(credits) − Σ(debits) == closing_balance
 ```
 
-If this doesn't reconcile to the cent, reject the *entire document* â€” don't import partial
+If this doesn't reconcile to the cent, reject the *entire document* — don't import partial
 rows. This single check catches dropped rows, duplicated rows, sign errors, misread digits
 from OCR, and column misalignment. It is worth more than any amount of parser cleverness.
 
@@ -148,12 +148,12 @@ inside `[period_start, period_end]`; no amount above a sanity ceiling.
 
 ---
 
-## 3. Enrichment â€” category, beneficiary, frequency
+## 3. Enrichment — category, beneficiary, frequency
 
 ### 3.1 Category and beneficiary: three stages, cheapest first
 
 1. **Deterministic rules.** Regex/exact match on `description_norm`. Versioned in git.
-   Covers the recurring 85â€“90% of volume. Fast, free, explainable, diffable.
+   Covers the recurring 85–90% of volume. Fast, free, explainable, diffable.
 2. **k-NN against your own labelled history.** Embed `description_norm`, store vectors in
    `pgvector` on the same Postgres. Nearest labelled neighbour, with distance as confidence.
    This is what makes the system get better the more you correct it.
@@ -161,7 +161,7 @@ inside `[period_start, period_end]`; no amount above a sanity ceiling.
    against your fixed category enum. Record `model_version` and prompt hash on the row so
    results are reproducible and re-runnable.
 
-**"For whom" is just a second label with the same three stages** â€” and it's much easier than
+**"For whom" is just a second label with the same three stages** — and it's much easier than
 category because cardinality is tiny (household members). The account or card is an
 enormously strong prior. If you follow through on the per-category virtual-card idea from
 the earlier plan, the card effectively *becomes* the label and this collapses to a lookup.
@@ -172,12 +172,12 @@ Recurrence is a time-series problem with a clean deterministic solution. An LLM 
 slower, non-reproducible, and worse.
 
 ```
-1. Group candidates: same merchant_norm, amount within Â±7% of a running centre
-2. Need n â‰¥ 3 occurrences
+1. Group candidates: same merchant_norm, amount within ±7% of a running centre
+2. Need n ≥ 3 occurrences
 3. Compute inter-arrival deltas (days)
-4. If  stdev(deltas) / mean(deltas) < 0.15  â†’ it's a series
+4. If  stdev(deltas) / mean(deltas) < 0.15  → it's a series
 5. Snap mean to nearest canonical period, with tolerance:
-     7 (Â±1) | 14 (Â±2) | 30/31 (Â±3, month-end aware) | 91 (Â±5) | 365 (Â±7)
+     7 (±1) | 14 (±2) | 30/31 (±3, month-end aware) | 91 (±5) | 365 (±7)
 6. Emit expected_next = last_seen + period_days
 ```
 
@@ -185,10 +185,10 @@ Handle weekend/holiday shifts (many direct debits land on the next business day)
 comparing on business-day distance, not calendar distance.
 
 What this buys you, for free: **missed-payment alerts** (`expected_next` passed with no
-match) and **price-increase alerts** (amount drifts outside tolerance on a known series) â€”
+match) and **price-increase alerts** (amount drifts outside tolerance on a known series) —
 which is most of the practical value of tracking subscriptions at all.
 
-### 3.2a Enrolment â€” the user knows things the dates cannot show
+### 3.2a Enrolment — the user knows things the dates cannot show
 
 Detection alone can only find what has already happened three times. The operator knows on
 the *first* payment that a subscription has started, knows which scattered rows were meant
@@ -197,7 +197,7 @@ that in.
 
 **The governing rule: a declaration is an input to detection, never an output of it.** It is
 the operator asserting something about their own money, so a re-run of the detector must
-never overwrite, downgrade or silently drop it â€” the same guarantee Â§3.3 gives corrections
+never overwrite, downgrade or silently drop it — the same guarantee §3.3 gives corrections
 via `source='human'`. Everything below is stored beside the derived series, not inside it,
 and survives a full rebuild.
 
@@ -209,12 +209,12 @@ which is exactly the case detection cannot reach, because detection needs three 
 and this has one.
 
 A series therefore carries a state, and **both ways in have a passive resting state**. A
-series arrives either because Â§3.2 found it or because the operator said so, and neither
+series arrives either because §3.2 found it or because the operator said so, and neither
 origin starts alerting on its own:
 
 | State | Origin | Means | Alerts? |
 |---|---|---|---|
-| `detected` | System | Â§3.2 found the pattern. Listed, tracked, nothing asserted. | No |
+| `detected` | System | §3.2 found the pattern. Listed, tracked, nothing asserted. | No |
 | `declared` | Operator | The operator says this recurs, on as little as one payment. | No |
 | `watching` | Either | The operator wants to be told when a cycle is missed. | Yes |
 | `confirmed` | Either | Found on the evidence *and* accepted by the operator. | Yes |
@@ -222,12 +222,12 @@ origin starts alerting on its own:
 **`detected` is passive on purpose.** A pattern the system noticed is a suggestion, and a
 suggestion that nags is worse than one that waits: the recurring page exists to be glanced
 at and believed, and a false positive raising alerts is exactly what destroys that. The
-operator's eye is what moves `detected` to `confirmed` â€” the promotion is theirs, not the
-detector's. This is why Â§3.2 refuses so much: everything it does emit is going to be read as
+operator's eye is what moves `detected` to `confirmed` — the promotion is theirs, not the
+detector's. This is why §3.2 refuses so much: everything it does emit is going to be read as
 a claim.
 
 **`declared` is equally a resting state, not a waiting room.** A declaration that never
-accumulates three occurrences is not a failure and is never withdrawn â€” an annual insurance
+accumulates three occurrences is not a failure and is never withdrawn — an annual insurance
 premium is a real recurring payment that takes three years to confirm itself, and a yearly
 subscription cancelled after two is still a true record of what happened.
 
@@ -240,53 +240,54 @@ three transactions they say belong together, and the system derives the rule tha
 caught them: the merchant pattern, the amount centre and the tolerance wide enough to hold
 what was chosen. Two things follow. The derived rule is shown back before it is saved,
 because a rule inferred from three rows will also claim future rows and the user should see
-what they are agreeing to. And if the selection cannot yield a coherent rule â€” the amounts
-or intervals are too scattered â€” that is reported rather than forced, since a rule matching
+what they are agreeing to. And if the selection cannot yield a coherent rule — the amounts
+or intervals are too scattered — that is reported rather than forced, since a rule matching
 everything is worse than no rule.
 
 **3. Explain a break in the pattern.** A payment that is smaller, larger or absent is not
 always a fault: promotions, annual discounts and payment holidays are ordinary. The user
-pins a reason to the occurrence, and the system then *verifies* it â€” did the amount come in
-lower as described, did it return to the centre afterwards, was it genuinely absent â€” rather
+pins a reason to the occurrence, and the system then *verifies* it — did the amount come in
+lower as described, did it return to the centre afterwards, was it genuinely absent — rather
 than accepting the explanation and suppressing the alert. An unverified explanation is worth
 less than no explanation, because it teaches the user to trust a signal that stopped being
 checked.
 
-Cross-household aggregation of these explanations â€” telling one user what others have seen â€”
-is deliberately **not** part of this phase. It is recorded in Â§12 with the terms it would
-have to meet.
+Cross-household aggregation of these explanations — telling one user what others have seen —
+is deliberately **not** part of this phase. It is parked in §12 with the terms it would have
+to meet.
 
 ### 3.2b What the recurring page is for, and whether the design serves it
 
-Four purposes, stated by the operator. Each is listed with what already supports it and what
-does not, because a design that quietly drops one of them is the failure worth catching here
-rather than after it is built.
+Four purposes, stated by the operator. Each is listed with what supports it and what does
+not, because a design that quietly drops one is the failure worth catching here rather than
+after it is built.
 
 | Purpose | Supported by | Missing |
 |---|---|---|
-| Overview of recurring spending | `find_series`: merchant, centre, period, count | **Normalisation to a common period.** A yearly 120 and a monthly 10 cost the same per month, and a total that adds the printed amounts says otherwise. |
-| Identify unwanted subscriptions | The list itself, and `last_seen` | **Cumulative paid to date**, which is the number that actually prompts a cancellation. And a distinction between *lapsed* and *missed* â€” see below. |
+| Overview of recurring spending | `find_series`: merchant, centre, period, count | **Normalisation to a common period.** A yearly 120 and a monthly 10 cost the same per month; a total that adds printed amounts says otherwise. |
+| Identify unwanted subscriptions | The list itself, and `last_seen` | **Cumulative paid to date**, the number that actually prompts a cancellation. And the *lapsed* versus *missed* distinction below. |
 | Missed and upcoming payments | `expected_next`, `is_overdue` | **A forward view.** Nothing answers "what is due in the next fortnight", which is half of what was asked for. |
-| Trend subscription pricing | `txn_ids` make the amounts recoverable | **A price history on the series.** The centre is a single number that moves as prices creep, so the old price is derivable but not held. |
+| Trend subscription pricing | `txn_ids` make the amounts recoverable | **A price history on the series.** The centre is one number that moves as prices creep, so the old price is derivable but not held. |
 
 **One defect found while checking, and it is not cosmetic.** Series membership clusters
-amounts within `AMOUNT_TOLERANCE` (7%). A subscription whose price rises by more than that â€”
-9.99 to 12.99 is 30% â€” is therefore split into **two separate series**, verified against the
-detector rather than assumed. That single behaviour damages every purpose above: the overview
-double-counts one subscription as two, the list shows a service the user does not have twice,
-the abandoned lower-priced half looks permanently overdue, and the price trend is invisible
-because the rise is modelled as two unrelated things rather than one thing that changed.
+amounts within `AMOUNT_TOLERANCE` (7%), so a subscription whose price rises by more than that
+— 9.99 to 12.99 is 30% — splits into **two separate series**. This was verified against the
+detector, not assumed. That single behaviour damages every purpose above: the overview
+double-counts one subscription as two, the list shows a service the user holds once twice
+over, the abandoned lower-priced half looks permanently overdue, and the price trend is
+invisible because the rise is modelled as two unrelated things rather than one thing that
+changed.
 
-The fix is a merge pass after clustering: two series with the same merchant and the same
-period, where one ends as the other begins, are one series with a **price change** at the
-join. That also supplies the price history the fourth purpose needs, and turns the
-permanently-overdue artefact into the signal it actually is. A price rise is a *fact about a
-subscription*, not a new subscription, and the model has to say so.
+The fix is a merge pass after clustering: two series with the same merchant and period, where
+one ends as the other begins, are one series with a **price change** at the join. That also
+supplies the price history the fourth purpose needs, and turns the permanently-overdue
+artefact into the signal it actually is. A price rise is a *fact about a subscription*, not a
+new subscription, and the model has to say so.
 
 **Lapsed is not missed.** A series whose `expected_next` passed weeks ago has either been
 cancelled or been missed, and those want opposite reactions: one is expected and should go
 quiet, the other is an alert. Overdue past several periods should read as *lapsed* and stop
-nagging, which is also what stops the recurring page filling with the corpses of old
+nagging, which is also what keeps the recurring page from filling with the corpses of old
 subscriptions.
 
 ### 3.3 Human-in-the-loop review queue
@@ -300,18 +301,18 @@ system that plateaus at 70% and one that reaches 97%.
 
 ## 4. Storage
 
-**Postgres**, single instance. Not SQLite â€” you want concurrent readers from the dashboard,
+**Postgres**, single instance. Not SQLite — you want concurrent readers from the dashboard,
 `pgvector`, and real migrations.
 
 - Extensions: `pgvector`. Skip TimescaleDB; personal-scale volume doesn't justify it.
 - Migrations in git (Alembic or Atlas). Never hand-edit schema on a box holding your ledger.
 - Originals stay on disk, content-addressed, referenced by `sha256`. Never mutated.
 - Sizing: a few hundred MB after decades. Both the DB and the document store fit
-  comfortably; the 2Ã—1 TB is overwhelmingly backup headroom, not capacity pressure.
+  comfortably; the 2×1 TB is overwhelmingly backup headroom, not capacity pressure.
 
 ---
 
-## 5. Dashboard â€” phone, laptop, TV
+## 5. Dashboard — phone, laptop, TV
 
 The three targets have genuinely different requirements, and the TV is the one that breaks
 the "just make it responsive" assumption: 10-foot viewing distance, no pointer, glanceable,
@@ -321,22 +322,22 @@ read-only.
 |---|---|---|
 | **Grafana** | Free, Postgres datasource, kiosk mode, alerting you need anyway | Weak for ad-hoc financial slicing; utilitarian UX |
 | **Metabase** | Best-in-class ad-hoc pivoting on tabular data | JVM footprint is heavy on an N95 |
-| **Evidence.dev** | SQL â†’ static site, instant load, git-versioned | Only the interactivity you hand-build |
+| **Evidence.dev** | SQL → static site, instant load, git-versioned | Only the interactivity you hand-build |
 | **Custom PWA** (SvelteKit/Next) | Only route to real 10-foot UI + home-screen install + offline | Most work |
 
 **Recommendation: two surfaces, not one.**
 
-- **Grafana** for *pipeline health* â€” run status, parse failures, quarantine depth,
-  reconciliation drift, dead-man's-switch. You need it for Â§8 regardless, so it's free.
+- **Grafana** for *pipeline health* — run status, parse failures, quarantine depth,
+  reconciliation drift, dead-man's-switch. You need it for §8 regardless, so it's free.
 - **A small custom PWA** for the *finance UX*. PWA gets you home-screen install on the
   phone, offline read of cached data, and a `/tv` route with a large-type, auto-cycling,
   pointer-free layout. Serve it over Tailscale; a Chromecast/Fire Stick or a Pi in kiosk
   Chromium points at the LAN URL.
 
-Design mobile-first â†’ TV â†’ desktop. Put the review/correction queue on phone and laptop
+Design mobile-first → TV → desktop. Put the review/correction queue on phone and laptop
 only; the TV is strictly read-only glanceable.
 
-### 5.1 What the finance UX has to do â€” operator's brief
+### 5.1 What the finance UX has to do — operator's brief
 
 Recorded from the operator, to be built rather than re-derived later. The ordering is
 theirs; the notes under each are what the data layer must provide for it.
@@ -359,11 +360,11 @@ precomputed for one window, so the aggregates cannot be materialised per-month a
 that.
 
 **C. Recurring payments get their own page**, showing what recurs weekly, monthly and
-yearly. Â§3.2 already derives frequency without an LLM; this is its surface.
+yearly. §3.2 already derives frequency without an LLM; this is its surface.
 
 **D. The dashboard has to manage the reader's mental state**, on both the consolidated view
 and the recurring page. Money growing well should read as calm; money depleting should read
-as *slight* concern â€” enough to prompt a look, not enough to alarm. Concretely: a coloured
+as *slight* concern — enough to prompt a look, not enough to alarm. Concretely: a coloured
 arrow for direction plus a percentage, because a percentage is what makes a number legible
 at a glance without doing arithmetic.
 
@@ -382,7 +383,7 @@ read before the UI is written:
 
 ### 5.2 Client and server are separate, and the server is the user's choice
 
-**The front end talks to the back end over an HTTP API and shares nothing else with it** â€”
+**The front end talks to the back end over an HTTP API and shares nothing else with it** —
 no template rendering, no server-side session coupling, no direct database access from the
 UI. The client is a first-class consumer of a documented API, and the same API is what any
 future client uses.
@@ -397,8 +398,8 @@ What it rules out immediately:
 - **No endpoint may be hardcoded in the client.** Server address is user-supplied
   configuration, entered at sign-in and stored per-profile, exactly as Bitwarden does it.
 - **No feature may exist only on the hosted instance.** The moment one does, self-hosting
-  becomes a degraded tier and the promise is broken. Hosted may differ in *operations* â€”
-  backups, availability, support â€” never in capability.
+  becomes a degraded tier and the promise is broken. Hosted may differ in *operations* —
+  backups, availability, support — never in capability.
 - **The API is the contract, and it is versioned.** A self-hosted server will lag the hosted
   one, so a client must state the version it speaks and a server must be explicit when it
   cannot. Breaking a self-hoster's install with a client update is the failure mode this
@@ -409,8 +410,8 @@ What it rules out immediately:
 
 What it costs, stated plainly so it is not discovered later: every capability needs an API
 surface before it has a UI, which is slower than rendering a page from the database. The
-return is that self-hosted and hosted stay the same product, and that a second client â€” a
-watch face, a CLI, someone else's â€” costs nothing extra to support.
+return is that self-hosted and hosted stay the same product, and that a second client — a
+watch face, a CLI, someone else's — costs nothing extra to support.
 
 The tenancy work in Rule 3 already assumes this endpoint: a hosted server is several
 households on one deployment, and every ledger table is scoped from migration `0001`. What
@@ -418,19 +419,19 @@ households on one deployment, and every ledger table is scoped from migration `0
 
 ---
 
-## 6. Phase 2 â€” Automated retrieval
+## 6. Phase 2 — Automated retrieval
 
 Split by channel. The constraints are completely different and conflating them is the main
 way this phase fails.
 
-### 6a. Email â€” do this first
+### 6a. Email — do this first
 
 Many institutions either attach the statement or send a "your statement is ready" notice.
 An IMAP poller on the `finance@` alias that pulls attachments into `inbox/` is the cheapest
 automation in the entire system and requires no credential handling at all. Exhaust this
 before writing a single line of browser automation.
 
-### 6b. Web portals â€” Playwright + Vaultwarden
+### 6b. Web portals — Playwright + Vaultwarden
 
 Deterministic Playwright scripts, one per institution, in git.
 
@@ -440,12 +441,12 @@ per run. `bw serve` gives a local REST endpoint if that's cleaner for the orches
 
 **Be honest about what this costs you.** An unlocked vault session living on the same box
 that runs the scrapers means compromise of that box is compromise of the vault. Unattended
-automation and "credentials are never available in plaintext" are mutually exclusive â€”
+automation and "credentials are never available in plaintext" are mutually exclusive —
 pick knowingly. Mitigations, in order of value:
 
 1. A **separate Vaultwarden account** for automation, containing *only* the scraper
    credentials. Your personal vault is never unlocked by the pipeline.
-2. Unlock at boot from an operator-supplied passphrase or a hardware token â€” never a
+2. Unlock at boot from an operator-supplied passphrase or a hardware token — never a
    passphrase file on the same disk.
 3. Read-only sub-user credentials at the institution, where offered. Several banks support
    a view-only secondary login; this is by far the strongest control available.
@@ -454,8 +455,8 @@ pick knowingly. Mitigations, in order of value:
 
 | MFA type | Automatable? | Approach |
 |---|---|---|
-| TOTP | Yes â€” but be clear-eyed | Storing the seed next to the password collapses 2FA back to 1FA |
-| SMS OTP | Partially | Requires the SIM/device in the loop (see Â§6c) |
+| TOTP | Yes — but be clear-eyed | Storing the seed next to the password collapses 2FA back to 1FA |
+| SMS OTP | Partially | Requires the SIM/device in the loop (see §6c) |
 | Push approval | No, by design | Pipeline pauses, notifies you, waits for the tap |
 | Hardware key | No | Manual step, permanently |
 
@@ -463,24 +464,24 @@ Design the orchestrator around a **suspend-for-human-approval** primitive from d
 Some institutions will always need a tap, and a pipeline that can't pause gracefully will
 just fail nightly forever.
 
-### 6c. Mobile-only banks (Trust, MariBank) â€” the hard part
+### 6c. Mobile-only banks (Trust, MariBank) — the hard part
 
 **State the blocker up front: emulators do not work.** These apps use the Play Integrity
 API. Waydroid, Redroid, BlueStacks and LDPlayer fail device attestation and the app simply
-refuses to run â€” installing Play Services or microG does not reliably fix it, because the
+refuses to run — installing Play Services or microG does not reliably fix it, because the
 environment isn't Google-certified. Rooting a real device and hiding it with
 Magisk + Zygisk + Play Integrity Fix does work, but Google rotates detection every few
-weeks, so the module needs constant updating â€” a stale module is the single most common
+weeks, so the module needs constant updating — a stale module is the single most common
 cause of "my banking app stopped working three weeks after rooting."
 
 **The workable architecture is a device farm of one:**
 
 ```
-N95 â”€â”€LANâ”€â”€â–¶ [stock, unrooted Android phone]
-             Â· permanently powered, wall-mounted or in a drawer
-             Â· USB debugging on, `adb tcpip 5555`
-             Â· isolated VLAN â€” this device holds banking credentials
-             Â· Appium (UiAutomator2) or Maestro driving it
+N95 ──LAN──▶ [stock, unrooted Android phone]
+             · permanently powered, wall-mounted or in a drawer
+             · USB debugging on, `adb tcpip 5555`
+             · isolated VLAN — this device holds banking credentials
+             · Appium (UiAutomator2) or Maestro driving it
 ```
 
 A cheap current-gen phone, never rooted, never updated to a ROM, passes integrity
@@ -488,11 +489,11 @@ naturally. That's the whole trick.
 
 **Automation layer, by tier:**
 
-- **Maestro** â€” YAML flows, far more tolerant of layout drift than Appium. Best default.
-- **Appium/UiAutomator2** â€” fully deterministic, more brittle, better when you need
+- **Maestro** — YAML flows, far more tolerant of layout drift than Appium. Best default.
+- **Appium/UiAutomator2** — fully deterministic, more brittle, better when you need
   precise control.
 - **droidrun** (MIT, Python, drives real devices via ADB + accessibility tree, works with
-  local models through Ollama) â€” the LLM-agent tier for exploration and self-healing, not
+  local models through Ollama) — the LLM-agent tier for exploration and self-healing, not
   for the nightly path. Benchmarks around 91% on AndroidWorld, but non-deterministic and
   slow; pair it with a deterministic framework rather than replacing one.
 
@@ -508,25 +509,25 @@ no checksum to validate against.
 
 **Worth deciding deliberately:** enabling ADB and automating a banking app very likely
 breaches the institution's terms of service, and if fraud occurs the bank will point at it.
-That's a real risk, not a formality â€” it's your call, but make it with open eyes.
+That's a real risk, not a formality — it's your call, but make it with open eyes.
 
 ---
 
-## 7. Phase 3 â€” Self-healing scripts
+## 7. Phase 3 — Self-healing scripts
 
 Your instinct is the right architecture: **AI proposes, deterministic code executes, human
 approves.** Never let the agent tier be the nightly path.
 
 ```
 1. Nightly deterministic run (Playwright / Maestro)
-       â”‚
-       â”œâ”€ success â”€â”€â–¶ document lands in inbox/ â”€â”€â–¶ Phase 1 parser
-       â”‚
-       â””â”€ failure â”€â”€â–¶ classify
-                        â”œâ”€ transient (timeout, 5xx, network)
-                        â”‚     â””â”€â–¶ retry w/ exponential backoff + jitter, then give up quietly
-                        â””â”€ structural (selector missing, unexpected screen)
-                              â””â”€â–¶ escalate
+       │
+       ├─ success ──▶ document lands in inbox/ ──▶ Phase 1 parser
+       │
+       └─ failure ──▶ classify
+                        ├─ transient (timeout, 5xx, network)
+                        │     └─▶ retry w/ exponential backoff + jitter, then give up quietly
+                        └─ structural (selector missing, unexpected screen)
+                              └─▶ escalate
 
 2. Agent tier attempts the goal once
        Web:     Skyvern (AGPL, self-host via Docker Compose, bring-your-own-LLM
@@ -534,15 +535,15 @@ approves.** Never let the agent tier be the nightly path.
        Android: droidrun
 
 3. Agent emits TWO artefacts:
-       (a) the downloaded document â€” so tonight isn't lost
+       (a) the downloaded document — so tonight isn't lost
        (b) a PROPOSED deterministic script for tomorrow
 
 4. Proposal opens a git branch/PR with:
-       Â· diff vs. last known-good script
-       Â· screenshot/video of the agent run
-       Â· the new selectors it settled on
+       · diff vs. last known-good script
+       · screenshot/video of the agent run
+       · the new selectors it settled on
 
-5. ntfy push â†’ you review the diff on your phone â†’ approve â†’ merge
+5. ntfy push → you review the diff on your phone → approve → merge
 
 6. Merged script becomes the deterministic path. Agent tier sleeps again.
 ```
@@ -554,7 +555,7 @@ approves.** Never let the agent tier be the nightly path.
   view-only sub-login, not just by prompt wording.
 - **Never auto-merge.** An LLM that can silently rewrite the script that logs into your
   bank, without review, is the one failure mode with unbounded downside. Your
-  notify-and-check design is correct â€” hold the line on it.
+  notify-and-check design is correct — hold the line on it.
 - **Golden fixtures.** Store a HAR / screenshot set per institution so parser and script
   assertions run offline in CI without touching the bank.
 - **Rate discipline.** One login attempt per institution per day, jittered. Repeated
@@ -578,7 +579,7 @@ approves.** Never let the agent tier be the nightly path.
 Skip Airflow entirely. If you want retries, approvals and a UI without building them:
 Windmill. If you want the smallest possible surface: systemd.
 
-**No message broker.** Postgres as the queue (`SELECT â€¦ FOR UPDATE SKIP LOCKED`) is more
+**No message broker.** Postgres as the queue (`SELECT … FOR UPDATE SKIP LOCKED`) is more
 than sufficient at this volume. Adding Redis or RabbitMQ here is pure operational cost.
 
 ### 8.2 Resilience checklist
@@ -587,14 +588,14 @@ than sufficient at this volume. Adding Redis or RabbitMQ here is pure operationa
   Every rerun must be safe. This is what lets you retry aggressively without fear.
 - **Quarantine, don't crash.** One unparseable document goes to `quarantine/` with a
   `reason.json` and a notification; the run continues for every other institution.
-- **Dead-man's switch â€” the failure that actually hurts is silence.** A cron that stopped
+- **Dead-man's switch — the failure that actually hurts is silence.** A cron that stopped
   running four months ago is far worse than one that fails loudly. Self-host
   **Healthchecks** (open source) and ping it on every successful run, or a Grafana rule on
   "no successful run in N days." Build this before you build anything clever.
 - **Alerting via ntfy** (self-hosted, push to phone, no account) or Gotify. Route: parse
   failures, unknown layouts, quarantine depth > 0, low-confidence backlog above threshold,
   missed recurring payment, reconciliation drift, pipeline silence.
-- **Observability:** structured JSON logs â†’ Loki; metrics â†’ Prometheus; both into Grafana.
+- **Observability:** structured JSON logs → Loki; metrics → Prometheus; both into Grafana.
   If RAM gets tight on the N95, drop Loki first and keep files + Prometheus.
 - **Reconciliation is the ultimate check.** Monthly, compare pipeline-derived closing
   balance per account against the statement's stated closing balance. Any drift means the
@@ -607,19 +608,19 @@ than sufficient at this volume. Adding Redis or RabbitMQ here is pure operationa
 - **At rest:** LUKS, or ZFS native encryption if you go ZFS across the two 1 TB disks.
   Note the tradeoff: unattended reboot + encrypted volume means the key must live on the
   box, or you accept manual unlock after every power cut. Decide which; don't drift into it.
-- **Postgres:** nightly `pg_dump`. WAL archiving only if you genuinely want PITR â€” at this
+- **Postgres:** nightly `pg_dump`. WAL archiving only if you genuinely want PITR — at this
   data size, logical dumps are plenty.
 - **Backup tool: restic or Kopia.** Both do client-side encryption, dedupe, and incremental
   snapshots. The off-site copy is ciphertext the provider cannot read, which is exactly what
   satisfies "on-prem data, encrypted off-site backups allowed."
-- **3-2-1:** live on disk A â†’ restic repo on disk B â†’ restic repo off-site (B2 / Wasabi /
+- **3-2-1:** live on disk A → restic repo on disk B → restic repo off-site (B2 / Wasabi /
   S3). At a few hundred MB, off-site costs pennies per month.
 - **Append-only off-site.** Use a B2 application key *without* delete permission, plus
   bucket lifecycle rules. Ransomware on the N95 must not be able to wipe the remote copy.
   This is the difference between a backup and the illusion of one.
 - **Test restores quarterly**, into a scratch container, automated, with an alert if the
   restore fails. An untested backup is a rumour.
-- **Vaultwarden's own backup is separate and critical** â€” it is the root of the entire
+- **Vaultwarden's own backup is separate and critical** — it is the root of the entire
   automation tier. Back it up on a different schedule, to a different key.
 
 ---
@@ -628,7 +629,7 @@ than sufficient at this volume. Adding Redis or RabbitMQ here is pure operationa
 
 1. **The N95 has no usable GPU.** Local VLM/LLM inference is a batch-overnight path at
    best (single-digit tokens/sec on CPU for a 7B model). Design the LLM tiers as weekly
-   batch jobs, not inline steps â€” or accept an external API call for the residual.
+   batch jobs, not inline steps — or accept an external API call for the residual.
 2. **Emulators are closed for Trust/MariBank.** Physical stock device or nothing.
 3. **Unattended automation weakens your credential posture.** A vault that can unlock
    itself is a vault an attacker on that host can unlock. Separate automation account,
@@ -636,11 +637,11 @@ than sufficient at this volume. Adding Redis or RabbitMQ here is pure operationa
 4. **ToS and fraud liability.** Scraping and ADB-driving banking apps very likely breaches
    terms and may shift liability if something goes wrong.
 5. **SGFinDex is the "correct" API answer and is not available to you.** It's real, it's
-   Singpass-authenticated, and it has a published OpenAPI spec â€” but access requires being
+   Singpass-authenticated, and it has a published OpenAPI spec — but access requires being
    an onboarded participating application with PKI client assertions and a registered
    callback, not an individual. It also returns position/balance data rather than
    transaction-level detail, and the participating institutions are the incumbents
-   (DBS/POSB, OCBC, UOB, Citi, HSBC, Maybank, StanChart, SGX CDP, plus insurers) â€” Trust
+   (DBS/POSB, OCBC, UOB, Citi, HSBC, Maybank, StanChart, SGX CDP, plus insurers) — Trust
    and MariBank aren't among them. Worth knowing so you don't chase it.
 
 ---
@@ -658,45 +659,44 @@ than sufficient at this volume. Adding Redis or RabbitMQ here is pure operationa
 | 7 | Recurrence detector | Deterministic, high value, no dependencies |
 | 8 | Grafana pipeline health + ntfy + dead-man's switch | Before automation, so failures are visible |
 | 9 | restic 3-2-1 + first tested restore | Before the data becomes irreplaceable |
-| 10 | PWA dashboard (phone â†’ TV â†’ desktop) | The payoff |
+| 10 | PWA dashboard (phone → TV → desktop) | The payoff |
 | 11 | IMAP auto-fetch | Cheapest automation, no credentials |
 | 12 | Playwright + `bw` for web portals | Phase 2 proper |
 | 13 | Physical Android device + Maestro export flows | The hard channel |
 | 14 | k-NN categorisation on pgvector | Needs the labels from step 6 |
-| 15 | Agent tier + PR-proposal loop | Phase 3; only worth it once 12â€“13 are breaking regularly |
+| 15 | Agent tier + PR-proposal loop | Phase 3; only worth it once 12–13 are breaking regularly |
 
-Steps 1â€“10 are a complete, useful system with zero automation. If momentum dies there,
+Steps 1–10 are a complete, useful system with zero automation. If momentum dies there,
 you've still replaced the subscription app and you own the data.
 
 ---
 
 ## 12. Experimental ideas — not in any current phase
 
-Parked deliberately. Recorded with the terms they would have to meet, so that picking one up
-later is a decision rather than a rediscovery.
+Parked deliberately, and recorded with the terms they would have to meet, so that picking one
+up later is a decision rather than a rediscovery.
 
 ### 12.1 Cohort observations on recurring services
 
 Telling a user that "others have reported discounts on similar services", derived from what
-other households have pinned as promotions on the same merchant (§3.2a interaction 3).
+other households have pinned as promotions against the same merchant (§3.2a, interaction 3).
 
-The appeal is that it turns each user's explanation of a broken pattern into something that
-helps every other user, and it is the one feature here with a plausible commercial argument:
-it only works at scale, so it is worth something to a hosted service and nothing to a
-competitor with no users.
+The appeal is that it turns one user's explanation of a broken pattern into something that
+helps every other user. It is also the one idea in this document with a plausible commercial
+argument: it works only at scale, so it is worth something to a hosted service and nothing to
+a competitor with no users.
 
-It is also the only idea in this document that moves data across the tenant boundary the rest
-of the system is built on, and that is why it is parked rather than built. Terms it would
-have to meet:
+It is equally the only idea here that moves data across the tenant boundary the rest of the
+system is built on, which is why it is parked rather than built. Terms it would have to meet:
 
-- **Opt-in per user, off by default.** Never a term-of-service default.
+- **Opt-in per user, off by default.** Never a terms-of-service default.
 - **Merchant identity, period and direction of change only.** No amounts, no dates, no
   account or member identifiers, nothing reconstructable back to a person.
 - **A floor on contributing households** before any observation is published, so a report can
   never describe one identifiable person's spending.
 - **Hosted-only, degrading to silence.** A self-hosted install has no cohort to aggregate
-  over. Under §5.2 that must mean the feature says nothing there, not that self-hosting shows
-  a disabled button — self-hosting is not a lesser tier.
+  over. Under §5.2 that must mean the feature says nothing there — not that self-hosting
+  shows a disabled button, because self-hosting is not a lesser tier.
 
-If it is ever built, the honest framing is that users are contributing to a shared signal,
-and they should be told that in those words rather than in a settings page.
+If it is ever built, the honest framing is that users are contributing to a shared signal, and
+they should be told so in those words rather than in a settings page.
