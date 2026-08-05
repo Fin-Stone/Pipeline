@@ -204,10 +204,36 @@ and survives a full rebuild.
 **1. Declare a new recurring payment, from one occurrence.** After a single payment the user
 marks it as recurring and states the period they expect. The system then *watches* rather
 than concludes: each cycle it looks for a match, and reports when the expected pattern fails
-to appear. A declared series therefore has a state — `awaiting confirmation` until enough
-occurrences arrive to satisfy §3.2 on its own evidence, then `confirmed`. The alert that
-matters early is **"you told me this repeats and it has not"**, which is exactly the case
-detection cannot reach, because detection needs three occurrences and this has one.
+to appear. The alert that matters early is **"you told me this repeats and it has not"**,
+which is exactly the case detection cannot reach, because detection needs three occurrences
+and this has one.
+
+A series therefore carries a state, and **both ways in have a passive resting state**. A
+series arrives either because §3.2 found it or because the operator said so, and neither
+origin starts alerting on its own:
+
+| State | Origin | Means | Alerts? |
+|---|---|---|---|
+| `detected` | System | §3.2 found the pattern. Listed, tracked, nothing asserted. | No |
+| `declared` | Operator | The operator says this recurs, on as little as one payment. | No |
+| `watching` | Either | The operator wants to be told when a cycle is missed. | Yes |
+| `confirmed` | Either | Found on the evidence *and* accepted by the operator. | Yes |
+
+**`detected` is passive on purpose.** A pattern the system noticed is a suggestion, and a
+suggestion that nags is worse than one that waits: the recurring page exists to be glanced
+at and believed, and a false positive raising alerts is exactly what destroys that. The
+operator's eye is what moves `detected` to `confirmed` — the promotion is theirs, not the
+detector's. This is why §3.2 refuses so much: everything it does emit is going to be read as
+a claim.
+
+**`declared` is equally a resting state, not a waiting room.** A declaration that never
+accumulates three occurrences is not a failure and is never withdrawn — an annual insurance
+premium is a real recurring payment that takes three years to confirm itself, and a yearly
+subscription cancelled after two is still a true record of what happened.
+
+Alerting is opted into in both directions. Detection may promote its own findings and may
+supply evidence to a declared series; it may never demote or delete what the operator
+declared, and it may never move anything into `watching` by itself.
 
 **2. Enrol a missed series, retrospectively.** The user picks a period and selects at least
 three transactions they say belong together, and the system derives the rule that would have
