@@ -430,6 +430,82 @@ class _FakeLine:
     text = "SAVINGS - CRYPTO DETAILS"
 
 
+OCBC_ACC = "OCBC Bank/acc/0d17cfc5.pdf"
+
+
+class TestOcbcSavings:
+    """The tidiest layout in the corpus: it prints its period, both balances
+    and its own totals, so three independent checks are available."""
+
+    def _account(self, dummy_root):
+        from app.parsers.ocbc.acc import OcbcAccountAdapter
+
+        return OcbcAccountAdapter().parse(_require(dummy_root, OCBC_ACC)).accounts[0]
+
+    def test_reconciles(self, dummy_root):
+        account = self._account(dummy_root)
+        assert account.opening_balance_minor == 442240
+        assert account.closing_balance_minor == 622438
+        assert account.opening_balance_minor + sum(
+            t.amount_minor for t in account.txns
+        ) == account.closing_balance_minor
+
+    def test_its_own_totals_agree(self, dummy_root):
+        account = self._account(dummy_root)
+        assert (account.declared_out_minor, account.declared_in_minor) == (0, 180198)
+
+    def test_the_wrapped_category_is_kept(self, dummy_root):
+        """A bonus line says only "BONUS INTEREST" on its own row; what it was
+        for is on the line beneath, and that is the part worth having."""
+        account = self._account(dummy_root)
+        assert any("360 CC SPEND BONUS" in t.description_raw for t in account.txns)
+
+    def test_the_card_statement_does_not_claim_it(self, dummy_root):
+        """Both are OCBC and both come off the same renderer, so the header
+        lines are all that separate a savings statement from a card one."""
+        document = pdfio.load(_require(dummy_root, OCBC_ACC))
+        assert build_default_registry().resolve(document).name == "ocbc.acc"
+
+
+class TestOcbcCardVariants:
+    """Four card statements, four things one sample could not have shown."""
+
+    @pytest.mark.parametrize("relpath", [
+        "OCBC Bank/cc/OCBC+REWARDS+CARD-0000-Jan-26.pdf",
+        "OCBC Bank/cc/0f16e5c9.pdf",
+        "OCBC Bank/cc/5d61df4f.pdf",
+        "OCBC Bank/cc/OCBC REWARDS CARD-0000-May-26.pdf",
+    ])
+    def test_every_variant_reconciles(self, dummy_root, relpath):
+        from app.parsers.ocbc.cc import OcbcCardAdapter
+
+        account = OcbcCardAdapter().parse(_require(dummy_root, relpath)).accounts[0]
+        assert account.opening_balance_minor + sum(
+            t.amount_minor for t in account.txns
+        ) == account.closing_balance_minor
+
+    def test_a_notice_beside_the_product_does_not_hide_the_card(self, dummy_root):
+        """The product name shares its line with a penalty-rate notice, and
+        the cardholder is pushed 50pt below. Judging the whole line, or
+        counting lines rather than distance, found no card at all."""
+        from app.parsers.ocbc.cc import OcbcCardAdapter
+
+        parsed = OcbcCardAdapter().parse(
+            _require(dummy_root, "OCBC Bank/cc/OCBC REWARDS CARD-0000-May-26.pdf")
+        )
+        assert [a.account_ref_masked for a in parsed.accounts] == ["Ocbc Rewards Card"]
+
+    def test_parentheses_mean_money_back(self, dummy_root):
+        """OCBC marks a credit either with CR or with accounting parentheses.
+        Reading only the first turned every refund into another purchase."""
+        from app.parsers.ocbc.cc import OcbcCardAdapter
+
+        account = OcbcCardAdapter().parse(
+            _require(dummy_root, "OCBC Bank/cc/0f16e5c9.pdf")
+        ).accounts[0]
+        assert any(t.amount_minor > 0 for t in account.txns)
+
+
 class TestUnregisteredLayouts:
     @pytest.mark.parametrize("relpath", ["DBS/cc/-1.pdf"])
     def test_open_but_route_nowhere(self, dummy_root, relpath):

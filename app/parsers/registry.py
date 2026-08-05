@@ -157,6 +157,7 @@ def build_default_registry(learned_path=None) -> AdapterRegistry:
     from .dbs.acc import SIGNATURE as DBS_ACC_SIGNATURE, DbsAccountAdapter
     from .maribank.acc import SIGNATURE as MARI_ACC_SIGNATURE, MariBankAccountAdapter
     from .maribank.cc import SIGNATURE as MARI_CC_SIGNATURE, MariBankCardAdapter
+    from .ocbc.acc import SIGNATURE as OCBC_ACC_SIGNATURE, OcbcAccountAdapter
     from .ocbc.cc import SIGNATURE as OCBC_CC_SIGNATURE, OcbcCardAdapter
     from .trust.acc import SIGNATURE as TRUST_ACC_SIGNATURE, TrustAccountAdapter
     from .trust.cc import SIGNATURE as TRUST_CC_SIGNATURE, TrustCardAdapter
@@ -166,6 +167,7 @@ def build_default_registry(learned_path=None) -> AdapterRegistry:
     registry.register(TrustCardAdapter(), TRUST_CC_SIGNATURE)
     registry.register(DbsAccountAdapter(), DBS_ACC_SIGNATURE)
     registry.register(OcbcCardAdapter(), OCBC_CC_SIGNATURE)
+    registry.register(OcbcAccountAdapter(), OCBC_ACC_SIGNATURE)
     registry.register(MariBankCardAdapter(), MARI_CC_SIGNATURE)
     registry.register(MariBankAccountAdapter(), MARI_ACC_SIGNATURE)
     return registry

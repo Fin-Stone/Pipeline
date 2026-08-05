@@ -1,11 +1,14 @@
 # Phase 1 — Ingestion and Storage
 
-**Status: implemented.** The flow described here runs end to end. Trust Bank savings and
-card statements, DBS consolidated statements, MariBank's deposit-and-investment and card
-statements, and OCBC card statements all import and reconcile. One layout is still unrouted:
-DBS's card statement, whose only sample has no activity in it at all, so its row format,
-date format and debit/credit convention are unobservable. An adapter for it would be
-guessing at the only part that matters.
+**Status: implemented.** The flow runs end to end and the production corpus imports with an
+empty quarantine: 235 documents, 5,137 transactions, 14 accounts, none unverified. Trust Bank
+savings and card statements, DBS consolidated statements, MariBank's deposit-and-investment
+and card statements, and OCBC's 360 savings and card statements all reconcile.
+
+The one layout with no adapter is DBS's card statement, and it is blocked on evidence rather
+than on work: the only sample has no activity in it at all, so its row format, date format
+and debit/credit convention are unobservable. An adapter for it would be guessing at the only
+part that matters.
 
 Scope is steps 1–5 of the build order in
 [finance-pipeline-architecture.md](../finance-pipeline-architecture.md) §11: schema and
@@ -514,9 +517,19 @@ only after all six layouts were measured:
 | MariBank cc | 2 | Amount | explicit `-` |
 | OCBC cc | 1 | Amount | `CR` suffix |
 
-Implemented: `trust.acc`, `trust.cc`, `dbs.acc`, `ocbc.cc`, `maribank.cc`,
-`maribank.acc`. See "Statements that group their rows" below for what MariBank
-forced, and [repo-structure.md](repo-structure.md) for where each lives.
+Implemented: `trust.acc`, `trust.cc`, `dbs.acc`, `ocbc.acc`, `ocbc.cc`,
+`maribank.acc`, `maribank.cc`. See "Statements that group their rows" below for
+what MariBank forced, and [repo-structure.md](repo-structure.md) for where each
+lives.
+
+**One sample of a layout is one era of it.** Every adapter here was written
+against a single document and then met several more in production, and the
+corpus is what taught: an interest-rate column MariBank adds and the samples
+lacked; two different notations OCBC uses for a credit; a company name rotated
+down a margin that lands inside an amount column; a phone number in a repeated
+address block that reads as a card product. None was visible in the first
+document of its kind. Budget for a second pass against real data rather than
+treating the first green run as done.
 
 Shared: a header row fixes the columns; a line is a row when it carries a value
 in a money column; descriptions wrap onto neighbouring lines.

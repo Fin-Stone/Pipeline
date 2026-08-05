@@ -57,6 +57,10 @@ AMOUNT_COL = "amount"
 #: Rows are ~9pt apart and a wrapped description ~5pt below its row.
 CONTINUATION_GAP = 7.0
 
+#: How far below a card's product name its cardholder line may sit. Measured
+#: across the corpus: 13pt where nothing intervenes, 50pt where a notice does.
+_CARDHOLDER_WITHIN = 70.0
+
 #: OCBC settles the previous balance ahead of the cycle it is listing, so those
 #: rows are dated *after* the purchases that follow them. Naming the two runs
 #: is what stops that reading as an out-of-order table.
@@ -171,7 +175,7 @@ class OcbcCardAdapter:
             if _SKIP.match(text):
                 continue
 
-            product = self._product(line, lines[index + 1:index + 3])
+            product = self._product(line, lines[index + 1:index + 10])
             if product is not None:
                 current = sections.setdefault(
                     product, {"opening": None, "closing": None, "rows": []}
@@ -227,7 +231,17 @@ class OcbcCardAdapter:
             return None
         if _CARD_NUMBER.search(product) or _AMOUNT_IN_CELL.search(product):
             return None
-        if not any(_CARD_NUMBER.search(nxt.text) for nxt in following):
+        # Bounded by distance rather than by a line count: the notice printed
+        # beside a product runs to as many lines as it needs, and on one
+        # statement it pushed the cardholder 50pt down. Distance still keeps
+        # the address block out, whose phone number is four times further from
+        # the nearest card number than any real product is.
+        if not any(
+            _CARD_NUMBER.search(nxt.text)
+            and nxt.page_number == line.page_number
+            and 0 < nxt.top - line.top <= _CARDHOLDER_WITHIN
+            for nxt in following
+        ):
             return None
         return product.title()
 
