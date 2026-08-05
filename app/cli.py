@@ -610,6 +610,10 @@ def build_parser() -> argparse.ArgumentParser:
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--sha256", help="one document")
     group.add_argument("--quarantined", action="store_true", help="every quarantined document")
+    group.add_argument(
+        "--all", action="store_true",
+        help="every document, to replay history through the current adapters",
+    )
     p.set_defaults(func=cmd_reparse)
 
     p = sub.add_parser("learned", help="vendor strings proven to belong to an adapter")
