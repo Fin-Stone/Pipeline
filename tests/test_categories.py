@@ -12,9 +12,12 @@ import pytest
 from app.domain.categories import (
     DEFAULT_CATEGORIES,
     UNCATEGORISED,
+    Proposal,
     Rule,
     categorise,
     coverage,
+    gate_amount,
+    propose,
 )
 
 
@@ -98,6 +101,66 @@ class TestCoverage:
         rows = ["GRAB"] * 4
         report = coverage(rows, [Rule(r"grab", "Transport"), Rule(r"grab", "Dining")])
         assert report["decided"] == 0 and report["contested"] == 4
+
+
+class TestSanitisation:
+    """What may leave the household, and what may not.
+
+    The exclusions are not interchangeable: one is about what the task needs,
+    the other about whose privacy is actually at stake.
+    """
+
+    def test_a_person_is_never_proposed(self):
+        """This corpus holds "FROM: A N OTHER". Scrubbing the operator's own
+        identifiers while sending the names of people they pay inverts the
+        protection."""
+        rows = [("FAST PAYMENT FROM: A N OTHER", -2500)] * 5
+        assert propose(rows) == []
+
+    def test_a_bare_account_number_is_never_proposed(self):
+        assert propose([("ADVICE FUNDS TRANSFER 01-2345678-9", -20000)] * 3) == []
+
+    def test_a_conduit_is_not_worth_asking_about(self):
+        assert propose([("LAZADA SINGAPORE PAYM", -5000)] * 4) == []
+
+    def test_a_merchant_is_proposed(self):
+        result = propose([("SHENG SIONG", -2000)] * 3)
+        assert len(result) == 1 and result[0].counterparty == "SHENG SIONG"
+        assert result[0].occurrences == 3
+
+    def test_nothing_carries_a_date_or_a_row(self):
+        """The task needs a vocabulary, not a ledger."""
+        fields = set(Proposal.__slots__)
+        assert fields == {"counterparty", "occurrences", "typical_amount_minor"}
+
+    def test_what_a_rule_already_decides_is_not_asked_about(self):
+        rows = [("SHENG SIONG", -2000)] * 3 + [("NEW SHOP", -900)] * 2
+        result = propose(rows, [Rule(r"sheng siong", "Grocery")])
+        assert [p.counterparty for p in result] == ["NEW SHOP"]
+
+    def test_the_order_is_what_an_answer_would_buy(self):
+        rows = [("BIG", -100)] * 9 + [("SMALL", -100)] * 2
+        assert [p.counterparty for p in propose(rows)] == ["BIG", "SMALL"]
+
+    def test_an_outlier_does_not_describe_a_merchant(self):
+        """The median, so one unusual purchase does not set the magnitude."""
+        rows = [("IKEA", -350)] * 5 + [("IKEA", -89000)]
+        assert propose(rows)[0].typical_amount_minor == gate_amount(350)
+
+
+class TestAmountGates:
+    def test_an_amount_carries_a_magnitude_not_a_purchase(self):
+        assert gate_amount(-347) == 500
+        assert gate_amount(-89000) == 100_000
+
+    def test_a_tie_rounds_up(self):
+        """Never understating is the safer direction for a coarse figure."""
+        assert gate_amount(300) == 500
+
+    def test_the_gates_disambiguate_the_case_in_this_corpus(self):
+        """IKEA at 3.50 is Dining; IKEA at 890 is Furnishing. The magnitude is
+        what a model needs, and all it needs."""
+        assert gate_amount(350) != gate_amount(89000)
 
 
 class TestSeedSet:

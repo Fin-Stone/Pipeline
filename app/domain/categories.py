@@ -135,6 +135,94 @@ def categorise(counterparty: str, rules) -> Decision:
     return Decision(category=best.category, rule=best)
 
 
+#: Buckets a representative amount is snapped to before it leaves the
+#: household. Coarse on purpose, and present for *capability* rather than
+#: privacy: the magnitude is what separates IKEA at 3.50 from IKEA at 890,
+#: which is the case already sitting in this corpus.
+AMOUNT_GATES: tuple[int, ...] = (
+    100, 500, 1_000, 2_000, 5_000, 10_000,
+    30_000, 50_000, 100_000, 1_000_000, 5_000_000,
+)
+
+#: Marks of a counterparty that is a person or a bare account rather than a
+#: merchant. These are the leak that looks like protection if it is missed:
+#: scrubbing the operator's own identifiers while sending the names of the
+#: people they pay inverts the protection entirely.
+_PERSONAL = re.compile(
+    r"\b(?:PAYNOW|PAYLAH|FAST\s+PAYMENT|FUNDS?\s+TRANSFER|TRANSFER\s+(?:TO|FROM)"
+    r"|INCOMING|OUTGOING|TO:|FROM:|MR|MRS|MS|MDM)\b",
+    re.IGNORECASE,
+)
+#: An account number, with or without its separators.
+_ACCOUNT_LIKE = re.compile(r"\b\d[\d\s-]{5,}\d\b")
+
+
+def gate_amount(amount_minor: int) -> int:
+    """Snap an amount to the nearest gate, rounding up on a tie.
+
+    Coarse enough that a figure carries a magnitude and not a purchase.
+    """
+    magnitude = abs(amount_minor)
+    # Ties go to the larger gate, so the answer never understates.
+    return min(AMOUNT_GATES, key=lambda gate: (abs(gate - magnitude), -gate))
+
+
+def is_personal(counterparty: str) -> bool:
+    """Whether a counterparty names a person or an account rather than a shop."""
+    if not counterparty:
+        return True
+    return bool(_PERSONAL.search(counterparty) or _ACCOUNT_LIKE.search(counterparty))
+
+
+@dataclass(frozen=True, slots=True)
+class Proposal:
+    """One distinct counterparty, as much as may leave the household about it.
+
+    Deliberately not a transaction. The task is to name what a merchant *is*,
+    which needs a vocabulary rather than a ledger, so nothing here carries a
+    date, an account, or a row.
+    """
+
+    counterparty: str
+    occurrences: int
+    typical_amount_minor: int
+
+
+def propose(rows, rules=()) -> list[Proposal]:
+    """The counterparties worth asking about, aggregated and filtered.
+
+    `rows` are `(counterparty, amount_minor)` pairs. Anything a rule already
+    decides is left out — there is no point asking about what is known — as are
+    conduits and counterparties that name people.
+
+    Ordered by how much coverage an answer would buy, so a partial reply is
+    still the most useful partial reply available.
+    """
+    from .recurrence import is_conduit
+
+    counts: dict[str, int] = {}
+    amounts: dict[str, list[int]] = {}
+    for counterparty, amount_minor in rows:
+        name = (counterparty or "").strip()
+        if not name or is_personal(name) or is_conduit(name):
+            continue
+        if categorise(name, rules).rule is not None:
+            continue
+        counts[name] = counts.get(name, 0) + 1
+        amounts.setdefault(name, []).append(abs(amount_minor))
+
+    proposals = [
+        Proposal(
+            counterparty=name,
+            occurrences=count,
+            # The median, so one outlier purchase does not describe a merchant.
+            typical_amount_minor=gate_amount(sorted(amounts[name])[len(amounts[name]) // 2]),
+        )
+        for name, count in counts.items()
+    ]
+    return sorted(proposals, key=lambda p: (-p.occurrences, p.counterparty))
+
+
 def coverage(counterparties, rules) -> dict:
     """How much of a ledger the rules actually account for.
 

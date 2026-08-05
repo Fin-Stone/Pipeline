@@ -327,6 +327,68 @@ def cmd_transfers(args) -> int:
     return 0
 
 
+def cmd_propose(args) -> int:
+    """Emit the counterparties worth asking a model about, and nothing else.
+
+    Deliberately not a ledger export. Naming what a merchant *is* needs a
+    vocabulary, so this carries counterparty, how often it occurs, and one
+    gated magnitude — no dates, no rows, no accounts, and no counterparties
+    that name people. See architecture §3.1a for why each exclusion is there.
+    """
+    from .domain.categories import DEFAULT_CATEGORIES, Rule, propose
+
+    config = load_config()
+    repository = build_repository(config)
+    try:
+        check_schema(repository)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
+        stored = repository.list_category_rules(context)
+        targets = repository.list_categorisation_targets(context)
+    finally:
+        repository.close()
+
+    rules = [
+        Rule(pattern=r["pattern"], category=r["category"], weight=r["weight"], note=r["note"])
+        for r in stored
+    ]
+    proposals = propose(
+        ((t["counterparty_norm"], t["amount_minor"]) for t in targets), rules
+    )[:args.limit]
+
+    payload = {
+        "instruction": (
+            "Assign each counterparty exactly one category from 'categories'. "
+            "Reply as JSON: a list of {counterparty, category, confidence 0-1}. "
+            "'typical_amount' is in cents and is a coarse magnitude, not a real "
+            "purchase; use it to tell a shop's cafe from the shop itself. "
+            "Answer 'Others' rather than guessing."
+        ),
+        "categories": list(DEFAULT_CATEGORIES),
+        "counterparties": [
+            {
+                "counterparty": p.counterparty,
+                "occurrences": p.occurrences,
+                "typical_amount": p.typical_amount_minor,
+            }
+            for p in proposals
+        ],
+    }
+
+    text = json.dumps(payload, indent=2, ensure_ascii=False)
+    if args.out:
+        target = Path(args.out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text + "\n", encoding="utf-8")
+        print(f"{len(proposals)} counterparty(ies) written to {target}")
+        print("  No dates, no transactions, no accounts, no personal counterparties.")
+        print("  Safe to hand to more than one model; where they disagree, the row")
+        print("  goes to review rather than to whichever answered first.")
+        return 0
+
+    print(text)
+    return 0
+
+
 def cmd_categorise(args) -> int:
     """How much of the ledger the category rules account for, and what is next.
 
@@ -800,6 +862,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="every document, to replay history through the current adapters",
     )
     p.set_defaults(func=cmd_reparse)
+
+    p = sub.add_parser("propose", help="counterparties to ask a model about, sanitised")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
+    p.add_argument("--limit", type=int, default=500, help="counterparties to emit (default 500)")
+    p.add_argument("--out", help="write to a file instead of stdout")
+    p.set_defaults(func=cmd_propose)
 
     p = sub.add_parser("categorise", help="rule coverage, and which rule to write next")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
