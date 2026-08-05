@@ -36,6 +36,14 @@ class TestContract:
     def test_the_version_is_in_the_path(self):
         assert PREFIX == f"/api/{API_VERSION}"
 
+    def test_the_root_says_what_this_is(self, client):
+        """Visiting the root is the first thing anyone does with a new
+        self-hosted service, and answering nothing is how a working install
+        looks broken."""
+        body = client.get("/").json()
+        assert body["api_root"] == PREFIX
+        assert body["docs"] == "/docs"
+
     def test_an_unknown_profile_is_rejected_not_guessed(self, client):
         assert client.get(f"{PREFIX}/accounts", params={"profile": "staging"}).status_code == 400
 

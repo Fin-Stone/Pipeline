@@ -69,6 +69,21 @@ unbounded.
 
 ## Endpoints
 
+### `GET /`
+
+Not versioned, because it is what an operator hits before they know what the
+server speaks.
+
+```json
+{ "service": "finstone", "api_version": "v1", "api_root": "/api/v1",
+  "docs": "/docs", "openapi": "/openapi.json",
+  "note": "This is the API. The UI is a separate application that connects to it." }
+```
+
+A bare 404 here is technically correct and useless: visiting the root is the
+first thing anyone does with a new self-hosted service, and answering nothing is
+how a working install looks broken.
+
 ### `GET /api/v1/health`
 
 ```json

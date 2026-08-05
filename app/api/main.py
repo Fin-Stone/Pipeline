@@ -100,6 +100,24 @@ def _filters(
 Filters = Annotated[dict, Depends(_filters)]
 
 
+@app.get("/", tags=["meta"])
+def root() -> dict:
+    """Say what this is, to whoever opened the address in a browser.
+
+    A bare 404 here is technically correct and useless: the first thing an
+    operator does with a new self-hosted service is visit its root, and telling
+    them nothing is how a working install looks broken.
+    """
+    return {
+        "service": "finstone",
+        "api_version": API_VERSION,
+        "api_root": PREFIX,
+        "docs": "/docs",
+        "openapi": "/openapi.json",
+        "note": "This is the API. The UI is a separate application that connects to it.",
+    }
+
+
 @app.get(f"{PREFIX}/health", tags=["meta"])
 def health() -> dict:
     """Liveness, and what this server speaks.
