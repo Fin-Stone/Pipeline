@@ -1,0 +1,113 @@
+/**
+ * The only way this client reaches the server.
+ *
+ * Read ../../../docs/api-contracts.md before changing anything here. Two rules
+ * from architecture §5.2 are load-bearing:
+ *
+ *  - **No endpoint is hardcoded.** The server address is the user's, entered at
+ *    sign-in and stored per profile, exactly as Bitwarden does it. A build that
+ *    bakes in a URL cannot be self-hosted.
+ *  - **Nothing is imported from the Python side.** This client talks HTTP and
+ *    shares nothing else, so it can be pointed at any server speaking the same
+ *    API version.
+ */
+
+const SERVER_KEY = "finstone.serverUrl";
+const PROFILE_KEY = "finstone.profile";
+
+/** The contract this client is written against. */
+export const REQUIRED_API_VERSION = "v1";
+
+export function serverUrl(): string | null {
+  return localStorage.getItem(SERVER_KEY);
+}
+
+export function setServer(url: string, profile: string): void {
+  localStorage.setItem(SERVER_KEY, url.replace(/\/+$/, ""));
+  localStorage.setItem(PROFILE_KEY, profile);
+}
+
+export function profile(): string {
+  return localStorage.getItem(PROFILE_KEY) ?? "prod";
+}
+
+export function forgetServer(): void {
+  localStorage.removeItem(SERVER_KEY);
+  localStorage.removeItem(PROFILE_KEY);
+}
+
+export class ApiError extends Error {
+  constructor(readonly status: number, readonly detail: unknown) {
+    super(`API ${status}`);
+  }
+}
+
+async function call<T>(path: string, params: Record<string, unknown> = {}, init?: RequestInit): Promise<T> {
+  const base = serverUrl();
+  if (!base) throw new ApiError(0, "no server configured");
+
+  const url = new URL(`${base}/api/${REQUIRED_API_VERSION}${path}`);
+  url.searchParams.set("profile", profile());
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    // Repeatable filters: account_id and category may appear more than once.
+    if (Array.isArray(value)) value.forEach((v) => url.searchParams.append(key, String(v)));
+    else url.searchParams.append(key, String(value));
+  }
+
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    let detail: unknown = response.statusText;
+    try { detail = (await response.json()).detail ?? detail; } catch { /* body was not JSON */ }
+    throw new ApiError(response.status, detail);
+  }
+  return response.json() as Promise<T>;
+}
+
+// ---------------------------------------------------------------- shapes ---
+// Every monetary field ends in _minor and is a whole number of cents. Spending
+// is negative. Neither is converted here; see money.ts for why.
+
+export interface Health { status: string; api_version: string }
+export interface Category { id: number; name: string; position: number }
+export interface Account {
+  id: number; institution: string; account_ref_masked: string;
+  sub_account_label: string | null; currency: string; kind: string;
+}
+export interface Summary {
+  currency: string;
+  range: { since: string | null; until: string | null; days: number | null };
+  total_minor: number;
+  by_category: { category: string | null; rows: number; total_minor: number }[];
+  /** Null on an open-ended range: an average over unbounded time is not a number. */
+  average_minor: { per_day: number | null; per_week: number | null; per_month: number | null };
+}
+export interface Series {
+  merchant: string; amount_centre_minor: number; monthly_equivalent_minor: number;
+  period_label: string; occurrences: number; total_paid_minor: number;
+  first_seen: string; last_seen: string; expected_next: string; confidence: number;
+  price_changes: { on: string; from_minor: number; to_minor: number }[];
+}
+export interface Recurring {
+  currency: string; monthly_commitment_minor: number;
+  series: Series[]; due_soon: Series[]; overdue: Series[]; lapsed: Series[];
+}
+export interface ReviewItem { counterparty: string; occurrences: number; total_minor: number }
+export interface Review { outstanding: number; value_at_stake_minor: number; items: ReviewItem[] }
+
+export interface Filters {
+  since?: string; until?: string; account_id?: number[]; category?: string[];
+}
+
+export const api = {
+  health: () => call<Health>("/health"),
+  accounts: () => call<{ accounts: Account[] }>("/accounts"),
+  categories: () => call<{ categories: Category[] }>("/categories"),
+  summary: (f: Filters) => call<Summary>("/summary", f),
+  recurring: () => call<Recurring>("/recurring"),
+  review: (limit = 50) => call<Review>("/review", { limit }),
+  transfers: () => call<{ linked: number }>("/transfers"),
+  growth: (months: number) => call<unknown>("/growth", { months }),
+  decide: (counterparty: string, category: string) =>
+    call<{ created: boolean }>("/review/decide", { counterparty, category }, { method: "POST" }),
+};

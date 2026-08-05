@@ -46,3 +46,7 @@ residual*.json
 # the rules live in the ledger, which is the artifact worth keeping.
 category/
 
+
+# Node / UI
+node_modules/
+ui/pwa/dist/
