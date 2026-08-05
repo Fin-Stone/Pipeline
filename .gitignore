@@ -41,3 +41,8 @@ venv/
 proposal*.json
 residual*.json
 
+# Model replies to the categorisation prompt. Sanitised of personal data by
+# construction, but still this household's merchant list — and once consolidated
+# the rules live in the ledger, which is the artifact worth keeping.
+category/
+

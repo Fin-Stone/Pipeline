@@ -257,6 +257,34 @@ class SqlAlchemyLedgerRepository:
                 )
             ]
 
+    def add_category_rules(self, context: TenantContext, rules) -> int:
+        """Add rules, leaving any the tenant already has untouched.
+
+        Additive by design. A rule the operator wrote or corrected outranks
+        anything an import proposes, so an import that overwrote would undo
+        exactly the work worth keeping.
+        """
+        by_name = {row["name"]: row["id"] for row in self.list_categories(context)}
+        existing = {
+            (row["pattern"], row["category"]) for row in self.list_category_rules(context)
+        }
+        new = [
+            {
+                "tenant_id": context.tenant_id,
+                "category_id": by_name[category],
+                "pattern": pattern,
+                "weight": weight,
+                "note": note,
+                "created_at": datetime.now(timezone.utc),
+            }
+            for pattern, category, weight, note in rules
+            if category in by_name and (pattern, category) not in existing
+        ]
+        if new:
+            with self._engine.begin() as conn:
+                conn.execute(schema.category_rule.insert(), new)
+        return len(new)
+
     def list_category_rules(self, context: TenantContext) -> list[dict]:
         """Rules with the category they resolve to, by id rather than by name.
 

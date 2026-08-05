@@ -327,6 +327,86 @@ def cmd_transfers(args) -> int:
     return 0
 
 
+def cmd_rules(args) -> int:
+    """Turn several models' replies into rules, where they agreed.
+
+    Unanimity is the bar, and it is the only confidence signal available: a
+    model's own certainty says nothing about the world, whereas independent
+    agreement does. Anything disputed is reported and left for a human, since
+    a category nobody checks looks exactly like one that was decided.
+    """
+    import re
+
+    from .domain.categories import DEFAULT_CATEGORIES, UNCATEGORISED, consolidate
+
+    folder = Path(args.folder)
+    replies: dict[str, dict] = {}
+    for path in sorted(folder.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except ValueError as exc:
+            print(f"  {path.name}: unreadable ({exc})", file=sys.stderr)
+            continue
+        rows = payload if isinstance(payload, list) else payload.get("counterparties", [])
+        answers = {
+            r["counterparty"]: r["category"]
+            for r in rows
+            if isinstance(r, dict) and r.get("counterparty") and r.get("category")
+        }
+        print(f"{path.stem:<24}{len(answers):>5} usable answer(s)"
+              f"{'   ignored: no categories assigned' if not answers else ''}")
+        if answers:
+            replies[path.stem] = answers
+
+    if not replies:
+        print("\nno usable replies found", file=sys.stderr)
+        return 2
+
+    verdicts = consolidate(replies, DEFAULT_CATEGORIES)
+    agreed = [v for v in verdicts if v.is_unanimous and v.category != UNCATEGORISED]
+    declined = [v for v in verdicts if v.is_unanimous and v.category == UNCATEGORISED]
+    disputed = [v for v in verdicts if v.needs_review]
+
+    print(f"\ncounterparties       {len(verdicts)}")
+    print(f"  agreed             {len(agreed)}")
+    print(f"  agreed on 'Others' {len(declined)}   (nobody could place these)")
+    print(f"  disputed           {len(disputed)}   (left for review)")
+
+    if disputed and not args.apply:
+        print("\ndisputes")
+        for v in sorted(disputed, key=lambda v: -v.answered)[:args.limit]:
+            others = "  ".join(f"{c} [{m}]" for c, m in v.dissent)
+            print(f"  {v.counterparty[:34]:<35}{v.category} ({v.agreed}/{v.answered})"
+                  f"  vs  {others}")
+
+    if not args.apply:
+        print("\n  finstone rules --apply   write the agreed ones")
+        return 0
+
+    # Anchored and escaped: a verdict is about one counterparty, and a pattern
+    # built loosely from a merchant name would claim others that merely
+    # contain it.
+    proposed = [
+        (rf"^{re.escape(v.counterparty)}$", v.category, 0,
+         f"agreed by {v.agreed}/{v.answered} models")
+        for v in agreed
+    ]
+
+    config = load_config()
+    repository = build_repository(config)
+    try:
+        check_schema(repository)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
+        repository.seed_categories(context, DEFAULT_CATEGORIES)
+        written = repository.add_category_rules(context, proposed)
+    finally:
+        repository.close()
+
+    print(f"\n{written} rule(s) added; {len(proposed) - written} already present.")
+    print("  Existing rules were left alone — a correction outranks an import.")
+    return 0
+
+
 def cmd_propose(args) -> int:
     """Emit the counterparties worth asking a model about, and nothing else.
 
@@ -877,6 +957,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="every document, to replay history through the current adapters",
     )
     p.set_defaults(func=cmd_reparse)
+
+    p = sub.add_parser("rules", help="consolidate model replies into category rules")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
+    p.add_argument("--folder", default="category", help="folder of model replies")
+    p.add_argument("--apply", action="store_true", help="write the agreed rules")
+    p.add_argument("--limit", type=int, default=25, help="disputes to list (default 25)")
+    p.set_defaults(func=cmd_rules)
 
     p = sub.add_parser("propose", help="counterparties to ask a model about, sanitised")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)

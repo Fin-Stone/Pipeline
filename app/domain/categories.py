@@ -235,6 +235,73 @@ def propose(rows, rules=(), *, suggest=()) -> list[Proposal]:
     return sorted(proposals, key=lambda p: (-p.occurrences, p.counterparty))
 
 
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    """What several models made of one counterparty."""
+
+    counterparty: str
+    category: str
+    #: How many answered, and how many said this. Kept apart from confidence
+    #: because a model's self-reported certainty and independent corroboration
+    #: are different things, and only the second is evidence.
+    agreed: int
+    answered: int
+    #: The categories that lost, where there were any.
+    dissent: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def is_unanimous(self) -> bool:
+        return self.agreed == self.answered and self.answered > 0
+
+    @property
+    def needs_review(self) -> bool:
+        return not self.is_unanimous
+
+
+def consolidate(replies: dict, valid_categories=DEFAULT_CATEGORIES) -> list[Verdict]:
+    """Reduce several models' answers to one verdict each.
+
+    `replies` maps a model's name to `{counterparty: category}`.
+
+    Consolidation is a vote, not an average. Averaging confidences would let
+    one assured model outweigh two doubtful ones that happen to agree, and the
+    whole reason for asking more than one is that **independent agreement is
+    the only confidence signal available here** — a model's own certainty is
+    not evidence about the world.
+
+    A model that skipped a counterparty simply does not vote on it. Replies
+    are routinely partial, and treating silence as dissent would make a short
+    answer look like a disagreement.
+
+    Categories outside the allowed set are discarded rather than accepted: a
+    model inventing a label is answering a different question.
+    """
+    votes: dict[str, dict[str, list[str]]] = {}
+    for model, answers in replies.items():
+        for counterparty, category in (answers or {}).items():
+            name = (counterparty or "").strip()
+            if not name or category not in valid_categories:
+                continue
+            votes.setdefault(name, {}).setdefault(category, []).append(model)
+
+    verdicts = []
+    for name, by_category in votes.items():
+        ranked = sorted(by_category.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        winner, backers = ranked[0]
+        answered = sum(len(models) for models in by_category.values())
+        verdicts.append(Verdict(
+            counterparty=name,
+            category=winner,
+            agreed=len(backers),
+            answered=answered,
+            dissent=tuple(
+                (category, ",".join(sorted(models)))
+                for category, models in ranked[1:]
+            ),
+        ))
+    return sorted(verdicts, key=lambda v: (v.needs_review, v.counterparty))
+
+
 def coverage(counterparties, rules) -> dict:
     """How much of a ledger the rules actually account for.
 

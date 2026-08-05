@@ -15,6 +15,7 @@ from app.domain.categories import (
     Proposal,
     Rule,
     categorise,
+    consolidate,
     coverage,
     gate_amount,
     propose,
@@ -204,6 +205,60 @@ class TestSeedRules:
             suggest=self._seeds(),
         )
         assert result == []
+
+
+class TestConsolidation:
+    """Several models, and what their agreement is worth."""
+
+    def test_unanimity_is_the_signal(self):
+        verdict = consolidate({
+            "a": {"NTUC": "Grocery"},
+            "b": {"NTUC": "Grocery"},
+        })[0]
+        assert verdict.category == "Grocery"
+        assert verdict.is_unanimous and not verdict.needs_review
+
+    def test_a_split_goes_to_review_with_its_dissent(self):
+        """Recorded rather than resolved: which model said what is the thing
+        worth reading."""
+        verdict = consolidate({
+            "a": {"GRAB": "Transport"},
+            "b": {"GRAB": "Transport"},
+            "c": {"GRAB": "Dining"},
+        })[0]
+        assert verdict.needs_review
+        assert (verdict.agreed, verdict.answered) == (2, 3)
+        assert verdict.dissent == (("Dining", "c"),)
+
+    def test_silence_is_not_dissent(self):
+        """Replies are routinely partial — one model returned 177 of 500 —
+        and counting a skip as disagreement would make a short answer look
+        like a dispute."""
+        verdict = consolidate({
+            "a": {"NTUC": "Grocery"},
+            "b": {"OTHER SHOP": "Dining"},
+        })
+        ntuc = next(v for v in verdict if v.counterparty == "NTUC")
+        assert ntuc.is_unanimous and ntuc.answered == 1
+
+    def test_an_invented_category_is_discarded(self):
+        """A model answering outside the set is answering a different
+        question."""
+        verdicts = consolidate({
+            "a": {"X": "Groceries and Food"},
+            "b": {"X": "Grocery"},
+        })
+        assert verdicts[0].category == "Grocery" and verdicts[0].answered == 1
+
+    def test_agreement_is_not_averaged_confidence(self):
+        """Averaging would let one assured model outweigh two doubtful ones
+        that agree, which discards the only real evidence available."""
+        verdict = consolidate({
+            "sure": {"X": "Dining"},
+            "a": {"X": "Grocery"},
+            "b": {"X": "Grocery"},
+        })[0]
+        assert verdict.category == "Grocery" and verdict.agreed == 2
 
 
 class TestAmountGates:
