@@ -485,6 +485,18 @@ def cmd_propose(args) -> int:
     return 0
 
 
+def repository_apply(config, profile, decided) -> dict:
+    """Write the rule pass, and read back what each category now holds."""
+    repository = build_repository(config)
+    try:
+        context = repository.resolve_context(config.tenant_for(profile), config.member_email)
+        result = repository.replace_rule_enrichments(context, decided)
+        result["totals"] = repository.category_totals(context)
+    finally:
+        repository.close()
+    return result
+
+
 def cmd_categorise(args) -> int:
     """How much of the ledger the category rules account for, and what is next.
 
@@ -523,6 +535,31 @@ def cmd_categorise(args) -> int:
     print(f"  categorised        {report['decided']}   ({report['share']:.1%})")
     print(f"  contested          {report['contested']}")
     print(f"  unmatched          {report['unmatched']}")
+
+    if args.apply:
+        decided = []
+        for target in targets:
+            decision = categorise(target["counterparty_norm"] or "", rules)
+            if decision.rule is not None:
+                # Rules are exact by construction, so the confidence recorded is
+                # about the rule having fired, not about the world. A softer
+                # number here would be invented.
+                decided.append((target["id"], decision.category, 1.0))
+
+        result = repository_apply(config, args.profile, decided)
+        print(f"\n{result['written']} row(s) categorised"
+              f"  (replacing {result['replaced']} from the previous pass)")
+        if result["left_to_humans"]:
+            print(f"  {result['left_to_humans']} left alone: decided by a human, and a"
+                  " correction that an automated pass could undo is not a correction")
+
+        totals = result["totals"]
+        if totals:
+            print(f"\n{'category':<24}{'rows':>7}{'total':>15}")
+            for row in totals:
+                print(f"  {row['category'] or '(none)':<22}{row['rows']:>7}"
+                      f"{_money(-(row['total_minor'] or 0))}")
+        return 0
 
     if report["worst_gaps"]:
         by_counterparty: dict[str, int] = {}
@@ -982,6 +1019,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("categorise", help="rule coverage, and which rule to write next")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
+    p.add_argument("--apply", action="store_true", help="write the categories to the ledger")
     p.add_argument("--limit", type=int, default=20, help="gaps to list (default 20)")
     p.add_argument("--redact", action="store_true", help="mask counterparty names")
     p.set_defaults(func=cmd_categorise)

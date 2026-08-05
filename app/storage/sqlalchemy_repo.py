@@ -301,6 +301,75 @@ class SqlAlchemyLedgerRepository:
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
 
+    def replace_rule_enrichments(self, context: TenantContext, decided) -> dict:
+        """Write what the rules decided, and touch nothing a human decided.
+
+        `decided` is `(txn_id, category, confidence)`.
+
+        Rule rows are replaced wholesale because they are a pure function of
+        the rules and the ledger: rerunning must give the same answer, and
+        appending would leave a transaction wearing two categories with nothing
+        to say which is current.
+
+        **Human corrections are never in scope.** They are deleted by no query
+        here and overwritten by no insert, because the whole value of correcting
+        something is that it stays corrected — an automated pass that could undo
+        it would make every correction provisional.
+        """
+        enrichment = schema.txn_enrichment.c
+        rows = [
+            {
+                "tenant_id": context.tenant_id,
+                "txn_id": txn_id,
+                "category": category,
+                "confidence": confidence,
+                "source": "rule",
+                "computed_at": datetime.now(timezone.utc),
+            }
+            for txn_id, category, confidence in decided
+        ]
+        with self._engine.begin() as conn:
+            human = conn.execute(
+                select(func.count()).select_from(schema.txn_enrichment)
+                .where((enrichment.tenant_id == context.tenant_id) & (enrichment.source == "human"))
+            ).scalar_one()
+            removed = conn.execute(
+                schema.txn_enrichment.delete().where(
+                    (enrichment.tenant_id == context.tenant_id) & (enrichment.source == "rule")
+                )
+            ).rowcount
+            # A human decision stands, so the rule pass does not get to speak
+            # about that transaction at all.
+            if human:
+                claimed = select(enrichment.txn_id).where(
+                    (enrichment.tenant_id == context.tenant_id) & (enrichment.source == "human")
+                )
+                spoken_for = {row[0] for row in conn.execute(claimed)}
+                rows = [r for r in rows if r["txn_id"] not in spoken_for]
+            if rows:
+                conn.execute(schema.txn_enrichment.insert(), rows)
+
+        return {"written": len(rows), "replaced": removed or 0, "left_to_humans": human}
+
+    def category_totals(self, context: TenantContext) -> list[dict]:
+        """What each category holds, for reading back what a pass achieved."""
+        enrichment, txn = schema.txn_enrichment.c, schema.txn.c
+        stmt = (
+            select(
+                enrichment.category,
+                func.count().label("rows"),
+                func.sum(txn.amount_minor).label("total_minor"),
+            )
+            .select_from(
+                schema.txn_enrichment.join(schema.txn, enrichment.txn_id == txn.id)
+            )
+            .where(enrichment.tenant_id == context.tenant_id)
+            .group_by(enrichment.category)
+            .order_by(func.sum(txn.amount_minor))
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
     def list_categorisation_targets(self, context: TenantContext) -> list[dict]:
         """Spending rows needing a category, and what they were with.
 

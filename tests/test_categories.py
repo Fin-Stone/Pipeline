@@ -167,6 +167,75 @@ class TestSanitisation:
         assert propose(rows)[0].typical_amount_minor == gate_amount(350)
 
 
+class TestWritingToTheLedger:
+    """A correction that an automated pass could undo is not a correction."""
+
+    def _seed(self, repository, context):
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        account = AccountRecord(
+            institution="Test", account_ref_masked="acct", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        document = DocumentRecord(
+            sha256="e" * 64, institution="Test", doc_type="acc",
+            period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+            storage_path="x", parse_status="imported",
+            source_profile="dummy", source_relpath="a.pdf",
+            fetched_at=datetime.now(timezone.utc),
+        )
+        txns = [
+            TxnRecord(
+                account_key=account, posted_date=date(2026, 6, 3), amount_minor=-100 * n,
+                currency="SGD", description_raw="t", description_norm="t",
+                counterparty_norm="SHOP", dedupe_key=f"k{n}", seq=0,
+            )
+            for n in (1, 2)
+        ]
+        repository.insert_document(context, document, [], txns)
+
+    def test_a_rule_pass_is_replaced_not_appended(self, repository, context):
+        """Rerunning must give the same answer, and appending would leave a
+        transaction wearing two categories with nothing to say which is now."""
+        self._seed(repository, context)
+        decided = [(1, "Grocery", 1.0), (2, "Grocery", 1.0)]
+
+        first = repository.replace_rule_enrichments(context, decided)
+        second = repository.replace_rule_enrichments(context, decided)
+
+        assert first["written"] == 2 and first["replaced"] == 0
+        assert second["written"] == 2 and second["replaced"] == 2
+        assert sum(r["rows"] for r in repository.category_totals(context)) == 2
+
+    def test_a_human_decision_is_never_overwritten(self, repository, context):
+        """The whole value of correcting something is that it stays
+        corrected."""
+        from datetime import datetime, timezone
+
+        from app.storage import schema
+
+        self._seed(repository, context)
+        with repository.engine.begin() as conn:
+            conn.execute(schema.txn_enrichment.insert(), [{
+                "tenant_id": context.tenant_id, "txn_id": 1,
+                "category": "Dining", "confidence": 1.0, "source": "human",
+                "computed_at": datetime.now(timezone.utc),
+            }])
+
+        result = repository.replace_rule_enrichments(
+            context, [(1, "Grocery", 1.0), (2, "Grocery", 1.0)]
+        )
+
+        assert result["left_to_humans"] == 1
+        # The rule pass declined to speak about that transaction at all.
+        assert result["written"] == 1
+        totals = {r["category"]: r["rows"] for r in repository.category_totals(context)}
+        assert totals == {"Dining": 1, "Grocery": 1}
+
+
 class TestSeedRules:
     """The rules that ship, and what they are allowed to decide."""
 
