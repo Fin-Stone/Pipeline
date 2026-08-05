@@ -1,7 +1,7 @@
-"""Adapter tests against the operator's real documents.
+﻿"""Adapter tests against the operator's real documents.
 
 uploads/dummy is gitignored, so these skip cleanly when the documents are
-absent — CI stays green without operator data. When they are present, these are
+absent â€” CI stays green without operator data. When they are present, these are
 the tests that actually prove the adapters read real statements correctly.
 
 Values asserted here were read directly out of the PDFs.
@@ -9,6 +9,8 @@ Values asserted here were read directly out of the PDFs.
 
 from __future__ import annotations
 
+
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -45,7 +47,9 @@ class TestTrustSavings:
 
         pockets = {a.sub_account_label: a for a in parsed.accounts}
         assert set(pockets) == {"Main Account", "Test", "Huat Ah"}
-        assert all(a.account_ref_masked == "01-2345678-9" for a in parsed.accounts)
+        # All three pockets share one account number, which is the property
+        # under test. The number itself is the operator's and stays out of here.
+        assert len({a.account_ref_masked for a in parsed.accounts}) == 1
 
         main = pockets["Main Account"]
         assert main.opening_balance_minor == 10000000
@@ -76,7 +80,7 @@ class TestTrustSavings:
 
     def test_routing_does_not_depend_on_customer_data(self, dummy_root):
         """The signature must name only the bank's own words. Requiring a name
-        or an address would mean moving house broke the adapter — and would put
+        or an address would mean moving house broke the adapter â€” and would put
         personal data in the routing table."""
         from app.parsers.trust.acc import SIGNATURE
 
@@ -151,7 +155,9 @@ class TestDbsSavings:
         assert len(parsed.accounts) == 1
 
         account = parsed.accounts[0]
-        assert account.account_ref_masked == "96-5432109-2"
+        # Asserted by shape rather than by value: the account number belongs to
+        # the operator's document, and a test is not the place to publish one.
+        assert re.fullmatch(r"\d{3}-\d{6}-\d", account.account_ref_masked)
         assert account.opening_balance_minor == 5000000
         assert account.closing_balance_minor == 5000000
         assert account.opening_balance_minor + sum(
@@ -509,8 +515,8 @@ class TestOcbcCardVariants:
 class TestUnregisteredLayouts:
     @pytest.mark.parametrize("relpath", ["DBS/cc/-1.pdf"])
     def test_open_but_route_nowhere(self, dummy_root, relpath):
-        """Institutions without an adapter must still open — several are
-        owner-restricted PDFs — and must resolve to no adapter, which is what
+        """Institutions without an adapter must still open â€” several are
+        owner-restricted PDFs â€” and must resolve to no adapter, which is what
         sends them to quarantine instead of a wrong parser."""
         from app.parsers.registry import UnknownLayout
 
