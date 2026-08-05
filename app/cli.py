@@ -336,6 +336,7 @@ def cmd_propose(args) -> int:
     that name people. See architecture §3.1a for why each exclusion is there.
     """
     from .domain.categories import DEFAULT_CATEGORIES, Rule, propose
+    from .domain.seed_rules import seed_rules
 
     config = load_config()
     repository = build_repository(config)
@@ -351,14 +352,22 @@ def cmd_propose(args) -> int:
         Rule(pattern=r["pattern"], category=r["category"], weight=r["weight"], note=r["note"])
         for r in stored
     ]
+    seeds = seed_rules()
     proposals = propose(
-        ((t["counterparty_norm"], t["amount_minor"]) for t in targets), rules
-    )[:args.limit]
+        ((t["counterparty_norm"], t["amount_minor"]) for t in targets), rules, suggest=seeds
+    )
+    suggested = sum(1 for p in proposals if p.suggested_category)
+    if args.only_unknown:
+        proposals = [p for p in proposals if not p.suggested_category]
+    proposals = proposals[:args.limit]
 
     payload = {
         "instruction": (
             "Assign each counterparty exactly one category from 'categories'. "
-            "Reply as JSON: a list of {counterparty, category, confidence 0-1}. "
+            "Where 'suggested_category' is present it came from a bundled pattern "
+            "rule, shown with the pattern that matched: confirm it or replace it, "
+            "and say which you did. Reply as JSON: a list of "
+            "{counterparty, category, agreed_with_suggestion, confidence 0-1}. "
             "'typical_amount' is in cents and is a coarse magnitude, not a real "
             "purchase; use it to tell a shop's cafe from the shop itself. "
             "Answer 'Others' rather than guessing."
@@ -369,6 +378,11 @@ def cmd_propose(args) -> int:
                 "counterparty": p.counterparty,
                 "occurrences": p.occurrences,
                 "typical_amount": p.typical_amount_minor,
+                **(
+                    {"suggested_category": p.suggested_category,
+                     "suggested_by": p.suggested_by}
+                    if p.suggested_category else {}
+                ),
             }
             for p in proposals
         ],
@@ -380,6 +394,7 @@ def cmd_propose(args) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text + "\n", encoding="utf-8")
         print(f"{len(proposals)} counterparty(ies) written to {target}")
+        print(f"  {suggested} carry a seeded suggestion to confirm or overturn.")
         print("  No dates, no transactions, no accounts, no personal counterparties.")
         print("  Safe to hand to more than one model; where they disagree, the row")
         print("  goes to review rather than to whichever answered first.")
@@ -866,6 +881,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("propose", help="counterparties to ask a model about, sanitised")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.add_argument("--limit", type=int, default=500, help="counterparties to emit (default 500)")
+    p.add_argument(
+        "--only-unknown", action="store_true",
+        help="omit the ones a seed rule already suggests an answer for",
+    )
     p.add_argument("--out", help="write to a file instead of stdout")
     p.set_defaults(func=cmd_propose)
 

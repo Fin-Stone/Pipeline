@@ -129,9 +129,15 @@ class TestSanitisation:
         assert result[0].occurrences == 3
 
     def test_nothing_carries_a_date_or_a_row(self):
-        """The task needs a vocabulary, not a ledger."""
+        """The task needs a vocabulary, not a ledger.
+
+        Asserted as the absence of the dangerous shapes rather than an exact
+        field list, so adding something harmless — a suggestion to confirm —
+        does not fail, while adding a date does.
+        """
         fields = set(Proposal.__slots__)
-        assert fields == {"counterparty", "occurrences", "typical_amount_minor"}
+        forbidden = ("date", "time", "txn", "account", "id", "member", "balance", "raw")
+        assert not [f for f in fields if any(word in f for word in forbidden)]
 
     def test_what_a_rule_already_decides_is_not_asked_about(self):
         rows = [("SHENG SIONG", -2000)] * 3 + [("NEW SHOP", -900)] * 2
@@ -146,6 +152,58 @@ class TestSanitisation:
         """The median, so one unusual purchase does not set the magnitude."""
         rows = [("IKEA", -350)] * 5 + [("IKEA", -89000)]
         assert propose(rows)[0].typical_amount_minor == gate_amount(350)
+
+
+class TestSeedRules:
+    """The rules that ship, and what they are allowed to decide."""
+
+    def _seeds(self):
+        from app.domain.seed_rules import seed_rules
+
+        return seed_rules()
+
+    def test_every_seed_names_a_real_category(self):
+        """A rule pointing at a category nobody has is a rule that never
+        fires and never says so."""
+        for rule in self._seeds():
+            assert rule.category in DEFAULT_CATEGORIES, rule.pattern
+
+    def test_every_seed_pattern_compiles(self):
+        assert self._seeds()  # Rule.__post_init__ raises on a bad pattern
+
+    def test_the_restaurant_beats_the_furniture_shop(self):
+        """The case already sitting in this corpus, decided by the shipped
+        rules rather than by anything the operator has to write."""
+        seeds = self._seeds()
+        assert categorise("IKEA-RESTAURANT", seeds).category == "Dining"
+        assert categorise("IKEA TAMPINES", seeds).category == "Furnishing"
+
+    def test_a_suggestion_travels_with_its_evidence(self):
+        """Sent as a claim to be confirmed, not applied silently, so the
+        pattern that matched goes with it."""
+        from app.domain.categories import propose
+
+        result = propose([("SHENG SIONG BEDOK", -2000)] * 3, suggest=self._seeds())
+        assert result[0].suggested_category == "Grocery"
+        assert result[0].suggested_by
+
+    def test_a_seed_does_not_settle_the_question(self):
+        """A seeded guess is right often enough to send and wrong often enough
+        that it must not close the question."""
+        from app.domain.categories import propose
+
+        result = propose([("SHENG SIONG", -2000)] * 3, suggest=self._seeds())
+        assert len(result) == 1, "still asked about, despite having a suggestion"
+
+    def test_a_settled_rule_does_close_it(self):
+        from app.domain.categories import propose
+
+        result = propose(
+            [("SHENG SIONG", -2000)] * 3,
+            rules=[Rule(r"sheng siong", "Grocery")],
+            suggest=self._seeds(),
+        )
+        assert result == []
 
 
 class TestAmountGates:

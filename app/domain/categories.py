@@ -186,17 +186,27 @@ class Proposal:
     counterparty: str
     occurrences: int
     typical_amount_minor: int
+    #: What the bundled or operator rules already think, if anything. Sent so a
+    #: model reviews a proposal rather than answering from nothing — agreement
+    #: is then evidence, and disagreement is a specific claim worth reading.
+    suggested_category: str | None = None
+    #: Where the suggestion came from, so it can be weighed rather than trusted.
+    suggested_by: str | None = None
 
 
-def propose(rows, rules=()) -> list[Proposal]:
+def propose(rows, rules=(), *, suggest=()) -> list[Proposal]:
     """The counterparties worth asking about, aggregated and filtered.
 
-    `rows` are `(counterparty, amount_minor)` pairs. Anything a rule already
-    decides is left out — there is no point asking about what is known — as are
-    conduits and counterparties that name people.
+    `rows` are `(counterparty, amount_minor)` pairs. `rules` are settled and
+    remove a counterparty from the question entirely; `suggest` are the seed
+    rules, which propose an answer without closing it.
 
-    Ordered by how much coverage an answer would buy, so a partial reply is
-    still the most useful partial reply available.
+    That split is the point. A seeded guess is a well-known chain matched by
+    pattern, which is right often enough to be worth sending and wrong often
+    enough that it should not be applied silently — so it travels as a claim to
+    be confirmed, next to the evidence for it.
+
+    Conduits and counterparties naming people never appear either way.
     """
     from .recurrence import is_conduit
 
@@ -211,15 +221,17 @@ def propose(rows, rules=()) -> list[Proposal]:
         counts[name] = counts.get(name, 0) + 1
         amounts.setdefault(name, []).append(abs(amount_minor))
 
-    proposals = [
-        Proposal(
+    proposals = []
+    for name, count in counts.items():
+        hint = categorise(name, suggest)
+        proposals.append(Proposal(
             counterparty=name,
             occurrences=count,
             # The median, so one outlier purchase does not describe a merchant.
             typical_amount_minor=gate_amount(sorted(amounts[name])[len(amounts[name]) // 2]),
-        )
-        for name, count in counts.items()
-    ]
+            suggested_category=hint.category if hint.rule else None,
+            suggested_by=hint.rule.pattern if hint.rule else None,
+        ))
     return sorted(proposals, key=lambda p: (-p.occurrences, p.counterparty))
 
 
