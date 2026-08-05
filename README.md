@@ -34,6 +34,21 @@ Every command that touches the ledger takes `--profile dummy|prod`. It selects t
 tree, the tenant, and that tenant's quarantine — real and synthetic documents share none of
 the three.
 
+## API
+
+The UI talks to the backend over HTTP and shares nothing else with it. The server address is
+the user's choice — their own install or a hosted one — as Bitwarden does it.
+
+```
+pip install -e .[api]
+uvicorn app.api.main:app        # /docs for the interactive schema
+```
+
+**[docs/api-contracts.md](docs/api-contracts.md) is the contract.** Read it before writing a
+client; update it in the same commit as any change under `app/api/`. It is not a description
+of the implementation — it is what a self-hosted server promises, and drifting from it breaks
+somebody else's installation rather than your build.
+
 ## Repo shape
 
 - `app/` contains the pipeline core logic

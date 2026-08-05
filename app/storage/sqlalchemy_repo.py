@@ -351,6 +351,130 @@ class SqlAlchemyLedgerRepository:
 
         return {"written": len(rows), "replaced": removed or 0, "left_to_humans": human}
 
+    def list_accounts(self, context: TenantContext) -> list[dict]:
+        columns = schema.account.c
+        stmt = (
+            select(
+                columns.id, columns.institution, columns.account_ref_masked,
+                columns.sub_account_label, columns.currency, columns.kind,
+            )
+            .where(columns.tenant_id == context.tenant_id)
+            .order_by(columns.institution, columns.account_ref_masked)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def list_spending(
+        self,
+        context: TenantContext,
+        *,
+        since=None,
+        until=None,
+        account_ids=None,
+        categories=None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Spending rows with their category, filtered as the dashboard asks.
+
+        Every figure the dashboard shows has to be derivable from a date range,
+        a set of accounts and a set of categories — see architecture §5.1(B) —
+        so this is one query with optional narrowing rather than a family of
+        precomputed aggregates.
+
+        Transfers are excluded here, not by the caller. A movement between the
+        household's own accounts is not spending, and a total that includes it
+        overstates by the size of every card payment.
+        """
+        txn, link, enrichment, account = (
+            schema.txn.c, schema.transfer_link.c,
+            schema.txn_enrichment.c, schema.account.c,
+        )
+        linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
+            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
+        )
+        # A human decision outranks a rule, so the newest row per source order
+        # wins; ordering by source puts 'human' last alphabetically after
+        # 'rule', which is why the pick is explicit rather than incidental.
+        stmt = (
+            select(
+                txn.id, txn.posted_date, txn.amount_minor, txn.currency,
+                txn.counterparty_norm, txn.account_id,
+                account.institution, account.account_ref_masked,
+                enrichment.category, enrichment.source,
+            )
+            .select_from(
+                schema.txn
+                .join(schema.account, txn.account_id == account.id)
+                .outerjoin(
+                    schema.txn_enrichment,
+                    (enrichment.txn_id == txn.id)
+                    & (enrichment.tenant_id == context.tenant_id),
+                )
+            )
+            .where(
+                (txn.tenant_id == context.tenant_id)
+                & (txn.amount_minor < 0)
+                & txn.id.notin_(linked)
+            )
+            .order_by(txn.posted_date.desc(), txn.id.desc())
+        )
+        if since is not None:
+            stmt = stmt.where(txn.posted_date >= since)
+        if until is not None:
+            stmt = stmt.where(txn.posted_date <= until)
+        if account_ids:
+            stmt = stmt.where(txn.account_id.in_(list(account_ids)))
+        if categories:
+            stmt = stmt.where(enrichment.category.in_(list(categories)))
+
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt.limit(limit).offset(offset))
+            return [dict(row._mapping) for row in rows]
+
+    def spending_summary(
+        self, context: TenantContext, *, since=None, until=None,
+        account_ids=None, categories=None,
+    ) -> list[dict]:
+        """Totals per category over the same filters, for the headline figures."""
+        txn, link, enrichment = (
+            schema.txn.c, schema.transfer_link.c, schema.txn_enrichment.c,
+        )
+        linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
+            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
+        )
+        stmt = (
+            select(
+                enrichment.category,
+                func.count().label("rows"),
+                func.sum(txn.amount_minor).label("total_minor"),
+            )
+            .select_from(
+                schema.txn.outerjoin(
+                    schema.txn_enrichment,
+                    (enrichment.txn_id == txn.id)
+                    & (enrichment.tenant_id == context.tenant_id),
+                )
+            )
+            .where(
+                (txn.tenant_id == context.tenant_id)
+                & (txn.amount_minor < 0)
+                & txn.id.notin_(linked)
+            )
+            .group_by(enrichment.category)
+        )
+        if since is not None:
+            stmt = stmt.where(txn.posted_date >= since)
+        if until is not None:
+            stmt = stmt.where(txn.posted_date <= until)
+        if account_ids:
+            stmt = stmt.where(txn.account_id.in_(list(account_ids)))
+        if categories:
+            stmt = stmt.where(enrichment.category.in_(list(categories)))
+
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
     def category_totals(self, context: TenantContext) -> list[dict]:
         """What each category holds, for reading back what a pass achieved."""
         enrichment, txn = schema.txn_enrichment.c, schema.txn.c
