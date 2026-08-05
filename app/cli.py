@@ -327,6 +327,78 @@ def cmd_transfers(args) -> int:
     return 0
 
 
+def cmd_recurring(args) -> int:
+    """The payments that repeat, and what they cost.
+
+    Reports only. Nothing here writes, because a detected series is a
+    suggestion until the operator has looked at it — see architecture §3.2b.
+    """
+    from datetime import date
+
+    from .domain.recurrence import Occurrence, find_series
+    from .pipeline.diagnostics import _money, describe
+
+    config = load_config()
+    repository = build_repository(config)
+    try:
+        check_schema(repository)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
+        rows = repository.list_recurrence_candidates(context)
+    finally:
+        repository.close()
+
+    series = find_series(
+        Occurrence(
+            txn_id=row["id"],
+            posted_date=row["posted_date"],
+            amount_minor=row["amount_minor"],
+            merchant_norm=row["description_norm"],
+        )
+        for row in rows
+    )
+    today = date.today()
+    live = [s for s in series if not s.is_lapsed(today)]
+
+    print(f"profile              {args.profile}")
+    print(f"candidate rows       {len(rows)}   (transfers already excluded)")
+    print(f"series found         {len(series)}")
+    print(f"  still running      {len(live)}")
+    print(f"  lapsed             {len(series) - len(live)}")
+    print(f"monthly commitment   {_money(sum(s.monthly_equivalent_minor for s in live)).strip()}")
+
+    if live:
+        print(f"\n{'merchant':<34}{'now':>11}{'/month':>11}  {'period':<12}{'n':>4}  {'paid to date':>13}")
+        for s in sorted(live, key=lambda s: -s.monthly_equivalent_minor)[:args.limit]:
+            print(
+                f"{describe(s.merchant_norm, args.redact)[:33]:<34}"
+                f"{_money(s.amount_centre_minor, width=11)}"
+                f"{_money(s.monthly_equivalent_minor, width=11)}  "
+                f"{s.period_label:<12}{s.occurrences:>4}  {_money(s.total_paid_minor, width=13)}"
+            )
+
+    changed = [s for s in live if s.price_changes]
+    if changed:
+        print(f"\nprice changes        {len(changed)} series")
+        for s in changed[:args.limit]:
+            for change in s.price_changes:
+                print(f"  {change.on}  {describe(s.merchant_norm, args.redact)[:28]:<29}"
+                      f"{_money(change.from_minor).strip()} -> {_money(change.to_minor).strip()}")
+
+    due = [s for s in live if s.is_due_within(today, args.due_within)]
+    overdue = [s for s in live if s.is_overdue(today)]
+    if due:
+        print(f"\ndue in {args.due_within} days")
+        for s in sorted(due, key=lambda s: s.expected_next):
+            print(f"  {s.expected_next}  {describe(s.merchant_norm, args.redact)[:28]:<29}"
+                  f"{_money(s.amount_centre_minor).strip()}")
+    if overdue:
+        print(f"\noverdue              {len(overdue)}   expected and not seen")
+        for s in sorted(overdue, key=lambda s: s.expected_next)[:args.limit]:
+            print(f"  {s.expected_next}  {describe(s.merchant_norm, args.redact)[:28]:<29}"
+                  f"{_money(s.amount_centre_minor).strip()}")
+    return 0
+
+
 def cmd_learned(args) -> int:
     """List vendor strings the pipeline proved belong to an adapter."""
     from .parsers.learned import LearnedRules
@@ -674,6 +746,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="every document, to replay history through the current adapters",
     )
     p.set_defaults(func=cmd_reparse)
+
+    p = sub.add_parser("recurring", help="the payments that repeat, and what they cost")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
+    p.add_argument("--due-within", type=int, default=14, help="days ahead to list (default 14)")
+    p.add_argument("--limit", type=int, default=25, help="rows per section (default 25)")
+    p.add_argument("--redact", action="store_true", help="mask merchant names")
+    p.set_defaults(func=cmd_recurring)
 
     p = sub.add_parser("transfers", help="pair movements between your own accounts")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)

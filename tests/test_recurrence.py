@@ -108,6 +108,81 @@ class TestRefusals:
         assert len(found) == 1 and found[0].amount_centre_minor == 1000
 
 
+class TestPriceChanges:
+    """A price rise is a fact about a subscription, not a new subscription."""
+
+    def _risen(self):
+        rows = [Occurrence(i, date(2025, 1 + i, 15), -999, "netflix") for i in range(8)]
+        for i in range(8):
+            month, year = 9 + i, 2025
+            if month > 12:
+                month, year = month - 12, 2026
+            rows.append(Occurrence(100 + i, date(year, month, 15), -1299, "netflix"))
+        return rows
+
+    def test_a_rise_past_tolerance_stays_one_subscription(self):
+        """Clustering splits at 7%, and 9.99 to 12.99 is 30%. Left split, the
+        overview double-counts, the list shows the service twice, and the
+        abandoned half looks permanently overdue."""
+        series = find_series(self._risen())
+        assert len(series) == 1
+        assert series[0].occurrences == 16
+
+    def test_the_rise_itself_is_recorded(self):
+        """Which is the whole of what "trend subscription pricing" needs."""
+        change = find_series(self._risen())[0].price_changes
+        assert len(change) == 1
+        assert (change[0].from_minor, change[0].to_minor) == (999, 1299)
+        assert change[0].on == date(2025, 9, 15)
+
+    def test_the_centre_is_what_it_costs_now(self):
+        series = find_series(self._risen())[0]
+        assert series.amount_centre_minor == 1299
+
+    def test_the_total_is_what_was_actually_paid(self):
+        """Summed from the occurrences, not from the centre, so a series that
+        changed price still totals truthfully."""
+        assert find_series(self._risen())[0].total_paid_minor == 8 * 999 + 8 * 1299
+
+    def test_a_service_taken_up_again_years_later_is_not_one_series(self):
+        """A gap of years at a different price is a new subscription, not a
+        price change. Merging them would invent a single commitment that was
+        never held continuously."""
+        rows = _monthly("gym", -5000, months=4)
+        rows += [
+            Occurrence(200 + i, date(2029, 1 + i, 15), -9000, "gym")
+            for i in range(4)
+        ]
+        found = find_series(rows)
+        assert len(found) == 2
+        assert all(not s.price_changes for s in found)
+
+
+class TestServingTheFourPurposes:
+    def test_a_yearly_and_a_monthly_compare_on_the_same_footing(self):
+        """A yearly 120 and a monthly 10 are the same commitment."""
+        yearly = find_series([
+            Occurrence(i, date(2023 + i, 3, 4), -12000, "insurance") for i in range(3)
+        ])[0]
+        monthly = find_series(_monthly("streaming", -1000, months=4))[0]
+        assert yearly.monthly_equivalent_minor == monthly.monthly_equivalent_minor
+
+    def test_upcoming_payments_can_be_asked_for(self):
+        series = find_series(_monthly("netflix", -1999, months=4))[0]
+        assert series.is_due_within(series.expected_next - timedelta(days=3), 7)
+        assert not series.is_due_within(series.expected_next - timedelta(days=30), 7)
+
+    def test_lapsed_is_not_missed(self):
+        """A cancelled subscription and a skipped payment want opposite
+        reactions, and only one of them should nag."""
+        series = find_series(_monthly("gone", -500, months=4))[0]
+        missed = series.expected_next + timedelta(days=10)
+        long_gone = series.expected_next + timedelta(days=400)
+
+        assert series.is_overdue(missed) and not series.is_lapsed(missed)
+        assert series.is_lapsed(long_gone) and not series.is_overdue(long_gone)
+
+
 class TestAlerts:
     def test_a_missed_payment_is_overdue(self):
         series = find_series(_monthly("netflix", -1999, months=4))[0]

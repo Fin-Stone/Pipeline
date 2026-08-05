@@ -223,6 +223,33 @@ class SqlAlchemyLedgerRepository:
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
 
+    def list_recurrence_candidates(self, context: TenantContext) -> list[dict]:
+        """Spending rows that could belong to a series.
+
+        Transfers are excluded here rather than downstream. A credit-card
+        payment repeats monthly against the same counterparty and would be read
+        as a subscription while being neither spending nor a merchant — and it
+        is the single most regular thing in the ledger, so it would be found
+        first and trusted most.
+        """
+        txn, link = schema.txn.c, schema.transfer_link.c
+        linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
+            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
+        )
+        stmt = (
+            select(txn.id, txn.posted_date, txn.amount_minor, txn.description_norm)
+            .where(
+                (txn.tenant_id == context.tenant_id)
+                # Money out only: a series is something paid, and an incoming
+                # salary is regular without being a subscription.
+                & (txn.amount_minor < 0)
+                & txn.id.notin_(linked)
+            )
+            .order_by(txn.posted_date, txn.id)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
     def replace_transfer_links(self, context: TenantContext, links) -> int:
         """Rebuild this tenant's links from scratch, atomically.
 
