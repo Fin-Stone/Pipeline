@@ -1,6 +1,6 @@
-"""The ledger schema, as SQLAlchemy Core tables.
+﻿"""The ledger schema, as SQLAlchemy Core tables.
 
-Architecture §1 in full, plus the Phase 1 additions. Everything here is
+Architecture Â§1 in full, plus the Phase 1 additions. Everything here is
 deliberately portable: TEXT + CHECK rather than a Postgres ENUM, SQLAlchemy
 JSON rather than JSONB, no dialect-specific defaults. The test suite runs the
 same code against SQLite and Postgres, and a Postgres-ism leaking in here is
@@ -10,8 +10,8 @@ Money is BIGINT minor units with currency in its own column. Never a float.
 
 **Tenancy.** Every ledger table carries `tenant_id`, and every uniqueness
 constraint that could otherwise collide between households is scoped by it.
-The system runs single-tenant and single-member for now — one default tenant
-is seeded and everything resolves to it — but the *shape* is here from the
+The system runs single-tenant and single-member for now â€” one default tenant
+is seeded and everything resolves to it â€” but the *shape* is here from the
 start, because adding a tenant scope after a ledger has history means
 recomputing every dedupe key in it. See docs/development-rules.md Rule 3.
 """
@@ -43,7 +43,7 @@ SOURCE_PROFILES = ("dummy", "prod")
 
 #: Roles a member holds within a tenant. `owner` administers the tenant;
 #: `adult` has full access to what is shared with them; `child` and `viewer`
-#: are read-only. Enforcement belongs to the API layer when it exists — this
+#: are read-only. Enforcement belongs to the API layer when it exists â€” this
 #: is the vocabulary it will enforce against.
 MEMBER_ROLES = ("owner", "adult", "child", "viewer")
 MEMBER_STATUSES = ("active", "invited", "suspended")
@@ -79,7 +79,7 @@ member = Table(
     Column("email", String(320)),
     # OIDC identity: the issuer and its subject claim, which together are the
     # only globally stable identifier an SSO provider gives you. Email is not
-    # an identity — it can be reassigned.
+    # an identity â€” it can be reassigned.
     #
     # No password column exists, and none should be added: authentication is
     # the identity provider's job, and a credential this system never holds is
@@ -128,7 +128,7 @@ source_document = Table(
     # operator had it filed.
     Column("source_profile", String(16), nullable=False),
     Column("source_relpath", Text, nullable=False),
-    # Half of what makes re-import a guaranteed no-op — scoped to the tenant,
+    # Half of what makes re-import a guaranteed no-op â€” scoped to the tenant,
     # so two households holding the same statement do not collide.
     UniqueConstraint("tenant_id", "sha256", name="uq_source_document_sha256"),
     UniqueConstraint("tenant_id", "statement_key", name="uq_source_document_statement"),
@@ -148,14 +148,14 @@ account = Table(
     Column("id", Integer, primary_key=True),
     Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
     # Which member the account belongs to. NULL means it is shared across the
-    # whole tenant — a joint account, in family terms. This is what lets one
+    # whole tenant â€” a joint account, in family terms. This is what lets one
     # household hold both joint and personal accounts.
     Column("owner_member_id", Integer, ForeignKey("member.id")),
     Column("institution", String(64), nullable=False),
     # The account's stable identity within its institution.
     #
     # For deposit accounts this is the masked account number. For cards it is
-    # the *product* — the card brand — and deliberately not the card number:
+    # the *product* â€” the card brand â€” and deliberately not the card number:
     # numbers change on reissue or replacement while the account continues, so
     # keying on the number would fork one account's history in two. Two cards
     # held at the same bank are distinguished by product, which is stable for
@@ -206,6 +206,29 @@ txn = Table(
 )
 
 Index("ix_txn_account_posted", txn.c.account_id, txn.c.posted_date)
+
+#: Transactions the operator has taken out of the picture.
+#:
+#: Not a correction and not a transfer: both of those are claims about what a
+#: row *is*. This is a claim about what should count â€” a one-off house deposit
+#: that would drag a monthly average for a year is real spending and still not
+#: representative of anything.
+#:
+#: Held beside the ledger like every other judgement, so the transaction itself
+#: is untouched and the decision can be undone. **What is hidden stays
+#: countable**: the total of hidden rows is reported wherever hiding is, because
+#: a figure that quietly omits things is worth less than one that says what it
+#: omitted.
+hidden_txn = Table(
+    "hidden_txn",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("txn_id", Integer, ForeignKey("txn.id"), nullable=False),
+    Column("note", Text, nullable=False, server_default=""),
+    Column("hidden_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("tenant_id", "txn_id", name="uq_hidden_txn"),
+)
 
 #: The taxonomy, which belongs to the tenant rather than to the schema.
 #:
@@ -275,7 +298,7 @@ Index("ix_txn_source_document", txn.c.source_document_id)
 Index("ix_txn_tenant", txn.c.tenant_id)
 
 # Per-account opening and closing balances as the statement stated them.
-# Without this, the monthly reconciliation in architecture §8.2 has nothing to
+# Without this, the monthly reconciliation in architecture Â§8.2 has nothing to
 # compare the pipeline's own numbers against.
 statement_balance = Table(
     "statement_balance",
@@ -302,7 +325,7 @@ txn_enrichment = Table(
     Column("txn_id", Integer, ForeignKey("txn.id"), nullable=False),
     Column("category", String(64)),
     Column("subcategory", String(64)),
-    # "For whom" — which member the spend was for. Distinct from the account's
+    # "For whom" â€” which member the spend was for. Distinct from the account's
     # owner: a joint card can pay for any member.
     Column("beneficiary_member_id", Integer, ForeignKey("member.id")),
     Column("beneficiary", String(64)),
@@ -345,6 +368,7 @@ TENANT_SCOPED_TABLES = (
     transfer_link,
     category,
     category_rule,
+    hidden_txn,
     statement_balance,
     txn_enrichment,
     recurrence_series,

@@ -98,8 +98,29 @@ export interface Recurring {
 export interface ReviewItem { counterparty: string; occurrences: number; total_minor: number }
 export interface Review { outstanding: number; value_at_stake_minor: number; items: ReviewItem[] }
 
+export interface TrendPoint { period: string; total_minor: number; rows: number }
+export interface Trend {
+  currency: string; bucket: "day" | "week" | "month";
+  range: { since: string | null; until: string | null; days: number | null };
+  points: TrendPoint[];
+}
+export interface Txn {
+  id: number; posted_date: string; amount_minor: number; currency: string;
+  counterparty_norm: string; account_id: number; institution: string;
+  account_ref_masked: string; category: string | null; source: string | null;
+}
+export interface HiddenRow {
+  id: number; posted_date: string; amount_minor: number;
+  counterparty_norm: string; institution: string; note: string; hidden_at: string;
+}
+export interface Hidden { hidden: HiddenRow[]; count: number; total_minor: number }
+
 export interface Filters {
   since?: string; until?: string; account_id?: number[]; category?: string[];
+  /** Hidden for this request only. The server owns the arithmetic, so an
+   *  exclusion has to reach it or the totals describe a different set of
+   *  transactions from the one on screen. */
+  exclude_txn_id?: number[];
 }
 
 export const api = {
@@ -107,6 +128,14 @@ export const api = {
   accounts: () => call<{ accounts: Account[] }>("/accounts"),
   categories: () => call<{ categories: Category[] }>("/categories"),
   summary: (f: Filters) => call<Summary>("/summary", f),
+  trend: (f: Filters) => call<Trend>("/trend", f),
+  transactions: (f: Filters, limit = 100) =>
+    call<{ transactions: Txn[] }>("/transactions", { ...f, limit }),
+  hidden: () => call<Hidden>("/hidden"),
+  hide: (txn_id: number, note = "") =>
+    call<{ hidden: boolean }>("/hidden", { txn_id, note }, { method: "POST" }),
+  unhide: (txn_id: number) =>
+    call<{ restored: boolean }>(`/hidden/${txn_id}`, {}, { method: "DELETE" }),
   recurring: () => call<Recurring>("/recurring"),
   review: (limit = 50) => call<Review>("/review", { limit }),
   transfers: () => call<{ linked: number }>("/transfers"),

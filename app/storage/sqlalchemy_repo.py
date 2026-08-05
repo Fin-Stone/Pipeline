@@ -1,10 +1,10 @@
-"""LedgerRepository on SQLAlchemy Core.
+﻿"""LedgerRepository on SQLAlchemy Core.
 
 Core rather than the ORM: it gives dialect portability at close to raw-driver
 speed, while the ORM's identity map and unit of work would cost more than they
 return on a write-mostly ingestion path.
 
-Everything here is portable SQL. Deduplication is a *select existing keys →
+Everything here is portable SQL. Deduplication is a *select existing keys â†’
 insert the complement* with the unique index as a backstop, deliberately not
 `ON CONFLICT`, so SQLite and Postgres run identical code and the dual-engine
 test run stays meaningful. See docs/development-rules.md Rule 1.
@@ -16,7 +16,7 @@ tenant-isolation tests exist to keep it that way.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import Engine
@@ -313,7 +313,7 @@ class SqlAlchemyLedgerRepository:
 
         **Human corrections are never in scope.** They are deleted by no query
         here and overwritten by no insert, because the whole value of correcting
-        something is that it stays corrected — an automated pass that could undo
+        something is that it stays corrected â€” an automated pass that could undo
         it would make every correction provisional.
         """
         enrichment = schema.txn_enrichment.c
@@ -351,6 +351,119 @@ class SqlAlchemyLedgerRepository:
 
         return {"written": len(rows), "replaced": removed or 0, "left_to_humans": human}
 
+    def _spending_base(self, context: TenantContext, *, exclude_txn_ids=None):
+        """The predicate every spending figure shares.
+
+        One place, because a total, a trend bucket and a transaction list that
+        disagree about what counts are worse than any of them being wrong on
+        its own â€” the screen shows them side by side.
+
+        Excluded: transfers between the household's own accounts, rows the
+        operator has hidden, and anything the caller is hiding for this request
+        only. The last of those is what makes session-level hiding change the
+        averages rather than just the list.
+        """
+        txn, link, hidden = schema.txn.c, schema.transfer_link.c, schema.hidden_txn.c
+        linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
+            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
+        )
+        put_away = select(hidden.txn_id).where(hidden.tenant_id == context.tenant_id)
+
+        where = (
+            (txn.tenant_id == context.tenant_id)
+            & (txn.amount_minor < 0)
+            & txn.id.notin_(linked)
+            & txn.id.notin_(put_away)
+        )
+        if exclude_txn_ids:
+            where = where & txn.id.notin_(list(exclude_txn_ids))
+        return where
+
+    def list_hidden(self, context: TenantContext) -> list[dict]:
+        """What has been put away, and what it comes to.
+
+        Returned with the amounts so the operator can see the size of what
+        they have excluded. A hidden total nobody can see is how a dashboard
+        starts lying quietly.
+        """
+        hidden, txn, account = schema.hidden_txn.c, schema.txn.c, schema.account.c
+        stmt = (
+            select(
+                txn.id, txn.posted_date, txn.amount_minor, txn.counterparty_norm,
+                account.institution, hidden.note, hidden.hidden_at,
+            )
+            .select_from(
+                schema.hidden_txn
+                .join(schema.txn, hidden.txn_id == txn.id)
+                .join(schema.account, txn.account_id == account.id)
+            )
+            .where(hidden.tenant_id == context.tenant_id)
+            .order_by(txn.posted_date.desc())
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def hide_txn(self, context: TenantContext, txn_id: int, note: str = "") -> bool:
+        hidden = schema.hidden_txn.c
+        with self._engine.begin() as conn:
+            already = conn.execute(
+                select(hidden.id).where(
+                    (hidden.tenant_id == context.tenant_id) & (hidden.txn_id == txn_id)
+                )
+            ).first()
+            if already:
+                return False
+            conn.execute(schema.hidden_txn.insert(), [{
+                "tenant_id": context.tenant_id, "txn_id": txn_id,
+                "note": note, "hidden_at": datetime.now(timezone.utc),
+            }])
+        return True
+
+    def unhide_txn(self, context: TenantContext, txn_id: int) -> bool:
+        hidden = schema.hidden_txn.c
+        with self._engine.begin() as conn:
+            removed = conn.execute(
+                schema.hidden_txn.delete().where(
+                    (hidden.tenant_id == context.tenant_id) & (hidden.txn_id == txn_id)
+                )
+            ).rowcount
+        return bool(removed)
+
+    def spending_trend(
+        self, context: TenantContext, *, bucket: str, since=None, until=None,
+        account_ids=None, categories=None, exclude_txn_ids=None,
+    ) -> list[dict]:
+        """Spending totalled per period.
+
+        Bucketed in Python rather than in SQL: date truncation is the most
+        dialect-specific thing either engine does, and Rule 1's seam is worth
+        more than the milliseconds. The volume here is a household's ledger,
+        not a warehouse.
+        """
+        txn = schema.txn.c
+        stmt = (
+            select(txn.posted_date, txn.amount_minor)
+            .where(self._spending_base(context, exclude_txn_ids=exclude_txn_ids))
+        )
+        if since is not None:
+            stmt = stmt.where(txn.posted_date >= since)
+        if until is not None:
+            stmt = stmt.where(txn.posted_date <= until)
+        if account_ids:
+            stmt = stmt.where(txn.account_id.in_(list(account_ids)))
+        if categories:
+            enrichment = schema.txn_enrichment.c
+            stmt = stmt.where(txn.id.in_(
+                select(enrichment.txn_id).where(
+                    (enrichment.tenant_id == context.tenant_id)
+                    & (enrichment.category.in_(list(categories)))
+                )
+            ))
+
+        with self._engine.connect() as conn:
+            rows = [(r[0], r[1]) for r in conn.execute(stmt)]
+        return _bucket(rows, bucket)
+
     def list_accounts(self, context: TenantContext) -> list[dict]:
         columns = schema.account.c
         stmt = (
@@ -372,13 +485,14 @@ class SqlAlchemyLedgerRepository:
         until=None,
         account_ids=None,
         categories=None,
+        exclude_txn_ids=None,
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict]:
         """Spending rows with their category, filtered as the dashboard asks.
 
         Every figure the dashboard shows has to be derivable from a date range,
-        a set of accounts and a set of categories — see architecture §5.1(B) —
+        a set of accounts and a set of categories â€” see architecture Â§5.1(B) â€”
         so this is one query with optional narrowing rather than a family of
         precomputed aggregates.
 
@@ -386,16 +500,9 @@ class SqlAlchemyLedgerRepository:
         household's own accounts is not spending, and a total that includes it
         overstates by the size of every card payment.
         """
-        txn, link, enrichment, account = (
-            schema.txn.c, schema.transfer_link.c,
-            schema.txn_enrichment.c, schema.account.c,
+        txn, enrichment, account = (
+            schema.txn.c, schema.txn_enrichment.c, schema.account.c,
         )
-        linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
-            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
-        )
-        # A human decision outranks a rule, so the newest row per source order
-        # wins; ordering by source puts 'human' last alphabetically after
-        # 'rule', which is why the pick is explicit rather than incidental.
         stmt = (
             select(
                 txn.id, txn.posted_date, txn.amount_minor, txn.currency,
@@ -412,11 +519,7 @@ class SqlAlchemyLedgerRepository:
                     & (enrichment.tenant_id == context.tenant_id),
                 )
             )
-            .where(
-                (txn.tenant_id == context.tenant_id)
-                & (txn.amount_minor < 0)
-                & txn.id.notin_(linked)
-            )
+            .where(self._spending_base(context, exclude_txn_ids=exclude_txn_ids))
             .order_by(txn.posted_date.desc(), txn.id.desc())
         )
         if since is not None:
@@ -434,15 +537,10 @@ class SqlAlchemyLedgerRepository:
 
     def spending_summary(
         self, context: TenantContext, *, since=None, until=None,
-        account_ids=None, categories=None,
+        account_ids=None, categories=None, exclude_txn_ids=None,
     ) -> list[dict]:
         """Totals per category over the same filters, for the headline figures."""
-        txn, link, enrichment = (
-            schema.txn.c, schema.transfer_link.c, schema.txn_enrichment.c,
-        )
-        linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
-            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
-        )
+        txn, enrichment = schema.txn.c, schema.txn_enrichment.c
         stmt = (
             select(
                 enrichment.category,
@@ -456,11 +554,7 @@ class SqlAlchemyLedgerRepository:
                     & (enrichment.tenant_id == context.tenant_id),
                 )
             )
-            .where(
-                (txn.tenant_id == context.tenant_id)
-                & (txn.amount_minor < 0)
-                & txn.id.notin_(linked)
-            )
+            .where(self._spending_base(context, exclude_txn_ids=exclude_txn_ids))
             .group_by(enrichment.category)
         )
         if since is not None:
@@ -522,7 +616,7 @@ class SqlAlchemyLedgerRepository:
 
         Transfers are excluded here rather than downstream. A credit-card
         payment repeats monthly against the same counterparty and would be read
-        as a subscription while being neither spending nor a merchant — and it
+        as a subscription while being neither spending nor a merchant â€” and it
         is the single most regular thing in the ledger, so it would be found
         first and trusted most.
         """
@@ -553,7 +647,7 @@ class SqlAlchemyLedgerRepository:
 
         Replace rather than add: the pass is a pure function of the ledger, so
         running it twice must leave the same result. Appending would pair rows
-        already paired and quietly double what is excluded from spending —
+        already paired and quietly double what is excluded from spending â€”
         an error that flatters the total, so nobody would go looking for it.
         """
         rows = [
@@ -709,7 +803,7 @@ class SqlAlchemyLedgerRepository:
 
         One transaction covers the document row, every account upsert, the
         per-account balances and all transactions. A failure anywhere rolls
-        back the whole document — there is no such thing as a half-imported
+        back the whole document â€” there is no such thing as a half-imported
         statement.
         """
         fetched_at = document.fetched_at or datetime.now(timezone.utc)
@@ -865,6 +959,52 @@ class SqlAlchemyLedgerRepository:
             return inserted, skipped
 
         return len(rows), skipped
+
+
+def choose_bucket(days: int | None) -> str:
+    """How wide a bar should be, given how much calendar is on screen.
+
+    The operator's rule: days at a fortnight or less, weeks up to a year,
+    months beyond it. Fixed bar counts were the alternative and are worse â€” a
+    year of daily bars is unreadable and a fortnight of monthly ones is a
+    single block.
+    """
+    if days is None:
+        return "month"
+    if days <= 14:
+        return "day"
+    if days < 365:
+        return "week"
+    return "month"
+
+
+def _bucket_start(day, bucket: str):
+    if bucket == "day":
+        return day
+    if bucket == "week":
+        # Monday. A week a person recognises, rather than one counted back from
+        # wherever the range happened to begin.
+        return day - timedelta(days=day.weekday())
+    return day.replace(day=1)
+
+
+def _bucket(rows, bucket: str) -> list[dict]:
+    """Total per period.
+
+    Bucketed in Python rather than SQL because date truncation is the most
+    dialect-specific thing either engine does, and Rule 1's seam is worth more
+    than the milliseconds at a household's volume.
+    """
+    totals: dict = {}
+    counts: dict = {}
+    for day, amount_minor in rows:
+        start = _bucket_start(day, bucket)
+        totals[start] = totals.get(start, 0) + amount_minor
+        counts[start] = counts.get(start, 0) + 1
+    return [
+        {"period": start, "total_minor": totals[start], "rows": counts[start]}
+        for start in sorted(totals)
+    ]
 
 
 def _account_key(record: AccountRecord) -> tuple:

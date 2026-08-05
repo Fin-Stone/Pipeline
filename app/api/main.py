@@ -33,6 +33,7 @@ from ..config import PROFILE_PROD, Config, load_config
 from ..domain.categories import DEFAULT_CATEGORIES, Rule, operator_rule, review_queue
 from ..domain.recurrence import Occurrence, find_series
 from ..storage.factory import build_repository
+from ..storage.sqlalchemy_repo import choose_bucket
 
 API_VERSION = "v1"
 PREFIX = f"/api/{API_VERSION}"
@@ -111,13 +112,25 @@ def _filters(
     until: Annotated[date | None, Query(description="Inclusive end")] = None,
     account_id: Annotated[list[int] | None, Query(description="Repeatable")] = None,
     category: Annotated[list[str] | None, Query(description="Repeatable")] = None,
+    exclude_txn_id: Annotated[
+        list[int] | None,
+        Query(description="Repeatable. Hidden for this request only."),
+    ] = None,
 ) -> dict:
-    """The three axes every figure is derivable from. See §5.1(B)."""
+    """The axes every figure is derivable from. See §5.1(B).
+
+    `exclude_txn_id` is what makes session-level hiding real rather than
+    cosmetic. A client that merely dropped rows from a list would leave the
+    totals and the trend describing a different set of transactions from the
+    one on screen — so the exclusion is passed to the server, which owns the
+    arithmetic, and every figure moves together.
+    """
     return {
         "since": since,
         "until": until,
         "account_ids": account_id,
         "categories": category,
+        "exclude_txn_ids": exclude_txn_id,
     }
 
 
@@ -202,6 +215,69 @@ def summary(handle: Session, filters: Filters) -> dict:
             "per_month": round(total / days * 30) if days else None,
         },
     }
+
+
+@app.get(f"{PREFIX}/trend", tags=["dashboard"])
+def trend(
+    handle: Session,
+    filters: Filters,
+    bucket: Annotated[
+        str, Query(pattern="^(auto|day|week|month)$", description="Bar width")
+    ] = "auto",
+) -> dict:
+    """Spending per period, for the bar chart.
+
+    Bar width follows the range rather than a fixed count: days at a fortnight
+    or less, weeks up to a year, months beyond. A year of daily bars is
+    unreadable and a fortnight of monthly ones is a single block, so the
+    granularity is a property of the question being asked.
+
+    Filters are the same as everywhere else, so the chart can be narrowed to a
+    bank or a category without a second endpoint.
+    """
+    since, until = filters["since"], filters["until"]
+    days = ((until - since).days + 1) if since and until else None
+    chosen = choose_bucket(days) if bucket == "auto" else bucket
+
+    return {
+        "currency": "SGD",
+        "bucket": chosen,
+        "range": {"since": since, "until": until, "days": days},
+        "points": handle.repository.spending_trend(
+            handle.context, bucket=chosen, **filters
+        ),
+    }
+
+
+@app.get(f"{PREFIX}/hidden", tags=["dashboard"])
+def hidden(handle: Session) -> dict:
+    """What the operator has taken out of the picture, and what it comes to.
+
+    The total is returned with the list on purpose. A dashboard that quietly
+    omits things is worth less than one that says what it omitted, and the
+    only way to keep hiding honest is to make the size of it visible.
+    """
+    rows = handle.repository.list_hidden(handle.context)
+    return {
+        "hidden": rows,
+        "count": len(rows),
+        "total_minor": sum(r["amount_minor"] for r in rows),
+    }
+
+
+@app.post(f"{PREFIX}/hidden", tags=["dashboard"], status_code=201)
+def hide(handle: Session, txn_id: int, note: str = "") -> dict:
+    """Hide a transaction from every figure, until it is unhidden.
+
+    Nothing about the transaction changes: this is a claim about what should
+    count, held beside the ledger like every other judgement.
+    """
+    return {"txn_id": txn_id, "hidden": handle.repository.hide_txn(handle.context, txn_id, note)}
+
+
+@app.delete(f"{PREFIX}/hidden/{{txn_id}}", tags=["dashboard"])
+def unhide(handle: Session, txn_id: int) -> dict:
+    return {"txn_id": txn_id, "restored": handle.repository.unhide_txn(handle.context, txn_id)}
 
 
 @app.get(f"{PREFIX}/transactions", tags=["ledger"])

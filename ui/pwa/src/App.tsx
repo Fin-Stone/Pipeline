@@ -1,8 +1,8 @@
-/**
+﻿/**
  * The shell: choose a server, then three screens.
  *
  * **The server is the user's.** Their own install or a hosted one, entered here
- * and stored locally, exactly as Bitwarden does it — architecture §5.2. Nothing
+ * and stored locally, exactly as Bitwarden does it â€” architecture Â§5.2. Nothing
  * is baked in, and the version handshake happens before anything else so a
  * client update cannot silently break a self-hoster who has not upgraded.
  */
@@ -14,6 +14,7 @@ import {
 import Dashboard from "./Dashboard";
 import Recurring from "./Recurring";
 import Review from "./Review";
+import Hidden from "./Hidden";
 import { REQUIRED_API_VERSION, api, forgetServer, profile, serverUrl, setServer } from "./api";
 
 function ServerSetup({ onReady }: { onReady: () => void }) {
@@ -29,7 +30,7 @@ function ServerSetup({ onReady }: { onReady: () => void }) {
       const health = await api.health();
       if (health.api_version !== REQUIRED_API_VERSION) {
         // Refused rather than attempted. A mismatched server is the failure
-        // §5.2 exists to prevent, and guessing would corrupt what it shows.
+        // Â§5.2 exists to prevent, and guessing would corrupt what it shows.
         setError(
           `That server speaks ${health.api_version}; this client needs ` +
           `${REQUIRED_API_VERSION}. Upgrade one of them.`,
@@ -60,7 +61,7 @@ function ServerSetup({ onReady }: { onReady: () => void }) {
             </Select>
             {error && <Alert severity="error">{error}</Alert>}
             <Button variant="contained" disabled={busy} onClick={connect}>
-              {busy ? "Connecting…" : "Connect"}
+              {busy ? "Connectingâ€¦" : "Connect"}
             </Button>
           </Stack>
         </CardContent>
@@ -89,7 +90,7 @@ export default function App() {
         <Toolbar sx={{ gap: 2 }}>
           <Typography variant="h6" sx={{ flexGrow: 1 }}>Finstone</Typography>
           <Typography variant="caption" color="text.secondary">
-            {serverUrl()} · {profile()}
+            {serverUrl()} Â· {profile()}
           </Typography>
           <Button size="small" onClick={() => { forgetServer(); setConnected(false); }}>
             Change
@@ -100,12 +101,14 @@ export default function App() {
           <Tab label="Overview" />
           <Tab label="Recurring" />
           <Tab label="Review" />
+          <Tab label="Hidden" />
         </Tabs>
       </AppBar>
       <Container maxWidth="lg" sx={{ py: 2 }}>
         {tab === 0 && <Dashboard />}
         {tab === 1 && <Recurring />}
         {tab === 2 && <Review />}
+        {tab === 3 && <Hidden />}
       </Container>
     </Box>
   );

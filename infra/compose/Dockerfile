@@ -13,7 +13,10 @@ COPY pyproject.toml ./
 COPY app ./app
 COPY alembic.ini ./
 
-RUN pip install --no-cache-dir ".[postgres]"
+# Both extras: one image serves the API and runs the CLI, so it needs the web
+# server as well as the Postgres driver. Splitting them would mean two images
+# that must be upgraded together, which is a worse trade than a few megabytes.
+RUN pip install --no-cache-dir ".[api,postgres]"
 
 RUN useradd --create-home --uid 10001 finstone \
     && mkdir -p /srv/finstone/data \

@@ -64,6 +64,14 @@ unbounded.
 | `until` | date | Inclusive end |
 | `account_id` | int | Repeatable: `?account_id=1&account_id=2` |
 | `category` | string | Repeatable |
+| `exclude_txn_id` | int | Repeatable. Hidden for this request only. |
+
+**`exclude_txn_id` is what makes session-level hiding real.** A client that
+merely dropped rows from a list would leave the totals, averages and trend
+describing a different set of transactions from the one on screen. The server
+owns the arithmetic, so the exclusion is passed to it and every figure moves
+together. Rows hidden persistently via `/hidden` are excluded automatically and
+need not be repeated here.
 
 ---
 
@@ -140,6 +148,52 @@ Each row carries `id`, `posted_date`, `amount_minor`, `currency`,
 `source` is `rule` \| `knn` \| `llm` \| `human`. A client should show which,
 because §5.1 asks users to be able to tell what was decided automatically from
 what they corrected.
+
+### `GET /api/v1/trend`
+
+Spending per period, for the bar chart. Takes every filter above, plus
+`bucket` = `auto` (default) | `day` | `week` | `month`.
+
+```json
+{ "currency": "SGD", "bucket": "week",
+  "range": { "since": "2026-05-07", "until": "2026-08-04", "days": 90 },
+  "points": [{ "period": "2026-05-04", "total_minor": -112590, "rows": 29 }] }
+```
+
+**Bar width follows the range, not a fixed count.** `auto` chooses days at 14
+days or fewer, weeks below a year, months beyond — a year of daily bars is
+unreadable and a fortnight of monthly ones is a single block. `period` is the
+first day of the bucket; weeks start Monday.
+
+Periods with no spending are **absent** rather than zero. A client drawing a
+continuous axis fills the gaps itself.
+
+### `GET /api/v1/hidden`
+
+```json
+{ "hidden": [{ "id": 16964, "posted_date": "2026-07-30", "amount_minor": -10000,
+               "counterparty_norm": "...", "institution": "DBS",
+               "note": "", "hidden_at": "..." }],
+  "count": 1, "total_minor": -10000 }
+```
+
+**`total_minor` is part of the contract, not a convenience.** A dashboard that
+quietly omits things is worth less than one that says what it omitted, so a
+client must show the size of what is hidden somewhere the user will meet it.
+
+### `POST /api/v1/hidden?txn_id=&note=`
+
+`201`, `{ "txn_id": 16964, "hidden": true }`. `hidden` is `false` if it already
+was — not an error.
+
+Hiding excludes a row from **every** figure: totals, averages, trend and
+transaction lists. Nothing about the transaction changes; this is a claim about
+what should count, held beside the ledger and reversible.
+
+### `DELETE /api/v1/hidden/{txn_id}`
+
+`{ "txn_id": 16964, "restored": true }`. `restored` is `false` if it was not
+hidden.
 
 ### `GET /api/v1/recurring`
 

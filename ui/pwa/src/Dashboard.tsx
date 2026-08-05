@@ -13,7 +13,11 @@ import {
   TextField, Typography,
 } from "@mui/material";
 import TrendingDownIcon from "@mui/icons-material/TrendingDown";
-import { Account, ApiError, Category, Filters, Summary, api } from "./api";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import UndoIcon from "@mui/icons-material/Undo";
+import { Button, IconButton, List, ListItem, ListItemText, Tooltip } from "@mui/material";
+import { Account, ApiError, Category, Filters, Summary, Trend as TrendData, Txn, api } from "./api";
+import Trend from "./Trend";
 import { magnitude, money, monthsAgo, today } from "./money";
 
 function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
@@ -40,6 +44,11 @@ export default function Dashboard() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [trend, setTrend] = useState<TrendData | null>(null);
+  const [txns, setTxns] = useState<Txn[]>([]);
+  // Session hiding: forgotten on refresh, by design. It is a way to ask "what
+  // would this look like without that", not a decision about the ledger.
+  const [muted, setMuted] = useState<number[]>([]);
   const [growthUnavailable, setGrowthUnavailable] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -54,12 +63,25 @@ export default function Dashboard() {
 
   useEffect(() => {
     setLoading(true);
-    const filters: Filters = { since, until, account_id: accountIds, category: categoryNames };
-    api.summary(filters)
-      .then(setSummary)
+    // The muted ids go to the server with everything else, so the total, the
+    // averages, the bars and the list all describe the same set of rows.
+    const filters: Filters = {
+      since, until, account_id: accountIds, category: categoryNames,
+      exclude_txn_id: muted,
+    };
+    Promise.all([api.summary(filters), api.trend(filters), api.transactions(filters, 60)])
+      .then(([s, t, list]) => { setSummary(s); setTrend(t); setTxns(list.transactions); })
       .catch((e) => setError(String(e instanceof ApiError ? e.detail : e)))
       .finally(() => setLoading(false));
-  }, [since, until, accountIds, categoryNames]);
+  }, [since, until, accountIds, categoryNames, muted]);
+
+  async function hideForGood(id: number) {
+    await api.hide(id);
+    // Dropped from the session list too, or it would be excluded twice and
+    // reappear the moment the persistent hide were undone.
+    setMuted((m) => m.filter((x) => x !== id));
+    setTxns((t) => t.filter((x) => x.id !== id));
+  }
 
   useEffect(() => {
     // Growth is not implemented server-side, and the server says so rather than
@@ -163,6 +185,62 @@ export default function Dashboard() {
           <Tile label="Per day" value={magnitude(summary?.average_minor.per_day)} />
         </Grid>
       </Grid>
+
+      <Card variant="outlined">
+        <CardContent>
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
+            <Typography variant="h6">Spending over time</Typography>
+            {muted.length > 0 && (
+              <Button size="small" startIcon={<UndoIcon />} onClick={() => setMuted([])}>
+                Show {muted.length} hidden again
+              </Button>
+            )}
+          </Stack>
+          <Divider sx={{ my: 1.5 }} />
+          {trend ? <Trend data={trend} /> : <CircularProgress size={20} />}
+        </CardContent>
+      </Card>
+
+      <Card variant="outlined">
+        <CardContent>
+          <Typography variant="h6">Transactions</Typography>
+          <Typography variant="caption" color="text.secondary">
+            Hiding removes a row from the totals and the bars above, not just
+            from this list. The eye icon lasts until you refresh; “forever”
+            keeps it hidden and is undone on the Hidden page.
+          </Typography>
+          <Divider sx={{ my: 1 }} />
+          <List dense sx={{ maxHeight: 340, overflowY: "auto" }}>
+            {txns.map((t) => (
+              <ListItem
+                key={t.id} divider disableGutters
+                secondaryAction={
+                  <Stack direction="row" spacing={0.5} alignItems="center">
+                    <Typography sx={{ fontVariantNumeric: "tabular-nums", mr: 1 }}>
+                      {money(t.amount_minor)}
+                    </Typography>
+                    <Tooltip title="Hide for this session">
+                      <IconButton size="small"
+                        onClick={() => setMuted((m) => [...m, t.id])}>
+                        <VisibilityOffIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                    <Button size="small" onClick={() => hideForGood(t.id)}>forever</Button>
+                  </Stack>
+                }
+              >
+                <ListItemText
+                  primary={t.counterparty_norm || "(no counterparty)"}
+                  secondary={`${t.posted_date} · ${t.institution} · ${t.category ?? "uncategorised"}`}
+                />
+              </ListItem>
+            ))}
+            {txns.length === 0 && (
+              <Typography color="text.secondary">Nothing in this range.</Typography>
+            )}
+          </List>
+        </CardContent>
+      </Card>
 
       <Card variant="outlined">
         <CardContent>
