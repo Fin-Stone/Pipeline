@@ -33,3 +33,11 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Sanitised exports for categorisation. No dates, accounts or personal
+# counterparties leave in these — but they are still a list of where this
+# household shops, derived from prod, and they are regenerable in one command.
+# See docs/prompt.md.
+proposal*.json
+residual*.json
+
