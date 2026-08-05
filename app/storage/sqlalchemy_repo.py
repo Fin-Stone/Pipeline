@@ -285,6 +285,46 @@ class SqlAlchemyLedgerRepository:
                 conn.execute(schema.category_rule.insert(), new)
         return len(new)
 
+    def add_category(self, context: TenantContext, name: str) -> int:
+        """Add one category to the tenant's taxonomy, at the end."""
+        existing = self.list_categories(context)
+        with self._engine.begin() as conn:
+            return conn.execute(schema.category.insert().values(
+                tenant_id=context.tenant_id, name=name, position=len(existing),
+            )).inserted_primary_key[0]
+
+    def set_human_category(self, context: TenantContext, txn_id: int, category: str) -> None:
+        """Record a correction the operator made to one transaction.
+
+        Replaces every enrichment for that row, whatever produced it: a
+        correction is the last word, and leaving the rule's opinion beside it
+        would mean two answers with nothing to say which is current.
+        """
+        enrichment = schema.txn_enrichment.c
+        with self._engine.begin() as conn:
+            conn.execute(schema.txn_enrichment.delete().where(
+                (enrichment.tenant_id == context.tenant_id) & (enrichment.txn_id == txn_id)
+            ))
+            conn.execute(schema.txn_enrichment.insert(), [{
+                "tenant_id": context.tenant_id,
+                "txn_id": txn_id,
+                "category": category,
+                "confidence": 1.0,
+                "source": "human",
+                "computed_at": datetime.now(timezone.utc),
+            }])
+
+    def clear_human_category(self, context: TenantContext, txn_id: int) -> bool:
+        """Drop a correction, so the next rule pass decides the row again."""
+        enrichment = schema.txn_enrichment.c
+        with self._engine.begin() as conn:
+            removed = conn.execute(schema.txn_enrichment.delete().where(
+                (enrichment.tenant_id == context.tenant_id)
+                & (enrichment.txn_id == txn_id)
+                & (enrichment.source == "human")
+            )).rowcount
+        return bool(removed)
+
     def list_category_rules(self, context: TenantContext) -> list[dict]:
         """Rules with the category they resolve to, by id rather than by name.
 
@@ -463,6 +503,47 @@ class SqlAlchemyLedgerRepository:
         with self._engine.connect() as conn:
             rows = [(r[0], r[1]) for r in conn.execute(stmt)]
         return _bucket(rows, bucket)
+
+    def balance_history(self, context: TenantContext, *, since=None) -> list[dict]:
+        """Every closing balance a statement declared, with the date it closed.
+
+        Net worth is balance over time, and this is where balances live. It is
+        deliberately not a sum of transactions: a movement between the
+        household's own accounts would then read as growth on one side and loss
+        on the other, and a card balance would count the wrong way round.
+
+        Card balances are already stored negated, so a debt reduces the total
+        without anything here needing to know which is which.
+        """
+        balance, document, account = (
+            schema.statement_balance.c, schema.source_document.c, schema.account.c,
+        )
+        stmt = (
+            select(
+                document.period_end,
+                balance.account_id,
+                account.institution,
+                account.account_ref_masked,
+                account.sub_account_label,
+                account.kind,
+                balance.closing_balance_minor,
+            )
+            .select_from(
+                schema.statement_balance
+                .join(schema.source_document, balance.source_document_id == document.id)
+                .join(schema.account, balance.account_id == account.id)
+            )
+            .where(
+                (balance.tenant_id == context.tenant_id)
+                & (balance.closing_balance_minor.isnot(None))
+                & (document.period_end.isnot(None))
+            )
+            .order_by(document.period_end)
+        )
+        if since is not None:
+            stmt = stmt.where(document.period_end >= since)
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
 
     def list_accounts(self, context: TenantContext) -> list[dict]:
         columns = schema.account.c

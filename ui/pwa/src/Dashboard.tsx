@@ -16,8 +16,12 @@ import TrendingDownIcon from "@mui/icons-material/TrendingDown";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import UndoIcon from "@mui/icons-material/Undo";
 import { Button, IconButton, List, ListItem, ListItemText, Tooltip } from "@mui/material";
-import { Account, ApiError, Category, Filters, Summary, Trend as TrendData, Txn, api } from "./api";
+import {
+  Account, ApiError, Category, Filters, Growth as GrowthData, Summary,
+  Trend as TrendData, Txn, api,
+} from "./api";
 import Trend from "./Trend";
+import NetWorth from "./NetWorth";
 import { magnitude, money, monthsAgo, today } from "./money";
 
 function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
@@ -49,6 +53,7 @@ export default function Dashboard() {
   // Session hiding: forgotten on refresh, by design. It is a way to ask "what
   // would this look like without that", not a decision about the ledger.
   const [muted, setMuted] = useState<number[]>([]);
+  const [growth, setGrowth] = useState<GrowthData | null>(null);
   const [growthUnavailable, setGrowthUnavailable] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -75,6 +80,23 @@ export default function Dashboard() {
       .finally(() => setLoading(false));
   }, [since, until, accountIds, categoryNames, muted]);
 
+  async function recategorise(id: number, name: string) {
+    await api.setCategory(id, name);
+    // Marked source 'human' server-side, which the rule pass will not overwrite.
+    setTxns((t) => t.map((x) => (x.id === id ? { ...x, category: name, source: "human" } : x)));
+  }
+
+  async function addCategory() {
+    const name = window.prompt("New category name");
+    if (!name?.trim()) return;
+    try {
+      await api.addCategory(name.trim());
+      setCategories((await api.categories()).categories);
+    } catch (e) {
+      setError(String(e instanceof ApiError ? e.detail : e));
+    }
+  }
+
   async function hideForGood(id: number) {
     await api.hide(id);
     // Dropped from the session list too, or it would be excluded twice and
@@ -84,17 +106,9 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
-    // Growth is not implemented server-side, and the server says so rather than
-    // returning a series computed the wrong way. Surfaced as an honest gap: a
-    // fabricated trend is the one thing worse than a missing one here, because
-    // §5.1(D) attaches an emotional signal to it.
     api.growth(months)
-      .then(() => setGrowthUnavailable(null))
-      .catch((e) => setGrowthUnavailable(
-        e instanceof ApiError && typeof e.detail === "object" && e.detail !== null
-          ? String((e.detail as Record<string, unknown>).reason ?? "unavailable")
-          : "unavailable",
-      ));
+      .then((g) => { setGrowth(g); setGrowthUnavailable(null); })
+      .catch((e) => setGrowthUnavailable(String(e instanceof ApiError ? e.detail : e)));
   }, [months]);
 
   const spend = summary?.total_minor ?? 0;
@@ -108,12 +122,13 @@ export default function Dashboard() {
 
   return (
     <Stack spacing={2}>
-      <Alert severity="info" icon={<TrendingDownIcon />}>
-        <AlertTitle>Net worth over time is not available yet</AlertTitle>
-        {growthUnavailable ?? "Checking…"} — so this screen shows spending only,
-        and no growth arrow or percentage is displayed rather than one derived
-        the wrong way.
-      </Alert>
+      {growth && <NetWorth data={growth} />}
+      {growthUnavailable && (
+        <Alert severity="info" icon={<TrendingDownIcon />}>
+          <AlertTitle>Net worth is unavailable</AlertTitle>
+          {growthUnavailable}
+        </Alert>
+      )}
 
       <Card variant="outlined">
         <CardContent>
@@ -203,11 +218,15 @@ export default function Dashboard() {
 
       <Card variant="outlined">
         <CardContent>
-          <Typography variant="h6">Transactions</Typography>
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
+            <Typography variant="h6">Transactions</Typography>
+            <Button size="small" onClick={addCategory}>+ category</Button>
+          </Stack>
           <Typography variant="caption" color="text.secondary">
-            Hiding removes a row from the totals and the bars above, not just
-            from this list. The eye icon lasts until you refresh; “forever”
-            keeps it hidden and is undone on the Hidden page.
+            Changing a category here is a correction: it is kept as yours and no
+            automatic pass will overwrite it. Hiding removes a row from the
+            totals and the bars above, not just from this list — the eye icon
+            lasts until you refresh, “forever” is undone on the Hidden page.
           </Typography>
           <Divider sx={{ my: 1 }} />
           <List dense sx={{ maxHeight: 340, overflowY: "auto" }}>
@@ -231,7 +250,27 @@ export default function Dashboard() {
               >
                 <ListItemText
                   primary={t.counterparty_norm || "(no counterparty)"}
-                  secondary={`${t.posted_date} · ${t.institution} · ${t.category ?? "uncategorised"}`}
+                  secondary={
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.5 }}>
+                      <Typography variant="caption" color="text.secondary">
+                        {t.posted_date} · {t.institution}
+                      </Typography>
+                      <Select
+                        size="small" variant="standard" displayEmpty
+                        value={t.category ?? ""}
+                        onChange={(e) => recategorise(t.id, e.target.value)}
+                        sx={{ fontSize: 12, minWidth: 130 }}
+                      >
+                        <MenuItem value="" disabled>uncategorised</MenuItem>
+                        {categories.map((c) => (
+                          <MenuItem key={c.id} value={c.name}>{c.name}</MenuItem>
+                        ))}
+                      </Select>
+                      {t.source === "human" && (
+                        <Chip size="small" variant="outlined" color="success" label="yours" />
+                      )}
+                    </Stack>
+                  }
                 />
               </ListItem>
             ))}

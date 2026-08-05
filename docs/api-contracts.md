@@ -261,19 +261,49 @@ decide freely and apply once at the end.
 have been paired. Exposed so a client can *show* that spending figures exclude
 them rather than merely assert it.
 
-### `GET /api/v1/growth` — **501, not implemented**
+### `GET /api/v1/growth`
 
-Returns `501` with a reason, deliberately.
+Net worth over time. Takes `months` (1–120, default 6) and `every` =
+`month` | `statement`.
 
-Growth is **balance over time** and must come from `statement_balance`, not
-from summing `txn`. Summing transactions makes a transfer between the
-household's own accounts look like growth in one direction and a loss in the
-other. The repository has no balance-history query yet, and a plausible-looking
-series computed the wrong way would be worse than nothing — it is the figure
-§5.1(D) attaches an emotional signal to.
+```json
+{ "currency": "SGD", "window_months": 12, "since": "2025-08-08",
+  "points": [{ "on": "2026-07-31", "total_minor": 5837770, "accounts_known": 12 }],
+  "change": { "from_minor": 13128011, "to_minor": 5837770,
+              "change_minor": -7290241, "percent": -0.5553 } }
+```
 
-**This is the one endpoint the dashboard needs and does not have.** Building it
-means a balance-history query over `statement_balance`, not a change here.
+**Never a sum of transactions.** Balances come from `statement_balance`, which
+the reconciliation check already proved to the cent. Summing movements would
+read a transfer between the household's own accounts as growth on one side and
+loss on the other, and would count a card the wrong way round.
+
+**`accounts_known` is part of the contract.** Accounts do not close on the same
+day, so each carries its last declared balance forward until it declares
+another — a point is only as current as its stalest account. A client must be
+able to say when an early point covers fewer accounts, rather than let it look
+like a real dip.
+
+**`change.percent` is `null` when the window opened at zero or in debt.** There
+is no honest percentage of a negative position, and this is the figure §5.1(D)
+attaches a feeling to. Render the absolute movement instead, never a fabricated
+rate.
+
+### `POST /api/v1/categories?name=`
+
+`201 { "name": "Gifts", "created": true }`. `409` if it already exists, `422`
+if the name is blank. The taxonomy is the tenant's to shape.
+
+### `POST /api/v1/transactions/{txn_id}/category?category=`
+
+Corrects one transaction. Written as `source: "human"`, which no automated pass
+will overwrite — the row-level counterpart to `/review/decide`, which settles a
+counterparty and everything with it. `422` with the known categories if the
+name is not one.
+
+### `DELETE /api/v1/transactions/{txn_id}/category`
+
+`{ "cleared": true }` — drops the correction so the next rule pass decides again.
 
 ---
 
@@ -283,9 +313,7 @@ Named so that their absence is a decision rather than an oversight.
 
 | Missing | Why it matters |
 |---|---|
-| `GET /growth` | Above. The headline figure of §5.1(A). |
 | Applying decisions | `/review/decide` records; nothing writes it through. CLI does this today. |
-| Correcting a *categorised* row | Only unmatched counterparties are reviewable, so a wrong category is invisible. |
-| Row-level `source='human'` | The pass refuses to overwrite it, but nothing writes it. |
-| Editing the taxonomy | `/categories` reads only. Renaming must also rewrite enrichments. |
+| Renaming or merging a category | `POST` adds; neither rename nor merge exists, and both must rewrite the enrichments that named the old one. |
+| Reviewing what is *already* categorised | `/review` lists only unmatched counterparties, so a wrong rule among the 398 is invisible until someone happens to see the row. |
 | Authentication | There is none. See §5.2: per-server, OIDC, no password ever stored. **Do not deploy this beyond a trusted network until it exists.** |

@@ -31,6 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import PROFILE_PROD, Config, load_config
 from ..domain.categories import DEFAULT_CATEGORIES, Rule, operator_rule, review_queue
+from ..domain.networth import Declared, change, net_worth
 from ..domain.recurrence import Occurrence, find_series
 from ..storage.factory import build_repository
 from ..storage.sqlalchemy_repo import choose_bucket
@@ -412,25 +413,89 @@ def transfers(handle: Session) -> dict:
 @app.get(f"{PREFIX}/growth", tags=["dashboard"])
 def growth(
     handle: Session,
-    months: Annotated[int, Query(ge=1, le=60, description="Window, user setting")] = 6,
+    months: Annotated[int, Query(ge=1, le=120, description="Window, user setting")] = 6,
+    every: Annotated[str, Query(pattern="^(month|statement)$")] = "month",
 ) -> dict:
-    """Net worth over time.
+    """Net worth over time, from the balances the statements declared.
 
-    **Not implemented.** Growth is balance over time and must come from
-    `statement_balance`, not from summing `txn`: summing transactions makes a
-    transfer between the household's own accounts look like growth in one
-    direction and loss in the other. The repository has no balance-history
-    query yet, and returning a plausible-looking series computed the wrong way
-    would be worse than returning nothing. See §5.1(A).
+    Not a sum of transactions: that would read a transfer between the
+    household's own accounts as growth on one side and loss on the other, and
+    would count a card the wrong way round. Card balances are stored negated,
+    so a debt subtracts without this needing to know which is which.
+
+    `accounts_known` on each point is how many accounts had declared anything
+    by then. It rises as history fills in, and a client should say so rather
+    than let an early point look like a real dip.
     """
-    raise HTTPException(
-        status_code=501,
-        detail={
-            "error": "not implemented",
-            "reason": "growth must be derived from statement balances, not transaction sums",
-            "window_months": months,
-            # Serialised here: an exception detail is encoded as plain JSON and
-            # never sees the response model's encoders.
-            "since": (date.today() - timedelta(days=30 * months)).isoformat(),
-        },
+    since = date.today() - timedelta(days=31 * months)
+    rows = handle.repository.balance_history(handle.context, since=since)
+    points = net_worth(
+        [
+            Declared(
+                period_end=r["period_end"],
+                account_id=r["account_id"],
+                closing_balance_minor=r["closing_balance_minor"],
+            )
+            for r in rows
+        ],
+        every=every,
     )
+    return {
+        "currency": "SGD",
+        "window_months": months,
+        "since": since,
+        "points": [
+            {"on": p.on, "total_minor": p.total_minor, "accounts_known": p.accounts_known}
+            for p in points
+        ],
+        # The arrow and the percentage §5.1(D) asks for. `percent` is null where
+        # the window opened at zero or in debt, because there is no honest
+        # percentage of that and a number here carries a feeling.
+        "change": change(points),
+    }
+
+
+@app.post(f"{PREFIX}/categories", tags=["categorisation"], status_code=201)
+def add_category(handle: Session, name: str) -> dict:
+    """Add a category. The taxonomy is the tenant's to shape."""
+    cleaned = " ".join(name.split())
+    if not cleaned:
+        raise HTTPException(status_code=422, detail={"error": "name is required"})
+    existing = {c["name"].lower() for c in handle.repository.list_categories(handle.context)}
+    if cleaned.lower() in existing:
+        raise HTTPException(status_code=409, detail={"error": "category already exists"})
+    handle.repository.add_category(handle.context, cleaned)
+    return {"name": cleaned, "created": True}
+
+
+@app.post(f"{PREFIX}/transactions/{{txn_id}}/category", tags=["categorisation"])
+def set_category(handle: Session, txn_id: int, category: str) -> dict:
+    """Correct one transaction's category, by hand.
+
+    Written as `source='human'`, which the rule pass is built never to
+    overwrite: the whole value of correcting something is that it stays
+    corrected, and a pass that could undo it would make every correction
+    provisional.
+
+    This is the row-level counterpart to `/review/decide`. That settles a
+    counterparty and every transaction with it; this settles one transaction
+    where the merchant is right in general and wrong here.
+    """
+    known = {c["name"].lower(): c["name"] for c in handle.repository.list_categories(handle.context)}
+    chosen = known.get(category.lower())
+    if chosen is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "unknown category", "known": sorted(known.values())},
+        )
+    handle.repository.set_human_category(handle.context, txn_id, chosen)
+    return {"txn_id": txn_id, "category": chosen, "source": "human"}
+
+
+@app.delete(f"{PREFIX}/transactions/{{txn_id}}/category", tags=["categorisation"])
+def clear_category(handle: Session, txn_id: int) -> dict:
+    """Undo a correction, letting the rules decide again."""
+    return {
+        "txn_id": txn_id,
+        "cleared": handle.repository.clear_human_category(handle.context, txn_id),
+    }

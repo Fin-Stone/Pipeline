@@ -115,6 +115,19 @@ export interface HiddenRow {
 }
 export interface Hidden { hidden: HiddenRow[]; count: number; total_minor: number }
 
+export interface GrowthPoint { on: string; total_minor: number; accounts_known: number }
+export interface Growth {
+  currency: string; window_months: number; since: string;
+  points: GrowthPoint[];
+  change: {
+    from_minor: number | null; to_minor: number | null;
+    change_minor: number | null;
+    /** Null where the window opened at zero or in debt: there is no honest
+     *  percentage of that, and this number carries a feeling. */
+    percent: number | null;
+  };
+}
+
 export interface Filters {
   since?: string; until?: string; account_id?: number[]; category?: string[];
   /** Hidden for this request only. The server owns the arithmetic, so an
@@ -139,7 +152,17 @@ export const api = {
   recurring: () => call<Recurring>("/recurring"),
   review: (limit = 50) => call<Review>("/review", { limit }),
   transfers: () => call<{ linked: number }>("/transfers"),
-  growth: (months: number) => call<unknown>("/growth", { months }),
+  growth: (months: number) => call<Growth>("/growth", { months }),
+  addCategory: (name: string) =>
+    call<{ created: boolean }>("/categories", { name }, { method: "POST" }),
+  setCategory: (txn_id: number, category: string) =>
+    call<{ category: string }>(
+      `/transactions/${txn_id}/category`, { category }, { method: "POST" },
+    ),
+  clearCategory: (txn_id: number) =>
+    call<{ cleared: boolean }>(
+      `/transactions/${txn_id}/category`, {}, { method: "DELETE" },
+    ),
   decide: (counterparty: string, category: string) =>
     call<{ created: boolean }>("/review/decide", { counterparty, category }, { method: "POST" }),
 };

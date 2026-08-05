@@ -47,12 +47,17 @@ class TestContract:
     def test_an_unknown_profile_is_rejected_not_guessed(self, client):
         assert client.get(f"{PREFIX}/accounts", params={"profile": "staging"}).status_code == 400
 
-    def test_growth_refuses_rather_than_inventing_a_series(self, client):
-        """Summing transactions would make a transfer between one's own
-        accounts look like growth. Returning nothing beats returning that."""
-        response = client.get(f"{PREFIX}/growth", params={"profile": "dummy"})
-        assert response.status_code == 501
-        assert "statement balances" in response.json()["detail"]["reason"]
+    def test_growth_reports_a_position_and_says_how_complete_it_is(self, client):
+        """Net worth comes from declared balances, never from summing
+        transactions — that would read a transfer between one's own accounts as
+        growth on one side and loss on the other."""
+        body = client.get(f"{PREFIX}/growth", params={"profile": "dummy"}).json()
+        assert {"points", "change", "window_months", "currency"} <= set(body)
+        for point in body["points"]:
+            assert isinstance(point["total_minor"], int)
+            # A point is only as current as its stalest account, and a client
+            # has to be able to say so.
+            assert point["accounts_known"] >= 1
 
 
 class TestMoney:
