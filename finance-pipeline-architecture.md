@@ -235,6 +235,50 @@ read-only.
 Design mobile-first → TV → desktop. Put the review/correction queue on phone and laptop
 only; the TV is strictly read-only glanceable.
 
+### 5.1 What the finance UX has to do — operator's brief
+
+Recorded from the operator, to be built rather than re-derived later. The ordering is
+theirs; the notes under each are what the data layer must provide for it.
+
+**A. One consolidated view, across every account.** The landing surface is the whole
+financial position, not a per-bank list. It carries:
+
+- a graph of **financial growth over the last 6 months**, where 6 is a user setting and not
+  a constant;
+- **average spending per month, per week and per day**, over that same window.
+
+Those averages must be computed over the *same* range as the graph, or the two halves of the
+screen quietly describe different periods.
+
+**B. Every metric is filterable and the range is movable.** Filter by one or more
+institutions, by spending type, or by both at once. Extend, shorten, or type a custom date
+range. This is the requirement that decides the query layer: every figure on the dashboard
+has to be derivable from `(date range, set of accounts, set of categories)` rather than
+precomputed for one window, so the aggregates cannot be materialised per-month and left at
+that.
+
+**C. Recurring payments get their own page**, showing what recurs weekly, monthly and
+yearly. §3.2 already derives frequency without an LLM; this is its surface.
+
+**D. The dashboard has to manage the reader's mental state**, on both the consolidated view
+and the recurring page. Money growing well should read as calm; money depleting should read
+as *slight* concern — enough to prompt a look, not enough to alarm. Concretely: a coloured
+arrow for direction plus a percentage, because a percentage is what makes a number legible
+at a glance without doing arithmetic.
+
+Two things this brief demands of the layers beneath it, worth stating where they will be
+read before the UI is written:
+
+- **Growth is not the sum of transactions.** It is balance over time, so it comes from
+  `statement_balance` and the reconciliation trail, not from summing `txn`. A transfer
+  between two of the household's own accounts must not appear as growth in either
+  direction.
+- **Spending totals must exclude internal transfers**, or every credit-card payment inflates
+  the monthly average by the size of the bill. `transfer_link` exists for this; any query
+  behind a spending figure joins against it and drops both legs. A figure that ignores it is
+  wrong in the direction that looks worst, which is exactly the direction (D) is sensitive
+  to.
+
 ---
 
 ## 6. Phase 2 — Automated retrieval
