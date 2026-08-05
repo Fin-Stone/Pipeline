@@ -106,6 +106,19 @@ SEED_RULES: tuple[tuple[str, str, str], ...] = (
     (r"\b(?:uniqlo|zara|h\s*&\s*m|cotton\s*on|muji|decathlon)\b", "Fashion", ""),
     (r"\b(?:nike|adidas|new\s*balance|skechers|charles\s*&\s*keith|pedro)\b", "Fashion", ""),
 
+    # --- Fees and charges --------------------------------------------------
+    # Real expenditure belonging to no merchant. Without these it sits in
+    # Others for ever, however many merchant rules get written.
+    (r"\b(?:interest\s*(?:charge|earned)?|finance\s*charge)\b", "Fees and charges", ""),
+    (r"\b(?:annual|service|admin(?:istrative)?|processing|handling)\s*fee\b",
+     "Fees and charges", ""),
+    (r"\blate\s*(?:payment|charge|fee)\b", "Fees and charges", ""),
+    (r"\b(?:foreign|overseas|cross-?border)\s*(?:transaction|currency)\s*fee\b",
+     "Fees and charges", ""),
+    (r"\b(?:cash\s*advance\s*fee|over-?limit|returned\s*(?:cheque|gi ro))\b",
+     "Fees and charges", ""),
+    (r"\bgst\b", "Fees and charges", ""),
+
     # --- Business services -------------------------------------------------
     (r"\b(?:acra|iras\b|cpf\b)\b", "Business services", "Statutory"),
     (r"\b(?:accounting|audit|legal|law\s*corp|consultanc)\b", "Business services", ""),

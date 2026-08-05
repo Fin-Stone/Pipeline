@@ -356,7 +356,7 @@ class TestMariBankCard:
         assert not any(
             token in line
             for line in SIGNATURE.requires
-            for token in ("example", "sim", "EXAMPLE AVENUE", "000000")
+            for token in ("example", "sim", "example avenue", "000000")
         )
 
 

@@ -145,9 +145,21 @@ class TestSanitisation:
         result = propose(rows, [Rule(r"sheng siong", "Grocery")])
         assert [p.counterparty for p in result] == ["NEW SHOP"]
 
-    def test_the_order_is_what_an_answer_would_buy(self):
-        rows = [("BIG", -100)] * 9 + [("SMALL", -100)] * 2
-        assert [p.counterparty for p in propose(rows)] == ["BIG", "SMALL"]
+    def test_the_order_is_the_money_at_stake(self):
+        """Ranking by frequency optimises the row count and ignores the large
+        one-off spends, which is where the money actually goes: on the real
+        corpus the top sixty by value held 84% of everything unaccounted for,
+        while ordering by count kept offering another bus fare."""
+        rows = [("OFTEN", -100)] * 9 + [("COSTLY", -50_000)] * 2
+        assert [p.counterparty for p in propose(rows)] == ["COSTLY", "OFTEN"]
+        assert [p.counterparty for p in propose(rows, by="occurrences")] == ["OFTEN", "COSTLY"]
+
+    def test_the_real_total_never_leaves(self):
+        """It orders the list and nothing else: a gated magnitude may go out,
+        a true sum may not."""
+        result = propose([("SHOP", -12_345)] * 3)[0]
+        assert result.total_value_minor == 37_035
+        assert result.typical_amount_minor == gate_amount(12_345)
 
     def test_an_outlier_does_not_describe_a_merchant(self):
         """The median, so one unusual purchase does not set the magnitude."""

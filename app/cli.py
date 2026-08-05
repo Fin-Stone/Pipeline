@@ -434,7 +434,8 @@ def cmd_propose(args) -> int:
     ]
     seeds = seed_rules()
     proposals = propose(
-        ((t["counterparty_norm"], t["amount_minor"]) for t in targets), rules, suggest=seeds
+        ((t["counterparty_norm"], t["amount_minor"]) for t in targets),
+        rules, suggest=seeds, by=args.by,
     )
     suggested = sum(1 for p in proposals if p.suggested_category)
     if args.only_unknown:
@@ -968,6 +969,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("propose", help="counterparties to ask a model about, sanitised")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.add_argument("--limit", type=int, default=500, help="counterparties to emit (default 500)")
+    p.add_argument(
+        "--by", choices=("value", "occurrences"), default="value",
+        help="rank by money at stake (default) or by how often it appears",
+    )
     p.add_argument(
         "--only-unknown", action="store_true",
         help="omit the ones a seed rule already suggests an answer for",

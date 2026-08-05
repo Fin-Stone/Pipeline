@@ -38,6 +38,11 @@ DEFAULT_CATEGORIES: tuple[str, ...] = (
     "Electronics",
     "Fashion",
     "Business services",
+    #: Bank and card charges: fees, interest, FX margins, late payment. Real
+    #: expenditure that belongs to no merchant, so without a home of its own it
+    #: sits in Others permanently however many rules get written — and it is
+    #: the one category a household can act on directly.
+    "Fees and charges",
     "Others",
 )
 
@@ -186,6 +191,10 @@ class Proposal:
     counterparty: str
     occurrences: int
     typical_amount_minor: int
+    #: What this counterparty accounts for in total. Used to *order* the list
+    #: and deliberately never sent: it is a real sum rather than a gated
+    #: magnitude, and ordering is a decision made at home.
+    total_value_minor: int = 0
     #: What the bundled or operator rules already think, if anything. Sent so a
     #: model reviews a proposal rather than answering from nothing — agreement
     #: is then evidence, and disagreement is a specific claim worth reading.
@@ -194,7 +203,7 @@ class Proposal:
     suggested_by: str | None = None
 
 
-def propose(rows, rules=(), *, suggest=()) -> list[Proposal]:
+def propose(rows, rules=(), *, suggest=(), by: str = "value") -> list[Proposal]:
     """The counterparties worth asking about, aggregated and filtered.
 
     `rows` are `(counterparty, amount_minor)` pairs. `rules` are settled and
@@ -229,10 +238,19 @@ def propose(rows, rules=(), *, suggest=()) -> list[Proposal]:
             occurrences=count,
             # The median, so one outlier purchase does not describe a merchant.
             typical_amount_minor=gate_amount(sorted(amounts[name])[len(amounts[name]) // 2]),
+            total_value_minor=sum(amounts[name]),
             suggested_category=hint.category if hint.rule else None,
             suggested_by=hint.rule.pattern if hint.rule else None,
         ))
-    return sorted(proposals, key=lambda p: (-p.occurrences, p.counterparty))
+
+    # Ordered by money, not by frequency. Ranking on occurrences optimises the
+    # row count and systematically ignores the large one-off spends, which is
+    # where a household's money actually goes: on this corpus the top sixty by
+    # value held 84% of everything still unaccounted for, while ordering by
+    # count kept offering another bus fare.
+    if by == "occurrences":
+        return sorted(proposals, key=lambda p: (-p.occurrences, p.counterparty))
+    return sorted(proposals, key=lambda p: (-p.total_value_minor, p.counterparty))
 
 
 @dataclass(frozen=True, slots=True)

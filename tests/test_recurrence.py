@@ -190,7 +190,7 @@ class TestConduits:
         """It is the most regular thing in a ledger, so it would be found
         early and believed, while telling the operator nothing they can
         cancel."""
-        assert not find_series(_monthly("PAYLAH EXAMPLE HOLDER", -10000))
+        assert not find_series(_monthly("PAYLAH TOP UP", -10000))
 
     def test_a_marketplace_is_not_a_subscription(self):
         assert not find_series(_monthly("LAZADA SINGAPORE PAYM", -5000))
