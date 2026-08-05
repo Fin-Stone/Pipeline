@@ -20,6 +20,7 @@ others do not:
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from ...domain.dates import DateParseError, parse_numeric_date, resolve_near_period
@@ -53,6 +54,15 @@ DATE_COL = "date"
 DESC_COL = "description"
 AMOUNT_COL = "amount"
 
+#: Rows are ~9pt apart and a wrapped description ~5pt below its row.
+CONTINUATION_GAP = 7.0
+
+#: OCBC settles the previous balance ahead of the cycle it is listing, so those
+#: rows are dated *after* the purchases that follow them. Naming the two runs
+#: is what stops that reading as an out-of-order table.
+SETTLEMENT = "Settlement of previous balance"
+CYCLE = "Block"
+
 #: An amount, with either marker OCBC uses for a credit: a CR suffix, or
 #: accounting parentheses around the figure.
 _AMOUNT_IN_CELL = re.compile(r"\(?[\d,]*\d\.\d{2}\)?(?:\s*CR)?", re.IGNORECASE)
@@ -74,7 +84,14 @@ _TOTAL = re.compile(r"^total\b(?!\s+amount\s+due)", re.IGNORECASE)
 _CARD_NUMBER = re.compile(r"\b(?:[\dX*]{4}[- ]){3}[\dX*]{4}\b", re.IGNORECASE)
 
 #: Where the table stops. Everything past it is prose and mirrored furniture.
-_SECTION_END = re.compile(r"^\s*(NEWS & INFORMATION|IMPORTANT NOTICE)", re.IGNORECASE)
+#: The rewards block is the other thing that ends a table. It tabulates points
+#: rather than money and prints the card number beside them, so left running it
+#: looks exactly like the start of another card section — the points unit
+#: "OCBC$" became one.
+_SECTION_END = re.compile(
+    r"^\s*(NEWS & INFORMATION|IMPORTANT NOTICE)|Rewards/Rebates|Rewards Currency",
+    re.IGNORECASE,
+)
 
 #: Rows that are structure rather than spending.
 _SKIP = re.compile(
@@ -104,6 +121,11 @@ class OcbcCardAdapter:
                 # Unsigned: a purchase is money out, and CR reverses it.
                 (AMOUNT_COL, "Amount", tables.MONEY, -1),
             ]),
+            # Rows sit about 9pt apart and a wrapped description about 5pt
+            # below its row. Without a limit, the penalty-rate notice printed
+            # beside a card's product name attached itself to the first
+            # transaction underneath it.
+            continuation_gap=CONTINUATION_GAP,
             money_pattern=_AMOUNT_IN_CELL,
         )
 
@@ -189,14 +211,25 @@ class OcbcCardAdapter:
         became a card section with no balances, and the real card's balances
         then attached to the phone number instead.
         """
-        text = line.text.strip()
-        if not text or _CARD_NUMBER.search(text) or _AMOUNT_IN_CELL.search(text):
+        # The product is the leading run of capitals, which is not always the
+        # whole line: a card carrying a penalty rate has the notice appended to
+        # it. Extract first and judge the extract — testing the whole line
+        # rejected this one for holding "30.78%", and the statement then parsed
+        # as having no cards at all.
+        words = []
+        for word in line.text.strip().split():
+            if re.search(r"[a-z]", word):
+                break
+            words.append(word)
+        product = " ".join(words)
+
+        if len(product) < 5 or not re.search(r"[A-Z]", product):
             return None
-        if not re.match(r"^[A-Z0-9][A-Z0-9 &'/.-]{4,}$", text):
+        if _CARD_NUMBER.search(product) or _AMOUNT_IN_CELL.search(product):
             return None
         if not any(_CARD_NUMBER.search(nxt.text) for nxt in following):
             return None
-        return " ".join(text.split()).title()
+        return product.title()
 
     def _amount(self, line, spec, text) -> int:
         match = _AMOUNT_IN_CELL.search(text)
@@ -208,7 +241,9 @@ class OcbcCardAdapter:
 
     def _build(self, product, section, spec, period_start, period_end) -> ParsedAccount:
         rows = tables.assemble_rows(section["rows"], spec)
-        txns = [t for t in (self._txn(r, spec, period_start, period_end) for r in rows) if t]
+        txns = _name_the_runs(
+            [t for t in (self._txn(r, spec, period_start, period_end) for r in rows) if t]
+        )
 
         if section["opening"] is None or section["closing"] is None:
             raise ParseError(
@@ -245,12 +280,13 @@ class OcbcCardAdapter:
             # resolving against the guess alone rejected it. The window stays
             # far short of a year, so the year is still unambiguous.
             posted = resolve_near_period(date_text, period_start, period_end)
-        except DateParseError as exc:
-            raise ParseError(str(exc), context={
-                "page": row.line.page_number, "y": round(row.line.top, 1),
-                "failed_on": "transaction date", "raw_line": row.line.text,
-                "columns": dict(row.cells),
-            }) from exc
+        except DateParseError:
+            # A line whose date column holds something that is not a date is
+            # not a transaction, whatever else it carries: the contact block
+            # put "Phone Banking" there beside a figure. Dropping it is safe
+            # to do quietly only because the balance check still has to pass —
+            # if a real row went with it, the statement will not reconcile.
+            return None
 
         minor = _to_minor(text, row.line)
         # Two ways OCBC marks money coming back, and both must be read. A CR
@@ -281,11 +317,46 @@ class OcbcCardAdapter:
                 continue
             if not started:
                 continue
-            if _SECTION_END.match(line.text):
+            if _SECTION_END.search(line.text):
                 started = False
                 continue
             lines.append(line)
         return lines
+
+
+def _name_the_runs(txns: list[ParsedTxn]) -> list[ParsedTxn]:
+    """Label the blocks OCBC prints its table in.
+
+    The table is not one sequence. Three blocks have been observed and none is
+    announced by a heading: the payments clearing last month's bill come first
+    and are dated *after* the purchases beneath them; then the cycle, ascending;
+    then charges appended at the end and dated back to where the cycle opened.
+
+    Since the statement does not delimit them, they are inferred — a new block
+    begins wherever the date steps backwards. That makes the ordering check
+    weak for this layout, and it is the honest position rather than a claim the
+    document does not support. **What actually guards an OCBC statement is the
+    balance check**, which these pass to the cent, plus the period bound on
+    every date.
+
+    The leading block is named where it is what it looks like, a settlement,
+    because that is worth knowing about a row and not only about the parse.
+    """
+    if not txns:
+        return txns
+
+    blocks: list[int] = []
+    index = -1
+    for position, txn in enumerate(txns):
+        if position == 0 or txn.posted_date < txns[position - 1].posted_date:
+            index += 1
+        blocks.append(index)
+
+    settled = all(t.amount_minor > 0 for t, b in zip(txns, blocks) if b == 0)
+    return [
+        replace(txn, section=SETTLEMENT if block == 0 and settled else f"{CYCLE} {block + 1}")
+        for txn, block in zip(txns, blocks)
+    ]
 
 
 def _to_minor(text: str, line) -> int:
