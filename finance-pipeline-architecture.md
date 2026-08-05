@@ -161,6 +161,36 @@ inside `[period_start, period_end]`; no amount above a sanity ceiling.
    against your fixed category enum. Record `model_version` and prompt hash on the row so
    results are reproducible and re-runnable.
 
+**The default seed set**, from the operator. Editable per tenant like any other, but this is
+what a new install starts with:
+
+| Category | Holds | Note |
+|---|---|---|
+| Grocery | Supermarkets, provisions | |
+| Dining | Restaurants, hawkers, cafés, delivery | |
+| Transport | Public transport, ride-hailing, fuel, parking | |
+| Bills and utilities | Power, water, mobile plans, broadband | Mobile plans belong here, not Electronics |
+| Insurance | Life, health, motor, home | Separate from Bills: a long commitment buried among monthly plans is invisible |
+| Healthcare | Clinics, dental, pharmacy, specialists | Distinct from Wellness — one is treatment, the other is choice |
+| Wellness | Massage, spa, gym, salon | |
+| Recreation | Cinema, attractions, events, hobbies | |
+| Travel | Flights, hotels, transfers abroad | |
+| Furnishing | Furniture, renovation, homeware, fittings | |
+| Electronics | Devices, components, peripherals | |
+| Fashion | Clothing, footwear, bags, accessories | One category, because the wardrobe is how people budget it |
+| Business services | Contractors, professional services, trades | |
+| Others | Everything unclassified | Should stay small; a large Others means the rules are behind |
+
+**Retail is split three ways rather than held as one "Shopping".** A single retail bucket is
+the one most likely to become the largest category and say nothing — furnishing a home,
+replacing a laptop and buying shoes are different decisions on different timescales, and a
+total that merges them cannot answer any question worth asking.
+
+**The boundaries that will need rules, not judgement.** Mobile plans are Bills, not
+Electronics. A smart TV is Electronics; a lamp is Furnishing. And the case already sitting in
+this corpus: `IKEA-RESTAURANT` is Dining, not Furnishing — proof that a rule keyed on a
+merchant prefix will be wrong, and that the merchant is a strong prior rather than an answer.
+
 **The taxonomy belongs to the user, not to the schema.** Categories are rows in a
 tenant-scoped table, seeded with a default set and editable — renamed, split, merged, added
 to — without a migration. Two consequences worth stating before anything is built: a rule
