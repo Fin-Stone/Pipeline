@@ -48,6 +48,33 @@ LAPSED_AFTER_PERIODS = 2
 #: years is a service taken up again, which is a different thing.
 MERGE_GAP_PERIODS = 2.0
 
+#: Names that are a *route* money took, not the party it went to. An e-wallet
+#: top-up, a marketplace order and an ATM withdrawal are all real spending, but
+#: the name on the row says how it was paid rather than what for.
+#:
+#: They are excluded from recurrence specifically, and only there. A wallet
+#: topped up every month looks exactly like a subscription and is the most
+#: regular thing in the ledger, so it would be found early and believed —
+#: while telling the operator nothing they can cancel, which is what the
+#: recurring page is for. The spending itself still counts everywhere else.
+#:
+#: A real subscription bought *through* one of these arrives under the
+#: service's own name, so nothing genuine is lost by the exclusion.
+CONDUITS = frozenset({
+    "PAYLAH", "PAYNOW", "GRABPAY", "SHOPEEPAY", "FAVEPAY", "ALIPAY", "WECHATPAY",
+    "LAZADA", "SHOPEE", "AMAZON", "QOO10", "CAROUSELL",
+    "ATM", "CASH WITHDRAWAL", "CASH", "NETS", "EZ-LINK", "EZLINK",
+})
+
+
+def is_conduit(merchant_norm: str) -> bool:
+    """Whether a name describes the route rather than the counterparty."""
+    if not merchant_norm:
+        return True
+    words = merchant_norm.upper().split()
+    return bool(words) and (words[0] in CONDUITS or merchant_norm.upper() in CONDUITS)
+
+
 #: Periods a person would name, with what each tolerates. Month-end drift is
 #: why the monthly window is wide enough to hold 28 through 33.
 _PERIODS: tuple[tuple[str, int, int], ...] = (
@@ -165,7 +192,7 @@ def find_series(occurrences, *, today: date | None = None) -> list[Series]:
     """
     by_merchant: dict[str, list[Occurrence]] = {}
     for occurrence in occurrences:
-        if occurrence.merchant_norm:
+        if occurrence.merchant_norm and not is_conduit(occurrence.merchant_norm):
             by_merchant.setdefault(occurrence.merchant_norm, []).append(occurrence)
 
     segments: list[Series] = []

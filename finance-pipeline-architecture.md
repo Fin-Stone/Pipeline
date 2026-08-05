@@ -161,6 +161,24 @@ inside `[period_start, period_end]`; no amount above a sanity ceiling.
    against your fixed category enum. Record `model_version` and prompt hash on the row so
    results are reproducible and re-runnable.
 
+**The taxonomy belongs to the user, not to the schema.** Categories are rows in a
+tenant-scoped table, seeded with a default set and editable — renamed, split, merged, added
+to — without a migration. Two consequences worth stating before anything is built: a rule
+references a category by id so a rename does not orphan it, and merging two categories has to
+rewrite the enrichments that pointed at both, which means the operation needs to exist rather
+than being left to hand-editing. Weighting is per-user for the same reason: whose rule wins
+when two match is a preference, and hardcoding a precedence order makes every disagreement a
+code change.
+
+**Stage 3 is where hosted and self-hosted differ, and it must not become a feature gap.**
+The hosted service can run a model it pays for; a self-hosted install brings its own —
+an API key, a local endpoint, or nothing at all. §5.2 forbids capability that exists only on
+the hosted side, and the three-stage design already satisfies that: stages 1 and 2 are
+deterministic and local, so an install with no model configured does not lose
+categorisation, it gets a larger residual and that residual goes to the review queue in
+§3.3. The honest framing is that the model buys **less typing**, not more capability, and
+that is what the UI should say rather than dangling a disabled feature.
+
 **"For whom" is just a second label with the same three stages** — and it's much easier than
 category because cardinality is tiny (household members). The account or card is an
 enormously strong prior. If you follow through on the per-category virtual-card idea from

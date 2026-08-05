@@ -183,6 +183,27 @@ class TestServingTheFourPurposes:
         assert series.is_lapsed(long_gone) and not series.is_overdue(long_gone)
 
 
+class TestConduits:
+    """A wallet top-up is spending, but it is not a subscription."""
+
+    def test_an_ewallet_topped_up_monthly_is_not_a_subscription(self):
+        """It is the most regular thing in a ledger, so it would be found
+        early and believed, while telling the operator nothing they can
+        cancel."""
+        assert not find_series(_monthly("PAYLAH EXAMPLE HOLDER", -10000))
+
+    def test_a_marketplace_is_not_a_subscription(self):
+        assert not find_series(_monthly("LAZADA SINGAPORE PAYM", -5000))
+
+    def test_a_service_bought_through_one_still_counts(self):
+        """A real subscription arrives under its own name, so nothing genuine
+        is lost by excluding the route it was paid over."""
+        assert len(find_series(_monthly("NETFLIX", -1999))) == 1
+
+    def test_cash_is_not_a_merchant(self):
+        assert not find_series(_monthly("CASH WITHDRAWAL TOH GUAN", -20000))
+
+
 class TestAlerts:
     def test_a_missed_payment_is_overdue(self):
         series = find_series(_monthly("netflix", -1999, months=4))[0]
