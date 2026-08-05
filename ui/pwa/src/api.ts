@@ -42,7 +42,10 @@ export class ApiError extends Error {
   }
 }
 
-async function call<T>(path: string, params: Record<string, unknown> = {}, init?: RequestInit): Promise<T> {
+// `object` rather than Record<string, unknown>: a typed filter interface has no
+// index signature, and widening one to get it would give up the checking that
+// makes the filters worth typing at all.
+async function call<T>(path: string, params: object = {}, init?: RequestInit): Promise<T> {
   const base = serverUrl();
   if (!base) throw new ApiError(0, "no server configured");
 

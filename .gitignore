@@ -50,3 +50,4 @@ category/
 # Node / UI
 node_modules/
 ui/pwa/dist/
+*.tsbuildinfo

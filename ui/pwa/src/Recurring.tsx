@@ -14,7 +14,7 @@ import {
 } from "@mui/material";
 import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import { ApiError, Recurring as RecurringData, Series, api } from "./api";
-import { magnitude, money } from "./money";
+import { magnitude } from "./money";
 
 function SeriesRow({ s, note }: { s: Series; note?: string }) {
   const rise = s.price_changes.at(-1);

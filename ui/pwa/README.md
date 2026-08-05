@@ -55,8 +55,11 @@ description of the current implementation.
   and no offline read.
 - **No `/tv` route.** The 10-foot layout in §5 is not built.
 
-## Unverified
+## What has been verified
 
-This was written without a Node toolchain present, so it has **never been
-installed, built or run**. Expect the first `npm install && npm run dev` to
-surface type or import errors that a build would normally have caught.
+`npm install` and `npm run build` both pass, and the endpoints this client calls
+were exercised against a running API against real data — `/health`, `/summary`
+with a date range, and `/review`.
+
+Not verified: the rendered screens. Nothing here has been opened in a browser,
+so layout, responsiveness and the interaction on the review table are unproven.
