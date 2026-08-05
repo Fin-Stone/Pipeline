@@ -237,7 +237,11 @@ class SqlAlchemyLedgerRepository:
             select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
         )
         stmt = (
-            select(txn.id, txn.posted_date, txn.amount_minor, txn.description_norm)
+            # counterparty_norm, not description_norm: the first is *who* the
+            # row was with, the second keeps everything because it feeds the
+            # dedupe key. Grouping on the latter makes one merchant paid three
+            # ways look like three merchants, and nothing recurs.
+            select(txn.id, txn.posted_date, txn.amount_minor, txn.counterparty_norm)
             .where(
                 (txn.tenant_id == context.tenant_id)
                 # Money out only: a series is something paid, and an incoming

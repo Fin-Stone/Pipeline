@@ -352,7 +352,7 @@ def cmd_recurring(args) -> int:
             txn_id=row["id"],
             posted_date=row["posted_date"],
             amount_minor=row["amount_minor"],
-            merchant_norm=row["description_norm"],
+            merchant_norm=row["counterparty_norm"],
         )
         for row in rows
     )
