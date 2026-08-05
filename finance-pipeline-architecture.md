@@ -214,6 +214,69 @@ category because cardinality is tiny (household members). The account or card is
 enormously strong prior. If you follow through on the per-category virtual-card idea from
 the earlier plan, the card effectively *becomes* the label and this collapses to a lookup.
 
+### 3.1a Bootstrapping the rules — what banks have that this does not
+
+**A bank categorises by MCC, and that route is closed here.** Every card transaction carries
+a Merchant Category Code (ISO 18245) assigned by the acquirer and passed through the card
+network — 5411 grocery, 5812 eating places, 4121 taxis. An issuer's insight panel and its
+category cashback offers are both MCC matching, which is why those offers are *defined* in
+MCC terms.
+
+Finstone is not in the authorisation flow. It reads PDFs afterwards, and none of the seven
+layouts in this corpus prints an MCC. So the industry-standard baseline is not merely
+inconvenient, it is unavailable, and this system is solving a harder problem than the bank's
+own app from strictly less information. **If any institution ever offers CSV/OFX/QFX, check
+it for an MCC or issuer category field** — Tier 1 in §2.2 already prefers those formats, and
+a real MCC would be worth more than any amount of rule authoring.
+
+**The bootstrap is layered, cheapest and most explainable first**, mirroring §3.1 itself:
+
+1. **Open POI data** — OpenStreetMap and Wikidata, name to shop type. Free, self-hostable,
+   and it will clear the recognisable chains. It will not touch `BUS/MRT 100200300` or
+   `MALL EXAMPLE DUMPLING`, and the local tail is most of the *rows* in this ledger.
+2. **Community rule sets** — Firefly III and similar. Worth harvesting, but overwhelmingly
+   US and EU merchants, so expect thin coverage of a Singaporean corpus.
+3. **Models, for the residual only.**
+
+**Models author rules; they do not classify transactions.** The artifact is a rules file in
+git, so classification stays deterministic and re-running gives identical results, a wrong
+call is visible in review rather than discovered transaction by transaction, and — the part
+§5.2 requires — a self-hosted install needs no model at all, because the rules ship with the
+product.
+
+**Several models, and their disagreement is the confidence signal.** The same list goes to
+more than one, and consolidation is not averaging: unanimous verdicts become rules, splits go
+to the review queue. `categories.Decision` already carries exactly this distinction as
+`contested`, so nothing new is needed to hold it.
+
+#### What may leave the household, and what may not
+
+The list sent out is **an aggregate per distinct counterparty, never transactions**:
+
+| Field | Why |
+|---|---|
+| counterparty | The question is "is this a grocer", and the name is the whole question |
+| occurrence count | Tells a model what is routine rather than incidental |
+| typical amount, gated | Disambiguates `IKEA` at $3.50 from `IKEA` at $890 — the case already in this corpus |
+
+Amount gates — 1, 5, 10, 20, 50, 100, 300, 500, 1000, 10000, 50000, nearest and rounding up
+on a tie — exist **for capability, not for privacy**, and apply to one representative amount
+per merchant rather than to any transaction.
+
+Three things are excluded, and the reasons are not interchangeable:
+
+- **Dates, entirely.** A sequence of dated transactions is close to a fingerprint and
+  re-identifies against a single receipt or post. Nothing about whether a shop is a grocer
+  depends on when it was visited, so this costs nothing to omit — which is what makes
+  omitting it obligatory rather than cautious.
+- **Per-transaction rows.** The task needs a vocabulary, not a ledger. Sending 1,412 distinct
+  names instead of 3,622 rows is both safer and strictly more useful to a model.
+- **Counterparties that are people, and conduits.** This is the leak that looks like
+  protection if missed: `FROM: A N OTHER`, `TO: B SOMEONE` and bare account numbers are
+  counterparties in this corpus. Scrubbing the operator's own identifiers while sending their
+  friends' names inverts the protection, so person-like counterparties are filtered before
+  the list is built, alongside the §3.2 conduits.
+
 ### 3.2 Frequency: don't use an LLM for this
 
 Recurrence is a time-series problem with a clean deterministic solution. An LLM here is
