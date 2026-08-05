@@ -188,6 +188,55 @@ What this buys you, for free: **missed-payment alerts** (`expected_next` passed 
 match) and **price-increase alerts** (amount drifts outside tolerance on a known series) —
 which is most of the practical value of tracking subscriptions at all.
 
+### 3.2a Enrolment — the user knows things the dates cannot show
+
+Detection alone can only find what has already happened three times. The operator knows on
+the *first* payment that a subscription has started, knows which scattered rows were meant
+to be one series, and knows why a payment was smaller than usual. Three interactions carry
+that in.
+
+**The governing rule: a declaration is an input to detection, never an output of it.** It is
+the operator asserting something about their own money, so a re-run of the detector must
+never overwrite, downgrade or silently drop it — the same guarantee §3.3 gives corrections
+via `source='human'`. Everything below is stored beside the derived series, not inside it,
+and survives a full rebuild.
+
+**1. Declare a new recurring payment, from one occurrence.** After a single payment the user
+marks it as recurring and states the period they expect. The system then *watches* rather
+than concludes: each cycle it looks for a match, and reports when the expected pattern fails
+to appear. A declared series therefore has a state — `awaiting confirmation` until enough
+occurrences arrive to satisfy §3.2 on its own evidence, then `confirmed`. The alert that
+matters early is **"you told me this repeats and it has not"**, which is exactly the case
+detection cannot reach, because detection needs three occurrences and this has one.
+
+**2. Enrol a missed series, retrospectively.** The user picks a period and selects at least
+three transactions they say belong together, and the system derives the rule that would have
+caught them: the merchant pattern, the amount centre and the tolerance wide enough to hold
+what was chosen. Two things follow. The derived rule is shown back before it is saved,
+because a rule inferred from three rows will also claim future rows and the user should see
+what they are agreeing to. And if the selection cannot yield a coherent rule — the amounts
+or intervals are too scattered — that is reported rather than forced, since a rule matching
+everything is worse than no rule.
+
+**3. Explain a break in the pattern.** A payment that is smaller, larger or absent is not
+always a fault: promotions, annual discounts and payment holidays are ordinary. The user
+pins a reason to the occurrence, and the system then *verifies* it — did the amount come in
+lower as described, did it return to the centre afterwards, was it genuinely absent — rather
+than accepting the explanation and suppressing the alert. An unverified explanation is worth
+less than no explanation, because it teaches the user to trust a signal that stopped being
+checked.
+
+**On the aggregate ambition for (3).** Reporting that "others have seen discounts on similar
+services" means data leaving one household and informing another, and that runs against the
+tenant isolation everything else here is built on. It is buildable, and only on these terms:
+**opt-in per user and off by default**; nothing shared beyond a merchant identity, a period
+and a direction of change; no amounts, no dates, no account or member identifiers; and
+aggregated with a floor — a minimum number of contributing households before any observation
+is published — so a report can never describe one identifiable person's spending. Under
+§5.2 this is also a *hosted-only* capability that cannot exist as a feature gap: a
+self-hosted install has no cohort to aggregate over, so it must degrade to silence, not to a
+missing button.
+
 ### 3.3 Human-in-the-loop review queue
 
 Anything below a confidence threshold goes to a review queue. Corrections write to
