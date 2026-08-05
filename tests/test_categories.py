@@ -236,6 +236,67 @@ class TestWritingToTheLedger:
         assert totals == {"Dining": 1, "Grocery": 1}
 
 
+class TestReviewQueue:
+    """What is left for a person, and what deciding it is worth."""
+
+    def _queue(self, rows, rules=()):
+        from app.domain.categories import review_queue
+
+        return review_queue(rows, rules)
+
+    def test_ranked_by_value_not_frequency(self):
+        """The largest sixty unplaced names carried 88% of the unaccounted
+        money on the real corpus; ranking by count offers bus fares first."""
+        rows = [("OFTEN", -200)] * 20 + [("COSTLY", -90_000)] * 2
+        assert [i.counterparty for i in self._queue(rows)] == ["COSTLY", "OFTEN"]
+
+    def test_what_a_rule_settles_is_not_in_the_queue(self):
+        rows = [("SHENG SIONG", -2000)] * 3 + [("MYSTERY", -5000)] * 2
+        queue = self._queue(rows, [Rule(r"sheng siong", "Grocery")])
+        assert [i.counterparty for i in queue] == ["MYSTERY"]
+
+    def test_conduits_and_people_are_not_anyone_s_to_classify(self):
+        rows = [("PAYLAH TOP UP", -1000)] * 3 + [("FAST PAYMENT FROM: A N OTHER", -1000)] * 3
+        assert self._queue(rows) == []
+
+    def test_it_carries_what_the_decision_is_worth(self):
+        rows = [("SHOP", -1500)] * 4
+        item = self._queue(rows)[0]
+        assert (item.occurrences, item.total_minor) == (4, 6000)
+
+
+class TestOperatorDecisions:
+    def test_a_decision_is_anchored_to_the_name_it_was_about(self):
+        """A loose pattern would claim every other name containing it."""
+        from app.domain.categories import operator_rule
+
+        pattern, category, weight, _ = operator_rule("SHOP", "Grocery")
+        rule = Rule(pattern=pattern, category=category, weight=weight)
+
+        assert rule.matches("SHOP")
+        assert not rule.matches("SHOPEE SINGAPORE")
+
+    def test_a_decision_outranks_anything_imported(self):
+        """Having decided something by hand is the end of the argument, not
+        another vote in it."""
+        from app.domain.categories import operator_rule
+
+        pattern, category, weight, _ = operator_rule("IKEA", "Business services")
+        decided = Rule(pattern=pattern, category=category, weight=weight)
+        shipped = Rule(r"ikea", "Furnishing")
+
+        assert categorise("IKEA", [shipped, decided]).category == "Business services"
+
+    def test_a_regex_in_a_merchant_name_is_not_a_pattern(self):
+        """Names carry brackets and dots; escaping is what stops one becoming
+        a wildcard."""
+        from app.domain.categories import operator_rule
+
+        pattern, category, weight, _ = operator_rule("LAZADA (PAYM", "Others")
+        rule = Rule(pattern=pattern, category=category, weight=weight)
+        assert rule.matches("LAZADA (PAYM")
+
+
 class TestSeedRules:
     """The rules that ship, and what they are allowed to decide."""
 

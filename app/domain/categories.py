@@ -320,6 +320,79 @@ def consolidate(replies: dict, valid_categories=DEFAULT_CATEGORIES) -> list[Verd
     return sorted(verdicts, key=lambda v: (v.needs_review, v.counterparty))
 
 
+#: Weight given to a rule the operator wrote. Above anything imported or
+#: seeded, so a decision made by hand is not quietly outvoted by a longer
+#: pattern that shipped with the product.
+OPERATOR_WEIGHT = 100
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewItem:
+    """A counterparty nobody has placed, and what deciding it is worth."""
+
+    counterparty: str
+    occurrences: int
+    total_minor: int
+    #: What the models made of it, where they were asked. `None` means never
+    #: asked; `Others` means asked and unanimously declined.
+    model_verdict: str | None = None
+    #: True where the models were asked and disagreed, which is a different
+    #: kind of unknown from nobody recognising the name.
+    disputed: bool = False
+
+
+def review_queue(rows, rules, *, verdicts=None) -> list[ReviewItem]:
+    """What still needs a person, ranked by what answering it is worth.
+
+    `rows` are `(counterparty, amount_minor)`. Ordered by value rather than by
+    frequency for the reason the whole categorisation effort is: on this corpus
+    the largest sixty unplaced names carried 88% of the unaccounted money, and
+    ranking by count offers a long queue of bus fares first.
+
+    Conduits and personal counterparties are excluded, as everywhere else —
+    they are not spending anyone needs to classify.
+    """
+    from .recurrence import is_conduit
+
+    verdicts = verdicts or {}
+    counts: dict[str, int] = {}
+    totals: dict[str, int] = {}
+
+    for counterparty, amount_minor in rows:
+        name = (counterparty or "").strip()
+        if not name or is_personal(name) or is_conduit(name):
+            continue
+        if categorise(name, rules).rule is not None:
+            continue
+        counts[name] = counts.get(name, 0) + 1
+        totals[name] = totals.get(name, 0) + abs(amount_minor)
+
+    items = [
+        ReviewItem(
+            counterparty=name,
+            occurrences=count,
+            total_minor=totals[name],
+            model_verdict=getattr(verdicts.get(name), "category", None),
+            disputed=bool(getattr(verdicts.get(name), "needs_review", False)),
+        )
+        for name, count in counts.items()
+    ]
+    return sorted(items, key=lambda i: (-i.total_minor, i.counterparty))
+
+
+def operator_rule(counterparty: str, category: str) -> tuple[str, str, int, str]:
+    """A decision about one counterparty, as a rule.
+
+    Anchored and escaped, because a decision is about *this* name and a loose
+    pattern would claim every other name containing it. Weighted above
+    everything imported so that having decided something by hand is the end of
+    the argument rather than another vote in it.
+    """
+    import re as _re
+
+    return (rf"^{_re.escape(counterparty)}$", category, OPERATOR_WEIGHT, "decided by operator")
+
+
 def coverage(counterparties, rules) -> dict:
     """How much of a ledger the rules actually account for.
 

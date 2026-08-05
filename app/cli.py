@@ -414,6 +414,63 @@ def cmd_rules(args) -> int:
     return 0
 
 
+def cmd_review(args) -> int:
+    """What still needs a person, and a way to answer it.
+
+    Built to be driven by the UI over the API rather than by this command: the
+    ranking and the decision both live in the domain and the repository, and
+    this is the thin caller that proves they work. See architecture §5.2.
+    """
+    from .domain.categories import DEFAULT_CATEGORIES, Rule, operator_rule, review_queue
+    from .pipeline.diagnostics import _money, describe
+
+    config = load_config()
+    repository = build_repository(config)
+    try:
+        check_schema(repository)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
+        repository.seed_categories(context, DEFAULT_CATEGORIES)
+
+        if args.decide:
+            categories = {c["name"].lower(): c["name"] for c in repository.list_categories(context)}
+            chosen = categories.get((args.category or "").lower())
+            if chosen is None:
+                print(f"error: unknown category {args.category!r}", file=sys.stderr)
+                print("  " + ", ".join(sorted(categories.values())), file=sys.stderr)
+                return 2
+            added = repository.add_category_rules(context, [operator_rule(args.decide, chosen)])
+            print(f"{args.decide} -> {chosen}"
+                  f"{'' if added else '   (already decided)'}")
+            print("  Weighted above anything imported: deciding by hand ends the argument.")
+            print("  Run `finstone categorise --apply` to write it through the ledger.")
+            return 0
+
+        rules = [
+            Rule(pattern=r["pattern"], category=r["category"], weight=r["weight"], note=r["note"])
+            for r in repository.list_category_rules(context)
+        ]
+        targets = repository.list_categorisation_targets(context)
+    finally:
+        repository.close()
+
+    queue = review_queue(((t["counterparty_norm"], t["amount_minor"]) for t in targets), rules)
+    outstanding = sum(i.total_minor for i in queue)
+
+    print(f"profile              {args.profile}")
+    print(f"needing a decision   {len(queue)}")
+    print(f"value at stake       {_money(outstanding).strip()}")
+    if queue:
+        head = queue[:args.limit]
+        share = sum(i.total_minor for i in head) / outstanding if outstanding else 0
+        print(f"  the {len(head)} below are {share:.0%} of it\n")
+        print(f"{'counterparty':<44}{'rows':>6}{'total':>14}")
+        for item in head:
+            print(f"{describe(item.counterparty, args.redact)[:43]:<44}"
+                  f"{item.occurrences:>6}{_money(item.total_minor)}")
+        print('\n  finstone review --decide "<counterparty>" --category "<category>"')
+    return 0
+
+
 def cmd_propose(args) -> int:
     """Emit the counterparties worth asking a model about, and nothing else.
 
@@ -1011,6 +1068,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true", help="write the agreed rules")
     p.add_argument("--limit", type=int, default=25, help="disputes to list (default 25)")
     p.set_defaults(func=cmd_rules)
+
+    p = sub.add_parser("review", help="what still needs a person, ranked by value")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
+    p.add_argument("--limit", type=int, default=42, help="entries to list (default 42)")
+    p.add_argument("--redact", action="store_true", help="mask counterparty names")
+    p.add_argument("--decide", metavar="COUNTERPARTY", help="settle one, exactly as listed")
+    p.add_argument("--category", help="the category to settle it as")
+    p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("propose", help="counterparties to ask a model about, sanitised")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
