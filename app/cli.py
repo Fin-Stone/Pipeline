@@ -327,6 +327,60 @@ def cmd_transfers(args) -> int:
     return 0
 
 
+def cmd_categorise(args) -> int:
+    """How much of the ledger the category rules account for, and what is next.
+
+    Reports only. The value early on is not the categories it can assign but
+    the gaps it ranks: the counterparties costing the most coverage are exactly
+    the rules worth writing next, and guessing at that order wastes the effort.
+    """
+    from .domain.categories import DEFAULT_CATEGORIES, Rule, categorise, coverage
+    from .pipeline.diagnostics import _money, describe
+
+    config = load_config()
+    repository = build_repository(config)
+    try:
+        check_schema(repository)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
+        seeded = repository.seed_categories(context, DEFAULT_CATEGORIES)
+        categories = repository.list_categories(context)
+        stored = repository.list_category_rules(context)
+        targets = repository.list_categorisation_targets(context)
+    finally:
+        repository.close()
+
+    rules = [
+        Rule(pattern=r["pattern"], category=r["category"], weight=r["weight"], note=r["note"])
+        for r in stored
+    ]
+    report = coverage([t["counterparty_norm"] or "" for t in targets], rules)
+    spend = {t["id"]: t["amount_minor"] for t in targets}
+
+    print(f"profile              {args.profile}")
+    if seeded:
+        print(f"categories seeded    {seeded}")
+    print(f"categories           {len(categories)}")
+    print(f"rules                {len(rules)}")
+    print(f"spending rows        {report['rows']}   (transfers excluded)")
+    print(f"  categorised        {report['decided']}   ({report['share']:.1%})")
+    print(f"  contested          {report['contested']}")
+    print(f"  unmatched          {report['unmatched']}")
+
+    if report["worst_gaps"]:
+        by_counterparty: dict[str, int] = {}
+        for target in targets:
+            name = target["counterparty_norm"] or ""
+            if categorise(name, rules).rule is None:
+                by_counterparty[name] = by_counterparty.get(name, 0) - target["amount_minor"]
+
+        print(f"\nwrite these rules next   {'rows':>6}{'value':>14}")
+        for name, rows in report["worst_gaps"][:args.limit]:
+            print(f"  {describe(name, args.redact)[:44]:<45}{rows:>6}"
+                  f"{_money(by_counterparty.get(name, 0))}")
+        print("\n  Ranked by how much coverage each would buy, not alphabetically.")
+    return 0
+
+
 def cmd_recurring(args) -> int:
     """The payments that repeat, and what they cost.
 
@@ -746,6 +800,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="every document, to replay history through the current adapters",
     )
     p.set_defaults(func=cmd_reparse)
+
+    p = sub.add_parser("categorise", help="rule coverage, and which rule to write next")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
+    p.add_argument("--limit", type=int, default=20, help="gaps to list (default 20)")
+    p.add_argument("--redact", action="store_true", help="mask counterparty names")
+    p.set_defaults(func=cmd_categorise)
 
     p = sub.add_parser("recurring", help="the payments that repeat, and what they cost")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)

@@ -207,6 +207,42 @@ txn = Table(
 
 Index("ix_txn_account_posted", txn.c.account_id, txn.c.posted_date)
 
+#: The taxonomy, which belongs to the tenant rather than to the schema.
+#:
+#: Rows, not an enum, so a household can rename, split and merge its categories
+#: without a migration. `txn_enrichment.category` keeps the resolved *name* as a
+#: snapshot at the time it was decided, which is what makes reads cheap; a
+#: rename therefore has to rewrite those rows, and that is an operation which
+#: must exist rather than be left to hand-editing.
+category = Table(
+    "category",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("name", String(64), nullable=False),
+    #: Display order. Seeded categories arrive in the order the operator listed
+    #: them, which is not alphabetical and is not arbitrary.
+    Column("position", Integer, nullable=False, server_default="0"),
+    UniqueConstraint("tenant_id", "name", name="uq_category_name"),
+)
+
+#: A pattern and what it means. Referenced by category *id*, so renaming a
+#: category cannot orphan the rules that point at it.
+category_rule = Table(
+    "category_rule",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("category_id", Integer, ForeignKey("category.id"), nullable=False),
+    Column("pattern", Text, nullable=False),
+    #: Breaks a tie between rules that both match. Whose rule wins is a
+    #: preference, not a fact, so it is data rather than declaration order.
+    Column("weight", Integer, nullable=False, server_default="0"),
+    Column("note", Text, nullable=False, server_default=""),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("tenant_id", "pattern", "category_id", name="uq_category_rule"),
+)
+
 #: Two rows proven to be one movement between the household's own accounts.
 #:
 #: Beside the transactions rather than on them. Both rows are facts about what
@@ -307,6 +343,8 @@ TENANT_SCOPED_TABLES = (
     account,
     txn,
     transfer_link,
+    category,
+    category_rule,
     statement_balance,
     txn_enrichment,
     recurrence_series,

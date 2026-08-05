@@ -223,6 +223,79 @@ class SqlAlchemyLedgerRepository:
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
 
+    def seed_categories(self, context: TenantContext, names) -> int:
+        """Give a tenant the default taxonomy, once.
+
+        Idempotent and additive: a category the tenant already has is left
+        alone, including one they renamed. Re-seeding must never undo an
+        operator's edits to their own taxonomy.
+        """
+        with self._engine.begin() as conn:
+            existing = {
+                row[0] for row in conn.execute(
+                    select(schema.category.c.name)
+                    .where(schema.category.c.tenant_id == context.tenant_id)
+                )
+            }
+            missing = [
+                {"tenant_id": context.tenant_id, "name": name, "position": index}
+                for index, name in enumerate(names)
+                if name not in existing
+            ]
+            if missing:
+                conn.execute(schema.category.insert(), missing)
+        return len(missing)
+
+    def list_categories(self, context: TenantContext) -> list[dict]:
+        columns = schema.category.c
+        with self._engine.connect() as conn:
+            return [
+                dict(row._mapping) for row in conn.execute(
+                    select(columns.id, columns.name, columns.position)
+                    .where(columns.tenant_id == context.tenant_id)
+                    .order_by(columns.position, columns.name)
+                )
+            ]
+
+    def list_category_rules(self, context: TenantContext) -> list[dict]:
+        """Rules with the category they resolve to, by id rather than by name.
+
+        Joined here so a rename cannot leave a rule pointing at a category that
+        no longer answers to that name.
+        """
+        rule, cat = schema.category_rule.c, schema.category.c
+        stmt = (
+            select(rule.id, rule.pattern, rule.weight, rule.note, cat.name.label("category"))
+            .select_from(schema.category_rule.join(schema.category, rule.category_id == cat.id))
+            .where(rule.tenant_id == context.tenant_id)
+            .order_by(rule.weight.desc(), rule.id)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def list_categorisation_targets(self, context: TenantContext) -> list[dict]:
+        """Spending rows needing a category, and what they were with.
+
+        Transfers are excluded for the same reason recurrence excludes them:
+        moving money between one's own accounts is not spending, so asking what
+        it was *for* has no answer worth recording.
+        """
+        txn, link = schema.txn.c, schema.transfer_link.c
+        linked = select(link.out_txn_id).where(link.tenant_id == context.tenant_id).union(
+            select(link.in_txn_id).where(link.tenant_id == context.tenant_id)
+        )
+        stmt = (
+            select(txn.id, txn.counterparty_norm, txn.amount_minor, txn.posted_date)
+            .where(
+                (txn.tenant_id == context.tenant_id)
+                & (txn.amount_minor < 0)
+                & txn.id.notin_(linked)
+            )
+            .order_by(txn.posted_date, txn.id)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
     def list_recurrence_candidates(self, context: TenantContext) -> list[dict]:
         """Spending rows that could belong to a series.
 
