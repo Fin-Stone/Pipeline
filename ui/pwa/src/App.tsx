@@ -19,7 +19,7 @@ import Dashboard from "./Dashboard";
 import NetWorthTab from "./NetWorthTab";
 import Recurring from "./Recurring";
 import Review from "./Review";
-import Hidden from "./Hidden";
+import Excluded from "./Excluded";
 import { REQUIRED_API_VERSION, api, forgetServer, profile, serverUrl, setServer } from "./api";
 
 function ServerSetup({ onReady }: { onReady: () => void }) {
@@ -108,7 +108,10 @@ export default function App() {
           <Tab label="Income" />
           <Tab label="Recurring" />
           <Tab label="Review" />
-          <Tab label="Hidden" />
+          {/* Everything taken out of the figures, and the way back from each.
+              Three different actions exclude money and every one of them has to
+              be undoable from somewhere that outlives the click. */}
+          <Tab label="Excluded" />
         </Tabs>
       </AppBar>
       <Container maxWidth="lg" sx={{ py: 2 }}>
@@ -120,7 +123,7 @@ export default function App() {
         {tab === 2 && <Dashboard mode="income" />}
         {tab === 3 && <Recurring />}
         {tab === 4 && <Review />}
-        {tab === 5 && <Hidden />}
+        {tab === 5 && <Excluded />}
       </Container>
     </Box>
   );

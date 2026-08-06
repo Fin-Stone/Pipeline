@@ -1173,6 +1173,93 @@ class SqlAlchemyLedgerRepository:
                 conn.execute(schema.transfer_link.insert(), rows)
         return len(rows)
 
+    def list_manual_transfers(self, context: TenantContext) -> list[dict]:
+        """Rows a person said were transfers, so they can say otherwise later.
+
+        Only `origin='manual'`. The matcher's own links are regenerable and are
+        not decisions anybody has to be able to walk back — but a manual mark
+        removes a row from every figure on one click, and until this existed
+        there was no screen anywhere that could name it again, let alone undo
+        it. An action with no route back is not a feature.
+        """
+        link, txn, account = schema.transfer_link.c, schema.txn.c, schema.account.c
+        stmt = (
+            select(
+                link.id, link.out_txn_id, link.in_txn_id, link.amount_minor,
+                link.evidence, link.linked_at,
+                txn.posted_date, txn.counterparty_norm, txn.amount_minor.label("txn_amount_minor"),
+                account.institution,
+            )
+            .select_from(
+                schema.transfer_link
+                .join(schema.txn, link.out_txn_id == txn.id)
+                .join(schema.account, txn.account_id == account.id)
+            )
+            .where(
+                (link.tenant_id == context.tenant_id) & (link.origin == "manual")
+            )
+            .order_by(txn.posted_date.desc())
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def category_usage(self, context: TenantContext, name: str) -> dict:
+        """How much would break if this category went away."""
+        category, rule, enrichment = (
+            schema.category.c, schema.category_rule.c, schema.txn_enrichment.c,
+        )
+        with self._engine.connect() as conn:
+            category_id = conn.execute(
+                select(category.id).where(
+                    (category.tenant_id == context.tenant_id) & (category.name == name)
+                )
+            ).scalar_one_or_none()
+            if category_id is None:
+                return {"exists": False, "rules": 0, "transactions": 0}
+            return {
+                "exists": True,
+                "rules": conn.execute(
+                    select(func.count()).select_from(schema.category_rule)
+                    .where(
+                        (rule.tenant_id == context.tenant_id)
+                        & (rule.category_id == category_id)
+                    )
+                ).scalar_one(),
+                "transactions": conn.execute(
+                    select(func.count()).select_from(schema.txn_enrichment)
+                    .where(
+                        (enrichment.tenant_id == context.tenant_id)
+                        & (enrichment.category == name)
+                    )
+                ).scalar_one(),
+            }
+
+    def delete_category(self, context: TenantContext, name: str) -> bool:
+        """Remove a category nothing is using.
+
+        Refuses while anything references it rather than cascading. Deleting a
+        category that rows are filed under would either orphan them or silently
+        re-file them, and neither is something a person can undo — which is the
+        whole reason this exists: adding a category was irreversible without it.
+        """
+        usage = self.category_usage(context, name)
+        if not usage["exists"]:
+            return False
+        if usage["rules"] or usage["transactions"]:
+            raise ValueError(
+                f"{name!r} is in use: {usage['rules']} rule(s) and "
+                f"{usage['transactions']} transaction(s). Re-file those first — "
+                "deleting it would leave them pointing at nothing."
+            )
+        category = schema.category.c
+        with self._engine.begin() as conn:
+            removed = conn.execute(
+                schema.category.delete().where(
+                    (category.tenant_id == context.tenant_id) & (category.name == name)
+                )
+            ).rowcount
+        return bool(removed)
+
     def count_transfer_links(self, context: TenantContext) -> int:
         with self._engine.connect() as conn:
             return conn.execute(

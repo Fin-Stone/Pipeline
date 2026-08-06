@@ -137,6 +137,17 @@ export interface Payback {
   amount_minor: number; note: string; linked_at: string;
   posted_date: string; counterparty_norm: string; institution: string;
 }
+export interface MarkedTransfer {
+  id: number; out_txn_id: number; in_txn_id: number | null;
+  amount_minor: number; txn_amount_minor: number; evidence: string; linked_at: string;
+  posted_date: string; counterparty_norm: string; institution: string;
+}
+export interface MarkedTransfers {
+  marked: MarkedTransfer[]; count: number; total_minor: number;
+}
+export interface CategoryUsage {
+  name: string; exists: boolean; rules: number; transactions: number;
+}
 export interface Candidate {
   id: number; posted_date: string; amount_minor: number; currency: string;
   counterparty_norm: string; description_raw: string;
@@ -207,9 +218,24 @@ export const api = {
   decide: (counterparty: string, category: string) =>
     call<{ created: boolean }>("/review/decide", { counterparty, category }, { method: "POST" }),
 
-  paybacks: (expense_txn_id: number) =>
+  markedTransfers: () => call<MarkedTransfers>("/transfers/marked"),
+  unmarkTransfer: (txn_id: number) =>
+    call<{ unmarked: boolean }>(`/transfers/mark/${txn_id}`, {}, { method: "DELETE" }),
+  deleteCategory: (name: string) =>
+    call<{ deleted: boolean }>(
+      `/categories/${encodeURIComponent(name)}`, {}, { method: "DELETE" },
+    ),
+  categoryUsage: (name: string) =>
+    call<CategoryUsage>(`/categories/${encodeURIComponent(name)}/usage`),
+
+  /** Omit `expense_txn_id` for every link in the ledger. */
+  paybacks: (expense_txn_id?: number) =>
     call<{ paybacks: Payback[]; count: number; total_minor: number }>(
       "/paybacks", { expense_txn_id },
+    ),
+  unlinkPayback: (expense_txn_id: number, income_txn_id: number) =>
+    call<{ unlinked: number }>(
+      `/paybacks/${expense_txn_id}`, { income_txn_id }, { method: "DELETE" },
     ),
   paybackCandidates: (expense_txn_id: number, q?: string, days?: number) =>
     call<{ candidates: Candidate[]; count: number }>(

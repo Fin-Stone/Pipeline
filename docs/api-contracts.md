@@ -37,6 +37,29 @@ entitled to `typeof === "number"` on every `_minor` field.
 money in is positive, and card balances are stored negated so one formula
 covers both. The API does not flip signs for presentation.
 
+**2a. Every action a person can take is reversible, and can be found again
+later.** Not a courtesy — a design constraint on this API. Anything that changes
+a figure must have both an inverse route *and* a listing route, because an undo
+nobody can reach is not an undo:
+
+| Action | Inverse | Where it can be found |
+|---|---|---|
+| `POST /hidden` | `DELETE /hidden/{txn_id}` | `GET /hidden` |
+| `POST /transfers/mark` | `DELETE /transfers/mark/{txn_id}` | `GET /transfers/marked` |
+| `POST /paybacks` | `DELETE /paybacks/{expense_txn_id}` | `GET /paybacks` |
+| `POST /transactions/{id}/category` | `DELETE …/category`, or post another | `GET /transactions` |
+| `POST /categories` | `DELETE /categories/{name}` | `GET /categories` |
+
+**A new endpoint that changes a figure must add a row to that table.** Marking a
+transfer had the inverse and not the listing for a while: the row vanished from
+every screen, the totals moved, and nothing in any client could name it again.
+It was undoable in principle and unreachable in practice, which is the failure
+mode this rule exists to catch.
+
+Where the reverse would destroy something — deleting a category that
+transactions are filed under — the API **refuses and says how much is in the
+way**, rather than cascading. A cascade is the one thing a person cannot undo.
+
 **3. Every figure is derivable from `(date range, accounts, categories)`.**
 There are no precomputed per-month aggregates, because §5.1(B) requires the
 dashboard to re-range and re-filter on demand. Any endpoint that reports
@@ -383,6 +406,26 @@ Marked links carry `origin: "manual"` and **survive a re-run of the matcher**,
 which rebuilds only what it found itself. `marked` is `false` if the row is
 already part of a link.
 
+### `GET /api/v1/transfers/marked`
+
+```json
+{ "marked": [{ "id": 4, "out_txn_id": 16964, "in_txn_id": null,
+               "amount_minor": 10000, "txn_amount_minor": -10000,
+               "evidence": "operator", "linked_at": "...",
+               "posted_date": "2026-07-30", "counterparty_norm": "...",
+               "institution": "DBS" }],
+  "count": 1, "total_minor": -10000 }
+```
+
+**Manual marks only.** The matcher's own links are regenerable and are not
+anybody's decision, so offering to undo one would promise something the next
+run takes straight back.
+
+This exists so a client can offer a way back. `DELETE` had been available from
+the start and nothing could list what there was to delete — the row simply
+disappeared from every screen and the totals moved. Undoable in principle,
+unreachable in practice.
+
 ### `DELETE /api/v1/transfers/mark/{txn_id}`
 
 `{ "unmarked": true }`. Removes an operator's mark only; the matcher's own
@@ -502,6 +545,27 @@ rate.
 
 `201 { "name": "Gifts", "created": true }`. `409` if it already exists, `422`
 if the name is blank. The taxonomy is the tenant's to shape.
+
+### `DELETE /api/v1/categories/{name}`
+
+`{ "deleted": true }`, `404` if there is no such category.
+
+**`409` while anything still references it**, with the counts in the message.
+It does not cascade: deleting a category that transactions are filed under would
+either orphan them or silently re-file them, and neither is something a person
+can undo. Re-filing first is the operator's decision, and the refusal says how
+much there is to re-file.
+
+This endpoint is why adding a category is a safe thing to try.
+
+### `GET /api/v1/categories/{name}/usage`
+
+```json
+{ "name": "Gifts", "exists": true, "rules": 2, "transactions": 47 }
+```
+
+So a client can grey out a delete and say why, rather than offering it and
+returning a 409.
 
 ### `POST /api/v1/transactions/{txn_id}/category?category=`
 

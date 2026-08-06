@@ -519,6 +519,23 @@ def mark_transfer(
     return {"txn_id": txn_id, "counterpart_id": counterpart_id, "marked": marked}
 
 
+@app.get(f"{PREFIX}/transfers/marked", tags=["ledger"])
+def marked_transfers(handle: Session) -> dict:
+    """Rows a person said were transfers, so they can say otherwise later.
+
+    Only manual marks. The matcher's own links are regenerable and are not
+    decisions anybody has to walk back — but a manual mark takes a row out of
+    every figure on one click, and a client that cannot list them cannot offer
+    a way back. An action with no route back is not a feature.
+    """
+    rows = handle.repository.list_manual_transfers(handle.context)
+    return {
+        "marked": rows,
+        "count": len(rows),
+        "total_minor": sum(r["txn_amount_minor"] for r in rows),
+    }
+
+
 @app.delete(f"{PREFIX}/transfers/mark/{{txn_id}}", tags=["ledger"])
 def unmark_transfer(handle: Session, txn_id: int) -> dict:
     """Undo an operator's mark. The matcher's own links are untouched."""
@@ -663,6 +680,33 @@ def add_category(handle: Session, name: str) -> dict:
         raise HTTPException(status_code=409, detail={"error": "category already exists"})
     handle.repository.add_category(handle.context, cleaned)
     return {"name": cleaned, "created": True}
+
+
+@app.delete(f"{PREFIX}/categories/{{name}}", tags=["categorisation"])
+def delete_category(handle: Session, name: str) -> dict:
+    """Remove a category nothing is using.
+
+    Exists so that adding one is reversible. It refuses while any rule or
+    transaction still references it, rather than cascading: deleting a category
+    that rows are filed under would either orphan them or silently re-file them,
+    and neither is something a person can undo.
+
+    Re-filing first is the operator's call, and the refusal says how much there
+    is to re-file.
+    """
+    try:
+        removed = handle.repository.delete_category(handle.context, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"no category {name!r}")
+    return {"name": name, "deleted": True}
+
+
+@app.get(f"{PREFIX}/categories/{{name}}/usage", tags=["categorisation"])
+def category_usage(handle: Session, name: str) -> dict:
+    """What references a category, so a client can say whether it can go."""
+    return {"name": name, **handle.repository.category_usage(handle.context, name)}
 
 
 @app.post(f"{PREFIX}/transactions/{{txn_id}}/category", tags=["categorisation"])

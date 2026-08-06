@@ -13,8 +13,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Alert, Box, Card, CardContent, Chip, CircularProgress, Divider,
-  FormControl, Grid, InputLabel, LinearProgress, MenuItem, Select, Stack,
-  TextField, ToggleButton, ToggleButtonGroup, Typography,
+  FormControl, Grid, InputLabel, LinearProgress, MenuItem, Select, Snackbar,
+  Stack, TextField, ToggleButton, ToggleButtonGroup, Typography,
 } from "@mui/material";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import UndoIcon from "@mui/icons-material/Undo";
@@ -95,6 +95,9 @@ export default function Dashboard({ mode }: { mode: Mode }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloads, setReloads] = useState(0);
+  const [undoable, setUndoable] = useState<
+    { message: string; undo: () => Promise<unknown> } | null
+  >(null);
 
   useEffect(() => {
     // The taxonomy is tenant data. It is fetched, never hardcoded, because a
@@ -141,20 +144,63 @@ export default function Dashboard({ mode }: { mode: Mode }) {
   }
 
   async function recategorise(id: number, name: string) {
-    await api.setCategory(id, name);
-    // Marked source 'human' server-side, which the rule pass will not overwrite.
-    setTxns((t) => t.map((x) => (x.id === id ? { ...x, category: name, source: "human" } : x)));
+    const row = txns.find((t) => t.id === id);
+    const was = row?.category ?? null;
+    const wasHuman = row?.source === "human";
+
+    if (name === "") {
+      // Back to uncategorised, which the automatic pass may then speak about
+      // again. Without this, a correction could be changed but never taken
+      // back, and "I should not have touched that one" had no answer.
+      await api.clearCategory(id);
+      setTxns((t) => t.map((x) => (x.id === id ? { ...x, category: null, source: null } : x)));
+    } else {
+      // Marked source 'human' server-side, which the rule pass will not overwrite.
+      await api.setCategory(id, name);
+      setTxns((t) => t.map((x) => (x.id === id ? { ...x, category: name, source: "human" } : x)));
+    }
+    reload();
+
+    offerUndo(
+      name === "" ? "Category cleared" : `Filed under ${name}`,
+      async () => {
+        // Restores what was there, including the fact that nothing was.
+        if (was === null || !wasHuman) await api.clearCategory(id);
+        else await api.setCategory(id, was);
+        setTxns((t) => t.map((x) => (
+          x.id === id ? { ...x, category: was, source: wasHuman ? "human" : null } : x
+        )));
+        reload();
+      },
+    );
   }
 
   async function addCategory() {
     const name = window.prompt("New category name");
     if (!name?.trim()) return;
+    const cleaned = name.trim();
     try {
-      await api.addCategory(name.trim());
+      await api.addCategory(cleaned);
       setCategories((await api.categories()).categories);
+      // Removable while nothing uses it, which is what makes adding one safe
+      // to try. The server refuses once anything references it.
+      offerUndo(`Added ${cleaned}`, async () => {
+        await api.deleteCategory(cleaned);
+        setCategories((await api.categories()).categories);
+      });
     } catch (e) {
       setError(String(e instanceof ApiError ? e.detail : e));
     }
+  }
+
+  /** Every figure-changing action offers the way back immediately.
+   *
+   *  These buttons sit inches apart on a dense list, so the misclick is the
+   *  normal case rather than the exotic one. The Excluded tab is the durable
+   *  route back; this is the one for the half-second after, when the row has
+   *  just vanished and the person still remembers what they meant to press. */
+  function offerUndo(message: string, undo: () => Promise<unknown>) {
+    setUndoable({ message, undo });
   }
 
   async function markTransfer(id: number) {
@@ -163,7 +209,11 @@ export default function Dashboard({ mode }: { mode: Mode }) {
     // figure, and it survives a re-run of the matcher because a person decided.
     await api.markTransfer(id);
     setTxns((t) => t.filter((x) => x.id !== id));
-    setMuted((m) => [...m]); // re-fetch totals with the new exclusion in place
+    reload();
+    offerUndo("Marked as a transfer", async () => {
+      await api.unmarkTransfer(id);
+      reload();
+    });
   }
 
   async function hideForGood(id: number) {
@@ -172,6 +222,11 @@ export default function Dashboard({ mode }: { mode: Mode }) {
     // reappear the moment the persistent hide were undone.
     setMuted((m) => m.filter((x) => x !== id));
     setTxns((t) => t.filter((x) => x.id !== id));
+    reload();
+    offerUndo("Hidden from every figure", async () => {
+      await api.unhide(id);
+      reload();
+    });
   }
 
   const breakdown = useMemo(
@@ -411,7 +466,11 @@ export default function Dashboard({ mode }: { mode: Mode }) {
                         onChange={(e) => recategorise(t.id, e.target.value)}
                         sx={{ fontSize: 12, minWidth: 130 }}
                       >
-                        <MenuItem value="" disabled>uncategorised</MenuItem>
+                        {/* Selectable, not just a placeholder: a correction you
+                            can make but never take back is not a correction. */}
+                        <MenuItem value="">
+                          <em>uncategorised</em>
+                        </MenuItem>
                         {categories.map((c) => (
                           <MenuItem key={c.id} value={c.name}>{c.name}</MenuItem>
                         ))}
@@ -432,14 +491,6 @@ export default function Dashboard({ mode }: { mode: Mode }) {
           </List>
         </CardContent>
       </Card>
-
-      {linking && (
-        <PaybackDialog
-          charge={linking}
-          onClose={() => setLinking(null)}
-          onLinked={reload}
-        />
-      )}
 
       <Card variant="outlined">
         <CardContent>
@@ -480,6 +531,37 @@ export default function Dashboard({ mode }: { mode: Mode }) {
           </Stack>
         </CardContent>
       </Card>
+
+      {linking && (
+        <PaybackDialog
+          charge={linking}
+          onClose={() => setLinking(null)}
+          onLinked={(message, undo) => { reload(); offerUndo(message, undo); }}
+        />
+      )}
+
+      {/* The way back from the click just made. The Excluded tab is the durable
+          route; this is the one for the moment the row disappears and the
+          person still remembers what they meant to press. */}
+      <Snackbar
+        open={undoable !== null}
+        autoHideDuration={10000}
+        onClose={() => setUndoable(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        message={undoable?.message}
+        action={
+          <Button
+            size="small" color="secondary"
+            onClick={async () => {
+              const pending = undoable;
+              setUndoable(null);
+              if (pending) await pending.undo();
+            }}
+          >
+            Undo
+          </Button>
+        }
+      />
     </Stack>
   );
 }

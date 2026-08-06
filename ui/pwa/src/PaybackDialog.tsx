@@ -21,7 +21,9 @@ import { money } from "./money";
 export default function PaybackDialog({ charge, onClose, onLinked }: {
   charge: Txn;
   onClose: () => void;
-  onLinked: () => void;
+  /** Reports what happened and how to take it back, so the caller can offer an
+   *  undo. Every action that moves a figure has to have one. */
+  onLinked: (message: string, undo: () => Promise<unknown>) => void;
 }) {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [linked, setLinked] = useState<Payback[]>([]);
@@ -58,9 +60,15 @@ export default function PaybackDialog({ charge, onClose, onLinked }: {
 
   async function link() {
     setBusy(true); setError(null);
+    const linking = [...picked];
     try {
-      await api.linkPaybacks(charge.id, picked);
-      onLinked();
+      await api.linkPaybacks(charge.id, linking);
+      // Undoing removes exactly what this call added, not every payback on the
+      // charge — anything linked earlier was a separate decision.
+      onLinked(
+        `${linking.length} payback${linking.length === 1 ? "" : "s"} linked`,
+        () => Promise.all(linking.map((id) => api.unlinkPayback(charge.id, id))),
+      );
       onClose();
     } catch (e) {
       setError(String(e instanceof ApiError ? e.detail : e));
@@ -69,9 +77,13 @@ export default function PaybackDialog({ charge, onClose, onLinked }: {
 
   async function unlinkAll() {
     setBusy(true); setError(null);
+    const restoring = linked.map((p) => p.income_txn_id);
     try {
       await api.unlinkPaybacks(charge.id);
-      onLinked();
+      onLinked(
+        "Paybacks unlinked",
+        () => api.linkPaybacks(charge.id, restoring),
+      );
       onClose();
     } catch (e) {
       setError(String(e instanceof ApiError ? e.detail : e));
