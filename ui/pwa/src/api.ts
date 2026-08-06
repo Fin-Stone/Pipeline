@@ -98,9 +98,20 @@ export interface Recurring {
 export interface ReviewItem { counterparty: string; occurrences: number; total_minor: number }
 export interface Review { outstanding: number; value_at_stake_minor: number; items: ReviewItem[] }
 
-export interface TrendPoint { period: string; total_minor: number; rows: number }
+export type Direction = "out" | "in" | "net";
+
+export interface TrendPoint {
+  period: string; rows: number;
+  out_minor: number; in_minor: number; net_minor: number;
+  total_minor: number;
+  rolling: { out_minor: number; in_minor: number; net_minor: number };
+  /** How many buckets this point's average actually covered. Below the full
+   *  window the line is still settling and should be marked as such. */
+  rolling_of: number;
+}
 export interface Trend {
   currency: string; bucket: "day" | "week" | "month";
+  rolling_window: number;
   range: { since: string | null; until: string | null; days: number | null };
   points: TrendPoint[];
   /** Both, because the gap between them is the information: a mean well below
@@ -144,10 +155,11 @@ export const api = {
   health: () => call<Health>("/health"),
   accounts: () => call<{ accounts: Account[] }>("/accounts"),
   categories: () => call<{ categories: Category[] }>("/categories"),
-  summary: (f: Filters) => call<Summary>("/summary", f),
+  summary: (f: Filters, direction: Direction = "out") =>
+    call<Summary>("/summary", { ...f, direction }),
   trend: (f: Filters) => call<Trend>("/trend", f),
-  transactions: (f: Filters, limit = 100) =>
-    call<{ transactions: Txn[] }>("/transactions", { ...f, limit }),
+  transactions: (f: Filters, limit = 100, direction: Direction = "out") =>
+    call<{ transactions: Txn[] }>("/transactions", { ...f, limit, direction }),
   hidden: () => call<Hidden>("/hidden"),
   hide: (txn_id: number, note = "") =>
     call<{ hidden: boolean }>("/hidden", { txn_id, note }, { method: "POST" }),

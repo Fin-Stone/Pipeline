@@ -34,7 +34,7 @@ from ..domain.categories import DEFAULT_CATEGORIES, Rule, operator_rule, review_
 from ..domain.networth import Declared, change, net_worth
 from ..domain.recurrence import Occurrence, find_series
 from ..storage.factory import build_repository
-from ..storage.sqlalchemy_repo import choose_bucket, trend_centre
+from ..storage.sqlalchemy_repo import choose_bucket, rolling_window, trend_centre
 
 API_VERSION = "v1"
 PREFIX = f"/api/{API_VERSION}"
@@ -179,15 +179,26 @@ def categories(handle: Session) -> dict:
     return {"categories": handle.repository.list_categories(handle.context)}
 
 
+Direction = Annotated[
+    str,
+    Query(
+        pattern="^(out|in|net)$",
+        description="out = spending, in = money received, net = both together",
+    ),
+]
+
+
 @app.get(f"{PREFIX}/summary", tags=["dashboard"])
-def summary(handle: Session, filters: Filters) -> dict:
+def summary(handle: Session, filters: Filters, direction: Direction = "out") -> dict:
     """Spending by category, plus the per-month, per-week and per-day averages.
 
     The averages span **the same range as the totals**. Computing them over a
     different window is how two halves of one screen come to describe different
     periods — see §5.1(A).
     """
-    rows = handle.repository.spending_summary(handle.context, **filters)
+    rows = handle.repository.spending_summary(
+        handle.context, direction=direction, **filters
+    )
     total = sum(r["total_minor"] or 0 for r in rows)
 
     since, until = filters["since"], filters["until"]
@@ -195,6 +206,7 @@ def summary(handle: Session, filters: Filters) -> dict:
 
     return {
         "currency": "SGD",
+        "direction": direction,
         "range": {"since": since, "until": until, "days": days},
         "total_minor": total,
         "by_category": sorted(
@@ -225,13 +237,20 @@ def trend(
     bucket: Annotated[
         str, Query(pattern="^(auto|day|week|month)$", description="Bar width")
     ] = "auto",
+    rolling: Annotated[
+        int, Query(ge=0, le=24, description="Trailing buckets; 0 chooses by width")
+    ] = 0,
 ) -> dict:
-    """Spending per period, for the bar chart.
+    """Money per period, for the bar chart.
 
     Bar width follows the range rather than a fixed count: days at a fortnight
     or less, weeks up to a year, months beyond. A year of daily bars is
     unreadable and a fortnight of monthly ones is a single block, so the
     granularity is a property of the question being asked.
+
+    `direction` is deliberately absent: every point carries out, in and net, so
+    a client switching the chart between them redraws rather than re-fetches
+    and cannot end up comparing two differently bucketed series.
 
     Filters are the same as everywhere else, so the chart can be narrowed to a
     bank or a category without a second endpoint.
@@ -240,15 +259,26 @@ def trend(
     days = ((until - since).days + 1) if since and until else None
     chosen = choose_bucket(days) if bucket == "auto" else bucket
 
-    points = handle.repository.spending_trend(handle.context, bucket=chosen, **filters)
+    # Resolved here rather than read back off the points: an empty range has no
+    # points to read, and a short one reaches only a partial window. Either way
+    # a client still has to label the line, and inferring the rule from the data
+    # is how the label comes to disagree with the line above it.
+    window = rolling or rolling_window(chosen)
+    points = handle.repository.spending_trend(
+        handle.context, bucket=chosen, rolling=window, **filters
+    )
     return {
         "currency": "SGD",
         "bucket": chosen,
+        "rolling_window": window,
         "range": {"since": since, "until": until, "days": days},
+        # Each point carries out, in and net, so one call serves the spending
+        # chart, the income chart and the net one without three chances for the
+        # filters to drift apart.
         "points": points,
-        # Both, because the gap between them is the information. A household's
-        # spending is not symmetric, and where the mean sits well below the
-        # median it is being carried by a few large one-offs.
+        # Mean and median both, because the gap between them is the
+        # information: a mean well away from the median is being carried by a
+        # few large one-offs.
         "centre": trend_centre(points),
     }
 
@@ -288,12 +318,13 @@ def unhide(handle: Session, txn_id: int) -> dict:
 def transactions(
     handle: Session,
     filters: Filters,
+    direction: Direction = "out",
     limit: Annotated[int, Query(le=1000)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
-    """Spending rows, newest first. Transfers are already excluded."""
+    """Transactions, newest first. Transfers and hidden rows already excluded."""
     rows = handle.repository.list_spending(
-        handle.context, limit=limit, offset=offset, **filters
+        handle.context, direction=direction, limit=limit, offset=offset, **filters
     )
     return {"transactions": rows, "limit": limit, "offset": offset}
 

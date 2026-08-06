@@ -104,6 +104,31 @@ class TestFilters:
         assert body["limit"] == 5 and body["offset"] == 0
         assert isinstance(body["transactions"], list)
 
+    @pytest.mark.parametrize("direction", ["out", "in", "net"])
+    def test_every_direction_is_accepted_on_both(self, client, direction):
+        for path in ("/summary", "/transactions"):
+            response = client.get(
+                f"{PREFIX}{path}", params={"profile": "dummy", "direction": direction}
+            )
+            assert response.status_code == 200, path
+
+    def test_an_unknown_direction_is_refused_not_defaulted(self, client):
+        """Silently falling back to spending would show a client asking for
+        income a screen full of negatives that looked like an answer."""
+        response = client.get(
+            f"{PREFIX}/summary", params={"profile": "dummy", "direction": "profit"}
+        )
+        assert response.status_code == 422
+
+    def test_omitting_direction_means_spending(self, client):
+        """The parameter was added after clients existed. Older ones send
+        nothing and must keep getting the screen they were written for."""
+        plain = client.get(f"{PREFIX}/summary", params={"profile": "dummy"}).json()
+        explicit = client.get(
+            f"{PREFIX}/summary", params={"profile": "dummy", "direction": "out"}
+        ).json()
+        assert plain["total_minor"] == explicit["total_minor"]
+
 
 class TestDeciding:
     def test_an_unknown_category_is_refused_with_the_known_ones(self, client):
@@ -129,6 +154,30 @@ class TestDeciding:
         client.post(f"{PREFIX}/review/decide", params=params)
         again = client.post(f"{PREFIX}/review/decide", params=params).json()
         assert again["created"] is False
+
+
+class TestTrend:
+    def test_the_response_says_what_window_the_line_used(self, client):
+        """A client labels the line from this. Deriving it client-side would
+        put the rule in two places and let them disagree."""
+        body = client.get(
+            f"{PREFIX}/trend", params={"profile": "dummy", "bucket": "month"}
+        ).json()
+        assert body["rolling_window"] >= 1
+        assert body["bucket"] == "month"
+
+    def test_a_point_carries_all_three_directions(self, client):
+        """`direction` is deliberately not a trend parameter: switching the
+        chart between spending, income and net must not re-fetch and risk two
+        series bucketed differently."""
+        body = client.get(
+            f"{PREFIX}/trend", params={"profile": "dummy", "bucket": "month"}
+        ).json()
+        for point in body["points"]:
+            assert {"out_minor", "in_minor", "net_minor"} <= set(point)
+            assert point["net_minor"] == point["out_minor"] + point["in_minor"]
+            assert set(point["rolling"]) == {"out_minor", "in_minor", "net_minor"}
+            assert 1 <= point["rolling_of"] <= body["rolling_window"]
 
 
 class TestShape:

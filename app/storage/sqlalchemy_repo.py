@@ -391,7 +391,7 @@ class SqlAlchemyLedgerRepository:
 
         return {"written": len(rows), "replaced": removed or 0, "left_to_humans": human}
 
-    def _spending_base(self, context: TenantContext, *, exclude_txn_ids=None):
+    def _spending_base(self, context: TenantContext, *, exclude_txn_ids=None, direction="out"):
         """The predicate every spending figure shares.
 
         One place, because a total, a trend bucket and a transaction list that
@@ -417,10 +417,17 @@ class SqlAlchemyLedgerRepository:
 
         where = (
             (txn.tenant_id == context.tenant_id)
-            & (txn.amount_minor < 0)
             & txn.id.notin_(linked)
             & txn.id.notin_(put_away)
         )
+        # Direction is a parameter, not a constant, because the household wants
+        # to know what it earned as well as what it spent — and the net of the
+        # two, which is the only one of the three that is robust to a refund
+        # being counted as income rather than as negative spending.
+        if direction == "out":
+            where = where & (txn.amount_minor < 0)
+        elif direction == "in":
+            where = where & (txn.amount_minor > 0)
         if exclude_txn_ids:
             where = where & txn.id.notin_(list(exclude_txn_ids))
         return where
@@ -477,7 +484,7 @@ class SqlAlchemyLedgerRepository:
 
     def spending_trend(
         self, context: TenantContext, *, bucket: str, since=None, until=None,
-        account_ids=None, categories=None, exclude_txn_ids=None,
+        account_ids=None, categories=None, exclude_txn_ids=None, rolling: int = 0,
     ) -> list[dict]:
         """Spending totalled per period.
 
@@ -489,7 +496,12 @@ class SqlAlchemyLedgerRepository:
         txn = schema.txn.c
         stmt = (
             select(txn.posted_date, txn.amount_minor)
-            .where(self._spending_base(context, exclude_txn_ids=exclude_txn_ids))
+            # Both directions in one pass: a bucket needs what went out, what
+            # came in, and the net, and three queries would be three chances
+            # for the filters to drift apart.
+            .where(self._spending_base(
+                context, exclude_txn_ids=exclude_txn_ids, direction="net",
+            ))
         )
         if since is not None:
             stmt = stmt.where(txn.posted_date >= since)
@@ -508,7 +520,7 @@ class SqlAlchemyLedgerRepository:
 
         with self._engine.connect() as conn:
             rows = [(r[0], r[1]) for r in conn.execute(stmt)]
-        return _bucket(rows, bucket)
+        return _rolling(_bucket(rows, bucket), rolling or rolling_window(bucket))
 
     def balance_history(self, context: TenantContext, *, since=None) -> list[dict]:
         """Every closing balance a statement declared, with the date it closed.
@@ -573,6 +585,7 @@ class SqlAlchemyLedgerRepository:
         account_ids=None,
         categories=None,
         exclude_txn_ids=None,
+        direction: str = "out",
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict]:
@@ -606,7 +619,9 @@ class SqlAlchemyLedgerRepository:
                     & (enrichment.tenant_id == context.tenant_id),
                 )
             )
-            .where(self._spending_base(context, exclude_txn_ids=exclude_txn_ids))
+            .where(self._spending_base(
+                context, exclude_txn_ids=exclude_txn_ids, direction=direction,
+            ))
             .order_by(txn.posted_date.desc(), txn.id.desc())
         )
         if since is not None:
@@ -624,7 +639,7 @@ class SqlAlchemyLedgerRepository:
 
     def spending_summary(
         self, context: TenantContext, *, since=None, until=None,
-        account_ids=None, categories=None, exclude_txn_ids=None,
+        account_ids=None, categories=None, exclude_txn_ids=None, direction="out",
     ) -> list[dict]:
         """Totals per category over the same filters, for the headline figures."""
         txn, enrichment = schema.txn.c, schema.txn_enrichment.c
@@ -641,7 +656,9 @@ class SqlAlchemyLedgerRepository:
                     & (enrichment.tenant_id == context.tenant_id),
                 )
             )
-            .where(self._spending_base(context, exclude_txn_ids=exclude_txn_ids))
+            .where(self._spending_base(
+                context, exclude_txn_ids=exclude_txn_ids, direction=direction,
+            ))
             .group_by(enrichment.category)
         )
         if since is not None:
@@ -1168,23 +1185,76 @@ def trend_centre(points: list[dict]) -> dict:
     }
 
 
+def rolling_window(bucket: str) -> int:
+    """How many buckets a trailing average covers.
+
+    Roughly a season in each case: a quarter of months, a month of weeks, a
+    week of days. Short enough to still move, long enough that one large
+    purchase does not make the line say "trending up".
+    """
+    return {"day": 7, "week": 4, "month": 3}.get(bucket, 3)
+
+
 def _bucket(rows, bucket: str) -> list[dict]:
-    """Total per period.
+    """Out, in and net per period.
+
+    All three from one pass. A household wants to know what it earned as well
+    as what it spent, and the net is the only one of the three that survives a
+    refund being counted as income rather than as negative spending — the two
+    halves are each slightly wrong in ways that cancel.
 
     Bucketed in Python rather than SQL because date truncation is the most
     dialect-specific thing either engine does, and Rule 1's seam is worth more
     than the milliseconds at a household's volume.
     """
-    totals: dict = {}
+    out: dict = {}
+    into: dict = {}
     counts: dict = {}
     for day, amount_minor in rows:
         start = _bucket_start(day, bucket)
-        totals[start] = totals.get(start, 0) + amount_minor
         counts[start] = counts.get(start, 0) + 1
+        if amount_minor < 0:
+            out[start] = out.get(start, 0) + amount_minor
+        else:
+            into[start] = into.get(start, 0) + amount_minor
+
+    periods = sorted(set(out) | set(into))
     return [
-        {"period": start, "total_minor": totals[start], "rows": counts[start]}
-        for start in sorted(totals)
+        {
+            "period": start,
+            "out_minor": out.get(start, 0),
+            "in_minor": into.get(start, 0),
+            "net_minor": out.get(start, 0) + into.get(start, 0),
+            "rows": counts.get(start, 0),
+            # Kept so existing callers reading a spending trend still work.
+            "total_minor": out.get(start, 0),
+        }
+        for start in periods
     ]
+
+
+def _rolling(points: list[dict], window: int) -> list[dict]:
+    """A trailing average on each measure.
+
+    Trailing rather than centred: a centred average needs periods that have not
+    happened yet, and the question being asked is whether things are heading up
+    *now*. Early points average over fewer buckets rather than being omitted,
+    and `rolling_of` says how many, so a client can mark the stretch where the
+    line is not yet on its full window.
+    """
+    result = []
+    for index, point in enumerate(points):
+        span = points[max(0, index - window + 1): index + 1]
+        result.append({
+            **point,
+            "rolling": {
+                "out_minor": round(sum(p["out_minor"] for p in span) / len(span)),
+                "in_minor": round(sum(p["in_minor"] for p in span) / len(span)),
+                "net_minor": round(sum(p["net_minor"] for p in span) / len(span)),
+            },
+            "rolling_of": len(span),
+        })
+    return result
 
 
 def _account_key(record: AccountRecord) -> tuple:

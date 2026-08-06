@@ -65,6 +65,19 @@ unbounded.
 | `account_id` | int | Repeatable: `?account_id=1&account_id=2` |
 | `category` | string | Repeatable |
 | `exclude_txn_id` | int | Repeatable. Hidden for this request only. |
+| `direction` | `out` \| `in` \| `net` | Which side of zero. Defaults to `out`. |
+
+**`direction` selects a side, it does not change the sign convention.** `out`
+keeps only rows below zero and `in` only rows above; `net` keeps both and
+therefore sums to what the household actually kept. Amounts stay signed as
+stored in every case, so an `in` total is positive and an `out` total is
+negative, and a `net` total may be either. A client must not take absolute
+values to make them agree — a household that spent more than it earned needs to
+see the minus.
+
+Whatever `direction` is passed, transfers between the household's own accounts
+and persistently hidden rows are excluded first. `net` means net of the outside
+world, not net of every row in the ledger.
 
 **`exclude_txn_id` is what makes session-level hiding real.** A client that
 merely dropped rows from a list would leave the totals, averages and trend
@@ -120,6 +133,7 @@ The consolidated view behind §5.1(A).
 ```json
 {
   "currency": "SGD",
+  "direction": "out",
   "range": { "since": "2026-01-01", "until": "2026-01-31", "days": 31 },
   "total_minor": -123456,
   "by_category": [{ "category": "Grocery", "rows": 42, "total_minor": -50000 }],
@@ -138,9 +152,16 @@ client must render that as "—" and not as zero.
 `category` is `null` for rows nothing has categorised yet. That bucket is
 meant to be visible: a large one means the rules are behind.
 
+`direction` is echoed back so a client rendering two of these side by side can
+tell which is which without tracking it separately. Under `direction=net`,
+`by_category` holds a category's *net* position, which may be either sign — a
+category that received a refund larger than its spending is a positive row, and
+that is the truth about it, not an error to be filtered out.
+
 ### `GET /api/v1/transactions`
 
-Spending rows, newest first, with `limit` (≤1000, default 200) and `offset`.
+Rows on the requested side of zero, newest first, with `limit` (≤1000, default
+200) and `offset`.
 Each row carries `id`, `posted_date`, `amount_minor`, `currency`,
 `counterparty_norm`, `account_id`, `institution`, `account_ref_masked`,
 `category`, `source`.
@@ -151,24 +172,60 @@ what they corrected.
 
 ### `GET /api/v1/trend`
 
-Spending per period, for the bar chart. Takes every filter above, plus
-`bucket` = `auto` (default) | `day` | `week` | `month`.
+Money per period, for the bar chart. Takes every filter above except
+`direction`, plus:
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `bucket` | `auto` (default) \| `day` \| `week` \| `month` | Bar width |
+| `rolling` | int | Trailing-average window, in buckets. Omit for the default. |
 
 ```json
-{ "currency": "SGD", "bucket": "week",
-  "range": { "since": "2026-05-07", "until": "2026-08-04", "days": 90 },
-  "points": [{ "period": "2026-05-04", "total_minor": -112590, "rows": 29 }] }
+{ "currency": "SGD", "bucket": "month", "rolling_window": 3,
+  "range": { "since": "2025-08-06", "until": "2026-08-05", "days": 365 },
+  "points": [{
+    "period": "2026-07-01", "rows": 412,
+    "out_minor": -499012, "in_minor": 1240433, "net_minor": 741421,
+    "total_minor": -499012,
+    "rolling": { "out_minor": -1183441, "in_minor": 1215502, "net_minor": 32061 },
+    "rolling_of": 3
+  }] }
 ```
+
+**A point carries all three directions, not one.** `direction` is deliberately
+not a trend parameter: spending, income and net are the same periods measured
+three ways, and a client switching between them should not have to re-fetch and
+risk drawing two series bucketed differently. `total_minor` is `out_minor` and
+exists only so clients written against the older shape keep working; new code
+should read the named field.
 
 **Bar width follows the range, not a fixed count.** `auto` chooses days at 14
 days or fewer, weeks below a year, months beyond — a year of daily bars is
 unreadable and a fortnight of monthly ones is a single block. `period` is the
 first day of the bucket; weeks start Monday.
 
-Periods with no spending are **absent** rather than zero. A client drawing a
+Periods with no activity are **absent** rather than zero. A client drawing a
 continuous axis fills the gaps itself.
 
-`centre` accompanies the points:
+#### The rolling average
+
+`rolling` is a **trailing** mean over the last `rolling_window` buckets,
+inclusive of the point itself. Trailing, not centred: a centred window needs
+periods that have not happened yet, and the question the line answers is whether
+the household is heading up or down *now*.
+
+`rolling_window` defaults to the width that spans roughly a season at each
+bucket size — 7 days, 4 weeks, 3 months — and is echoed in the response so a
+client can label the line without duplicating the rule.
+
+**`rolling_of` is how many buckets that point's average actually covered.** The
+earliest points cannot see a full window, so their average is over fewer periods
+and is not comparable with the rest. A client must distinguish them — fading the
+bar, or starting the line where `rolling_of` reaches `rolling_window`. Silently
+drawing a one-bucket "average" alongside a settled one invents a trend that is
+just the series starting.
+
+`centre` also accompanies the points, describing `out_minor` only:
 
 ```json
 "centre": { "mean_minor": -2228763, "median_minor": -2197123, "buckets": 12 }
@@ -177,9 +234,13 @@ continuous axis fills the gaps itself.
 **Both are given because the gap between them is the information.** A
 household's spending is not symmetric — one renovation drags a mean somewhere
 no ordinary month has been, while the median keeps describing a typical period.
-A reference line on the chart should use the **median**; the mean is there
-because it is what multiplies back out to the total. Where they diverge sharply,
-a few large one-offs are carrying the average, and a client may usefully say so.
+Where they diverge sharply, a few large one-offs are carrying the average, and a
+client may usefully say so.
+
+`centre` describes the whole range as one number and so cannot show direction.
+It answers "what is a typical month"; `rolling` answers "is this month worse
+than the last few". Draw `rolling` as the line on the chart and use `centre` for
+the sentence underneath, not the other way round.
 
 ### `GET /api/v1/hidden`
 
@@ -346,5 +407,6 @@ Named so that their absence is a decision rather than an oversight.
 |---|---|
 | Applying decisions | `/review/decide` records; nothing writes it through. CLI does this today. |
 | Renaming or merging a category | `POST` adds; neither rename nor merge exists, and both must rewrite the enrichments that named the old one. |
+| A category weight or budget | Categories carry `position` and nothing else, so no endpoint can say a month was over or under. |
 | Reviewing what is *already* categorised | `/review` lists only unmatched counterparties, so a wrong rule among the 398 is invisible until someone happens to see the row. |
 | Authentication | There is none. See §5.2: per-server, OIDC, no password ever stored. **Do not deploy this beyond a trusted network until it exists.** |

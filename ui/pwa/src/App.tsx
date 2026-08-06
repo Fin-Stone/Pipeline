@@ -1,8 +1,12 @@
 ﻿/**
- * The shell: choose a server, then three screens.
+ * The shell: choose a server, then the screens.
+ *
+ * Net worth, spending and income are separate tabs rather than one long
+ * dashboard. They are answers to three different questions, and stacking them
+ * meant scrolling past two to reach the third.
  *
  * **The server is the user's.** Their own install or a hosted one, entered here
- * and stored locally, exactly as Bitwarden does it â€” architecture Â§5.2. Nothing
+ * and stored locally, exactly as Bitwarden does it — architecture §5.2. Nothing
  * is baked in, and the version handshake happens before anything else so a
  * client update cannot silently break a self-hoster who has not upgraded.
  */
@@ -12,6 +16,7 @@ import {
   Stack, Tab, Tabs, TextField, Toolbar, Typography,
 } from "@mui/material";
 import Dashboard from "./Dashboard";
+import NetWorthTab from "./NetWorthTab";
 import Recurring from "./Recurring";
 import Review from "./Review";
 import Hidden from "./Hidden";
@@ -30,7 +35,7 @@ function ServerSetup({ onReady }: { onReady: () => void }) {
       const health = await api.health();
       if (health.api_version !== REQUIRED_API_VERSION) {
         // Refused rather than attempted. A mismatched server is the failure
-        // Â§5.2 exists to prevent, and guessing would corrupt what it shows.
+        // §5.2 exists to prevent, and guessing would corrupt what it shows.
         setError(
           `That server speaks ${health.api_version}; this client needs ` +
           `${REQUIRED_API_VERSION}. Upgrade one of them.`,
@@ -61,7 +66,7 @@ function ServerSetup({ onReady }: { onReady: () => void }) {
             </Select>
             {error && <Alert severity="error">{error}</Alert>}
             <Button variant="contained" disabled={busy} onClick={connect}>
-              {busy ? "Connectingâ€¦" : "Connect"}
+              {busy ? "Connecting…" : "Connect"}
             </Button>
           </Stack>
         </CardContent>
@@ -90,7 +95,7 @@ export default function App() {
         <Toolbar sx={{ gap: 2 }}>
           <Typography variant="h6" sx={{ flexGrow: 1 }}>Finstone</Typography>
           <Typography variant="caption" color="text.secondary">
-            {serverUrl()} Â· {profile()}
+            {serverUrl()} · {profile()}
           </Typography>
           <Button size="small" onClick={() => { forgetServer(); setConnected(false); }}>
             Change
@@ -98,17 +103,24 @@ export default function App() {
         </Toolbar>
         <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable"
           allowScrollButtonsMobile>
-          <Tab label="Overview" />
+          <Tab label="Net worth" />
+          <Tab label="Spending" />
+          <Tab label="Income" />
           <Tab label="Recurring" />
           <Tab label="Review" />
           <Tab label="Hidden" />
         </Tabs>
       </AppBar>
       <Container maxWidth="lg" sx={{ py: 2 }}>
-        {tab === 0 && <Dashboard />}
-        {tab === 1 && <Recurring />}
-        {tab === 2 && <Review />}
-        {tab === 3 && <Hidden />}
+        {/* Remounted per tab rather than hidden: each dashboard owns its own
+            filters, and carrying a spending filter silently into income would
+            show a total that does not match its own controls. */}
+        {tab === 0 && <NetWorthTab />}
+        {tab === 1 && <Dashboard mode="spending" />}
+        {tab === 2 && <Dashboard mode="income" />}
+        {tab === 3 && <Recurring />}
+        {tab === 4 && <Review />}
+        {tab === 5 && <Hidden />}
       </Container>
     </Box>
   );

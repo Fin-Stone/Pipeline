@@ -5,24 +5,46 @@
  * date range, with the per-month/week/day averages computed over **the same
  * range as the totals** — the server guarantees that, and this screen shows the
  * range so the two halves can never appear to describe different periods.
+ *
+ * Money out and money in are the same screen twice, so this is one component
+ * with a `mode`. They differ in wording and in which side of zero they read,
+ * not in structure, and a second copy would only drift from this one.
  */
 import { useEffect, useMemo, useState } from "react";
 import {
-  Alert, AlertTitle, Box, Card, CardContent, Chip, CircularProgress, Divider,
+  Alert, Box, Card, CardContent, Chip, CircularProgress, Divider,
   FormControl, Grid, InputLabel, LinearProgress, MenuItem, Select, Stack,
-  TextField, Typography,
+  TextField, ToggleButton, ToggleButtonGroup, Typography,
 } from "@mui/material";
-import TrendingDownIcon from "@mui/icons-material/TrendingDown";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import UndoIcon from "@mui/icons-material/Undo";
 import { Button, IconButton, List, ListItem, ListItemText, Tooltip } from "@mui/material";
 import {
-  Account, ApiError, Category, Filters, Growth as GrowthData, Summary,
-  Trend as TrendData, Txn, api,
+  Account, ApiError, Category, Direction, Filters, Summary, Trend as TrendData, Txn, api,
 } from "./api";
 import Trend from "./Trend";
-import NetWorth from "./NetWorth";
 import { magnitude, money, monthsAgo, today } from "./money";
+
+export type Mode = "spending" | "income";
+
+const WORDING = {
+  spending: {
+    total: "Spent",
+    overTime: "Spending over time",
+    breakdown: "Where it went",
+    empty: "Nothing spent in this range.",
+    measure: "out_minor" as const,
+    direction: "out" as Direction,
+  },
+  income: {
+    total: "Earned",
+    overTime: "Income over time",
+    breakdown: "Where it came from",
+    empty: "Nothing received in this range.",
+    measure: "in_minor" as const,
+    direction: "in" as Direction,
+  },
+};
 
 function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
@@ -38,23 +60,27 @@ function Tile({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
-export default function Dashboard() {
+export default function Dashboard({ mode }: { mode: Mode }) {
+  const words = WORDING[mode];
+
   const [months, setMonths] = useState(6);
   const [since, setSince] = useState(monthsAgo(6));
   const [until, setUntil] = useState(today());
   const [accountIds, setAccountIds] = useState<number[]>([]);
   const [categoryNames, setCategoryNames] = useState<string[]>([]);
+  // Income only: the bars can show what came in, or what was left after it all
+  // went out again. The second is the number that answers "are we ahead".
+  const [measure, setMeasure] = useState<"in_minor" | "net_minor">("in_minor");
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [net, setNet] = useState<Summary | null>(null);
   const [trend, setTrend] = useState<TrendData | null>(null);
   const [txns, setTxns] = useState<Txn[]>([]);
   // Session hiding: forgotten on refresh, by design. It is a way to ask "what
   // would this look like without that", not a decision about the ledger.
   const [muted, setMuted] = useState<number[]>([]);
-  const [growth, setGrowth] = useState<GrowthData | null>(null);
-  const [growthUnavailable, setGrowthUnavailable] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -74,11 +100,20 @@ export default function Dashboard() {
       since, until, account_id: accountIds, category: categoryNames,
       exclude_txn_id: muted,
     };
-    Promise.all([api.summary(filters), api.trend(filters), api.transactions(filters, 60)])
-      .then(([s, t, list]) => { setSummary(s); setTrend(t); setTxns(list.transactions); })
+    Promise.all([
+      api.summary(filters, words.direction),
+      api.trend(filters),
+      api.transactions(filters, 60, words.direction),
+      // What is left over, on the same range and the same exclusions. Fetched
+      // rather than subtracted here: this client never does arithmetic on money.
+      mode === "income" ? api.summary(filters, "net") : Promise.resolve(null),
+    ])
+      .then(([s, t, list, n]) => {
+        setSummary(s); setTrend(t); setTxns(list.transactions); setNet(n);
+      })
       .catch((e) => setError(String(e instanceof ApiError ? e.detail : e)))
       .finally(() => setLoading(false));
-  }, [since, until, accountIds, categoryNames, muted]);
+  }, [since, until, accountIds, categoryNames, muted, mode, words.direction]);
 
   async function recategorise(id: number, name: string) {
     await api.setCategory(id, name);
@@ -98,9 +133,9 @@ export default function Dashboard() {
   }
 
   async function markTransfer(id: number) {
-    // Not spending: a movement between the operator's own accounts that the
-    // matcher could not prove. Excluded from every figure, and it survives a
-    // re-run of the matcher because a person decided it.
+    // Not spending, and not income either: a movement between the operator's
+    // own accounts that the matcher could not prove. Excluded from every
+    // figure, and it survives a re-run of the matcher because a person decided.
     await api.markTransfer(id);
     setTxns((t) => t.filter((x) => x.id !== id));
     setMuted((m) => [...m]); // re-fetch totals with the new exclusion in place
@@ -114,31 +149,19 @@ export default function Dashboard() {
     setTxns((t) => t.filter((x) => x.id !== id));
   }
 
-  useEffect(() => {
-    api.growth(months)
-      .then((g) => { setGrowth(g); setGrowthUnavailable(null); })
-      .catch((e) => setGrowthUnavailable(String(e instanceof ApiError ? e.detail : e)));
-  }, [months]);
-
-  const spend = summary?.total_minor ?? 0;
-  const biggest = useMemo(
-    () => (summary?.by_category ?? []).filter((r) => r.total_minor < 0),
-    [summary],
+  const breakdown = useMemo(
+    () => (summary?.by_category ?? []).filter(
+      (r) => (mode === "income" ? r.total_minor > 0 : r.total_minor < 0),
+    ),
+    [summary, mode],
   );
-  const largest = biggest.length ? Math.abs(biggest[0].total_minor) : 1;
+  const largest = breakdown.length ? Math.abs(breakdown[0].total_minor) : 1;
+  const kept = net?.total_minor ?? null;
 
   if (error) return <Alert severity="error" sx={{ m: 2 }}>{error}</Alert>;
 
   return (
     <Stack spacing={2}>
-      {growth && <NetWorth data={growth} />}
-      {growthUnavailable && (
-        <Alert severity="info" icon={<TrendingDownIcon />}>
-          <AlertTitle>Net worth is unavailable</AlertTitle>
-          {growthUnavailable}
-        </Alert>
-      )}
-
       <Card variant="outlined">
         <CardContent>
           <Stack direction={{ xs: "column", md: "row" }} spacing={2} flexWrap="wrap">
@@ -195,9 +218,17 @@ export default function Dashboard() {
 
       <Grid container spacing={2}>
         <Grid item xs={12} sm={6} md={3}>
-          <Tile label="Spent" value={magnitude(spend)}
+          <Tile label={words.total} value={magnitude(summary?.total_minor)}
             hint={summary?.range.days ? `over ${summary.range.days} days` : "open range"} />
         </Grid>
+        {mode === "income" && (
+          <Grid item xs={12} sm={6} md={3}>
+            {/* Signed, unlike every other tile: a household in deficit needs to
+                see the minus, not an unmarked magnitude. */}
+            <Tile label="Kept" value={money(kept)}
+              hint={kept === null ? undefined : kept < 0 ? "spent more than earned" : "after spending"} />
+          </Grid>
+        )}
         <Grid item xs={12} sm={6} md={3}>
           <Tile label="Per month" value={magnitude(summary?.average_minor.per_month)}
             hint="same range as above" />
@@ -205,23 +236,46 @@ export default function Dashboard() {
         <Grid item xs={6} md={3}>
           <Tile label="Per week" value={magnitude(summary?.average_minor.per_week)} />
         </Grid>
-        <Grid item xs={6} md={3}>
-          <Tile label="Per day" value={magnitude(summary?.average_minor.per_day)} />
-        </Grid>
+        {mode === "spending" && (
+          <Grid item xs={6} md={3}>
+            <Tile label="Per day" value={magnitude(summary?.average_minor.per_day)} />
+          </Grid>
+        )}
       </Grid>
 
       <Card variant="outlined">
         <CardContent>
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Typography variant="h6">Spending over time</Typography>
-            {muted.length > 0 && (
-              <Button size="small" startIcon={<UndoIcon />} onClick={() => setMuted([])}>
-                Show {muted.length} hidden again
-              </Button>
-            )}
+          <Stack direction="row" justifyContent="space-between" alignItems="center"
+            flexWrap="wrap" gap={1}>
+            <Typography variant="h6">{words.overTime}</Typography>
+            <Stack direction="row" spacing={1} alignItems="center">
+              {mode === "income" && (
+                <ToggleButtonGroup
+                  size="small" exclusive value={measure}
+                  onChange={(_, v) => v && setMeasure(v)}
+                >
+                  <ToggleButton value="in_minor">Income</ToggleButton>
+                  <ToggleButton value="net_minor">Net</ToggleButton>
+                </ToggleButtonGroup>
+              )}
+              {muted.length > 0 && (
+                <Button size="small" startIcon={<UndoIcon />} onClick={() => setMuted([])}>
+                  Show {muted.length} hidden again
+                </Button>
+              )}
+            </Stack>
           </Stack>
           <Divider sx={{ my: 1.5 }} />
-          {trend ? <Trend data={trend} /> : <CircularProgress size={20} />}
+          {trend
+            ? <Trend data={trend} measure={mode === "income" ? measure : words.measure} />
+            : <CircularProgress size={20} />}
+          {mode === "income" && measure === "net_minor" && (
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+              Green is a surplus, blue a deficit. The line is the trailing
+              average, so it answers whether the household is trending up or
+              down rather than how one period happened to land.
+            </Typography>
+          )}
         </CardContent>
       </Card>
 
@@ -253,7 +307,7 @@ export default function Dashboard() {
                         <VisibilityOffIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
-                    <Tooltip title="Not spending — a move between your own accounts">
+                    <Tooltip title="Not real money in or out — a move between your own accounts">
                       <Button size="small" onClick={() => markTransfer(t.id)}>
                         transfer
                       </Button>
@@ -289,7 +343,7 @@ export default function Dashboard() {
               </ListItem>
             ))}
             {txns.length === 0 && (
-              <Typography color="text.secondary">Nothing in this range.</Typography>
+              <Typography color="text.secondary">{words.empty}</Typography>
             )}
           </List>
         </CardContent>
@@ -297,14 +351,14 @@ export default function Dashboard() {
 
       <Card variant="outlined">
         <CardContent>
-          <Typography variant="h6" gutterBottom>Where it went</Typography>
+          <Typography variant="h6" gutterBottom>{words.breakdown}</Typography>
           <Typography variant="caption" color="text.secondary">
             Transfers between your own accounts are already excluded.
           </Typography>
           <Divider sx={{ my: 1.5 }} />
           {!summary && <CircularProgress size={20} />}
           <Stack spacing={1.5}>
-            {biggest.map((row) => (
+            {breakdown.map((row) => (
               <Box key={row.category ?? "uncategorised"}>
                 <Stack direction="row" justifyContent="space-between" alignItems="baseline">
                   <Stack direction="row" spacing={1} alignItems="center">
@@ -328,8 +382,8 @@ export default function Dashboard() {
                 </Typography>
               </Box>
             ))}
-            {summary && biggest.length === 0 && (
-              <Typography color="text.secondary">Nothing in this range.</Typography>
+            {summary && breakdown.length === 0 && (
+              <Typography color="text.secondary">{words.empty}</Typography>
             )}
           </Stack>
         </CardContent>
