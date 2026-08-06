@@ -567,6 +567,64 @@ class TestUndeciding:
         assert names.index("NEWER") < names.index("OLDER")
 
 
+class TestServingTheClient:
+    """One image carries both, which is what makes one container enough.
+
+    The failure this guards against is subtle: a catch-all that serves the page
+    for *every* unmatched path would answer a mistyped API call with HTML and a
+    200 on it, and a client would parse the page it is running in as a ledger.
+    """
+
+    @pytest.fixture
+    def built(self, tmp_path, monkeypatch):
+        from app.api import main
+
+        (tmp_path / "assets").mkdir()
+        (tmp_path / "index.html").write_text("<!doctype html><title>Finstone</title>")
+        monkeypatch.setattr(main, "WEB_ROOT", tmp_path)
+        return tmp_path
+
+    def test_the_root_is_the_app_when_one_is_carried(self, client, built):
+        response = client.get("/")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+
+    def test_the_page_is_never_cached(self, client, built):
+        """The assets beside it are content-hashed and cached for a year; this
+        file names them. Cache it and an upgraded container keeps serving the
+        previous build to a returning browser."""
+        assert client.get("/").headers["cache-control"] == "no-store"
+
+    def test_a_deep_link_returns_the_app(self, client, built):
+        """A single-page app owns its own routing, so a refresh on any screen
+        but the first has to return the page rather than a 404."""
+        response = client.get("/some/screen/deep/in/the/app")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+
+    def test_an_unknown_api_path_is_still_a_json_404(self, client, built):
+        """Not the page. A client that got HTML here would try to read it."""
+        response = client.get(f"{PREFIX}/nonsense")
+        assert response.status_code == 404
+        assert response.headers["content-type"].startswith("application/json")
+
+    def test_the_schema_is_still_reachable(self, client, built):
+        assert client.get("/openapi.json").status_code == 200
+
+    def test_the_root_is_the_api_when_no_client_is_carried(self, client):
+        """A `pip install` and every test get this. The JSON is the honest
+        answer when there is no page to serve, and a bare 404 would make a
+        working install look broken."""
+        body = client.get("/").json()
+        assert body["service"] == "finstone"
+        assert body["api_root"] == PREFIX
+
+    def test_an_unknown_path_says_there_is_no_client(self, client):
+        response = client.get("/dashboard")
+        assert response.status_code == 404
+        assert "carries no client" in response.json()["detail"]
+
+
 class TestTrend:
     def test_the_response_says_what_window_the_line_used(self, client):
         """A client labels the line from this. Deriving it client-side would

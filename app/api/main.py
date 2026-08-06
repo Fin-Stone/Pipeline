@@ -22,12 +22,15 @@ Design, from architecture §5.2:
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Annotated
 
 import os
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from ..config import PROFILE_PROD, Config, load_config
 from ..domain.categories import (
@@ -185,14 +188,38 @@ def _filters(
 Filters = Annotated[dict, Depends(_filters)]
 
 
-@app.get("/", tags=["meta"])
-def root() -> dict:
-    """Say what this is, to whoever opened the address in a browser.
+#: Where a built client lives, when this image carries one.
+#:
+#: Carrying it is what makes **one container** enough — the shape a self-hoster
+#: expects, and the difference between `docker run` and a compose file with
+#: three services in it. Nothing here depends on it: with no build present this
+#: is an API and says so, which is what a `pip install` and every test gets.
+WEB_ROOT = Path(os.environ.get("FINSTONE_WEB_ROOT", "/srv/finstone/web"))
 
-    A bare 404 here is technically correct and useless: the first thing an
-    operator does with a new self-hosted service is visit its root, and telling
-    them nothing is how a working install looks broken.
+
+def _serving_client() -> bool:
+    return (WEB_ROOT / "index.html").is_file()
+
+
+class _Assets(StaticFiles):
+    """Hashed filenames, so they can be cached hard.
+
+    Same policy as the nginx image serves, because the two are alternatives and
+    a returning browser must not get a different answer depending on which one
+    is in front of it.
     """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+if (WEB_ROOT / "assets").is_dir():
+    app.mount("/assets", _Assets(directory=WEB_ROOT / "assets"), name="assets")
+
+
+def _api_root() -> dict:
     return {
         "service": "finstone",
         "api_version": API_VERSION,
@@ -201,6 +228,22 @@ def root() -> dict:
         "openapi": "/openapi.json",
         "note": "This is the API. The UI is a separate application that connects to it.",
     }
+
+
+@app.get("/", tags=["meta"])
+def root():
+    """Say what this is, to whoever opened the address in a browser.
+
+    A bare 404 here is technically correct and useless: the first thing an
+    operator does with a new self-hosted service is visit its root, and telling
+    them nothing is how a working install looks broken.
+
+    When the image carries a client, this *is* the client. When it does not,
+    the JSON above is the honest answer.
+    """
+    if _serving_client():
+        return _index()
+    return _api_root()
 
 
 @app.get(f"{PREFIX}/health", tags=["meta"])
@@ -949,3 +992,51 @@ def clear_category(handle: Session, txn_id: int) -> dict:
         "txn_id": txn_id,
         "cleared": handle.repository.clear_human_category(handle.context, txn_id),
     }
+
+
+# --------------------------------------------------------------- the client ---
+# Everything below must stay at the bottom of this file. Starlette matches
+# routes in the order they were added, and the catch-all here would otherwise
+# swallow every API route declared after it.
+
+
+def _index() -> FileResponse:
+    """The single page, never cached.
+
+    The assets beside it are content-hashed and cached for a year; this file
+    names them. Cache it and an upgraded container keeps serving the previous
+    build to a returning browser, which is how a self-hoster ends up running
+    two versions at once and reporting bugs from neither.
+    """
+    return FileResponse(
+        WEB_ROOT / "index.html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+#: Paths that belong to the server whatever else is being served.
+#:
+#: Without this, a mistyped API call would come back as HTML with a 200 on it,
+#: and a client would parse the page it is running in as a ledger.
+_SERVER_PREFIXES = ("api/", "docs", "redoc", "openapi.json")
+
+
+@app.get("/{path:path}", include_in_schema=False)
+def client(path: str):
+    """Any other path is the app itself — or an honest 404.
+
+    A single-page app owns its own routing, so a refresh on any screen but the
+    first has to return the page rather than a 404. That is the whole of this
+    route.
+    """
+    if path.startswith(_SERVER_PREFIXES):
+        raise HTTPException(status_code=404, detail=f"no such endpoint: /{path}")
+    if not _serving_client():
+        # An API-only install. Saying so beats returning the SPA's 404 screen
+        # for something that was never going to be a screen.
+        raise HTTPException(
+            status_code=404,
+            detail=f"no such endpoint: /{path}. This server carries no client; "
+                   f"the API is at {PREFIX}.",
+        )
+    return _index()

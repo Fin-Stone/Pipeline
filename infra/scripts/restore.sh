@@ -52,8 +52,8 @@ fi
 # The API is stopped for the duration. A restore replaces every row, and a
 # dashboard reading through the middle of that shows figures that were never
 # true of any ledger — which is worse than being down for the minute it takes.
-say "Stopping the API while the ledger is replaced"
-compose stop api ui
+say "Stopping the app while the ledger is replaced"
+compose stop app
 
 restore_status=0
 say "Restoring"
@@ -63,8 +63,8 @@ compose --profile cli run --rm -T "${MOUNT[@]}" cli \
 # Brought back either way. A failed restore that also leaves the stack down has
 # turned one problem into two, and the operator needs the dashboard to see what
 # state they are actually in.
-say "Starting the API"
-compose start api ui
+say "Starting the app"
+compose start app
 
 [ "$restore_status" = 0 ] || die "the restore failed; the stack is back up on whatever is in the database"
 

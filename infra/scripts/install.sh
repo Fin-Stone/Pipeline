@@ -40,8 +40,7 @@ case "$ENGINE" in
     *) die "--engine must be postgres or sqlite" ;;
 esac
 
-UI_PORT=8080
-API_PORT=8000
+APP_PORT=8000
 
 say "Checking what this box has"
 require_docker
@@ -104,7 +103,7 @@ if [ "$WITH_NGINX" = 1 ]; then
     note "stack will listen on 127.0.0.1 only; nginx is the way in"
 else
     set_env FINSTONE_BIND ""
-    note "no reverse proxy: ports $UI_PORT and $API_PORT will be open on every interface"
+    note "no reverse proxy: port $APP_PORT will be open on every interface"
 fi
 
 # ------------------------------------------------------------------ stack ---
@@ -114,12 +113,12 @@ compose up -d --build --remove-orphans
 
 say "Waiting for the API"
 for attempt in $(seq 1 60); do
-    if curl -fsS "http://127.0.0.1:${API_PORT}/api/v1/health" >/dev/null 2>&1; then
+    if curl -fsS "http://127.0.0.1:${APP_PORT}/api/v1/health" >/dev/null 2>&1; then
         note "healthy after ${attempt}s"
         break
     fi
     [ "$attempt" = 60 ] && {
-        compose logs --tail 40 api
+        compose logs --tail 40 app
         die "the API did not come up. Its last 40 log lines are above."
     }
     sleep 1
@@ -168,8 +167,7 @@ if [ "$WITH_NGINX" = 1 ]; then
         WITH_NGINX=0
     else
         sed -e "s|SERVER_NAME|${SERVER_NAME}|g" \
-            -e "s|API_PORT|${API_PORT}|g" \
-            -e "s|UI_PORT|${UI_PORT}|g" \
+            -e "s|APP_PORT|${APP_PORT}|g" \
             "$REPO_ROOT/infra/nginx/finstone.conf" \
             | sudo tee /etc/nginx/sites-available/finstone >/dev/null
         sudo ln -sfn /etc/nginx/sites-available/finstone \
@@ -192,17 +190,17 @@ fi
 if [ "$WITH_NGINX" = 1 ]; then
     ADDRESS="http://${SERVER_NAME}"
 else
-    ADDRESS="http://$(hostname -I 2>/dev/null | awk '{print $1}'):${UI_PORT}"
+    ADDRESS="http://$(hostname -I 2>/dev/null | awk '{print $1}'):${APP_PORT}"
 fi
 
 say "Done"
 note "Open       ${ADDRESS}"
-note "Server     ${ADDRESS}    <- type this when the app asks"
+note "           the app finds its own server; nothing to type"
 note ""
 note "Ingest     ./infra/scripts/ingest.sh --profile prod"
 note "Back up    ./infra/scripts/backup.sh"
 note "Restore    ./infra/scripts/restore.sh <archive>"
-note "Logs       docker compose logs -f api"
+note "Logs       docker compose logs -f app"
 
 cat <<'WARNING'
 

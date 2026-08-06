@@ -1,0 +1,69 @@
+# Finstone, from published images. No repository, no build.
+#
+# This is the whole install:
+#
+#     mkdir finstone && cd finstone
+#     curl -fsSLO https://raw.githubusercontent.com/Fin-Stone/Pipeline/main/infra/deploy/docker-compose.yml
+#     curl -fsSLO https://raw.githubusercontent.com/Fin-Stone/Pipeline/main/infra/deploy/.env.example
+#     mv .env.example .env      # then edit it
+#     docker compose up -d
+#
+# One container. It serves the dashboard and the API on the same port, so the
+# app finds its own server and there is nothing to configure to make the two
+# halves talk to each other.
+#
+# SQLite by default, in the `finstone-data` volume. Uncomment the `db` service
+# and the DATABASE_URL below to move to Postgres — and note that moving is a
+# `finstone backup` followed by a `finstone restore`, the same two commands as
+# a disaster recovery. See docs/backups.md.
+
+name: finstone
+
+services:
+  app:
+    image: ghcr.io/fin-stone/finstone:${FINSTONE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      # Empty FINSTONE_BIND publishes on every interface, which is what you
+      # want on a home LAN. Set it to `127.0.0.1:` when a reverse proxy is in
+      # front — with no authentication anywhere, a second open port is the
+      # whole ledger.
+      - "${FINSTONE_BIND:-}${FINSTONE_PORT:-8000}:8000"
+    environment:
+      # SQLite in the volume. For Postgres, uncomment the db service below and:
+      # DATABASE_URL: postgresql+psycopg://finstone:${POSTGRES_PASSWORD}@db:5432/finstone
+      TZ: ${TZ:-UTC}
+    volumes:
+      - finstone-data:/srv/finstone/data
+      # Where you drop statements. Read-only: the pipeline copies out of it and
+      # must never write to your own folder.
+      - ${FINSTONE_UPLOADS:-./uploads}:/srv/finstone/uploads:ro
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Uncomment for Postgres. Worth it above a few thousand transactions; SQLite
+  # is genuinely fine below that and needs no password to look after.
+  #
+  # db:
+  #   image: pgvector/pgvector:pg17
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: finstone
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+  #     POSTGRES_DB: finstone
+  #   volumes:
+  #     - finstone-db:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U finstone -d finstone"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 20
+
+volumes:
+  finstone-data:
+  # finstone-db:

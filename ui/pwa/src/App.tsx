@@ -20,10 +20,14 @@ import NetWorthTab from "./NetWorthTab";
 import Recurring from "./Recurring";
 import Review from "./Review";
 import Excluded from "./Excluded";
-import { REQUIRED_API_VERSION, api, forgetServer, profile, serverUrl, setServer } from "./api";
+import {
+  REQUIRED_API_VERSION, api, forgetServer, originServer, profile, serverUrl, setServer,
+} from "./api";
 
 function ServerSetup({ onReady }: { onReady: () => void }) {
-  const [url, setUrl] = useState(serverUrl() ?? "http://localhost:8000");
+  const [url, setUrl] = useState(
+    serverUrl() ?? originServer() ?? "http://localhost:8000",
+  );
   const [which, setWhich] = useState(profile());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -77,16 +81,40 @@ function ServerSetup({ onReady }: { onReady: () => void }) {
 
 export default function App() {
   const [connected, setConnected] = useState(false);
+  //: Set by "Change", and never cleared by a probe. Without it, forgetting the
+  //  server and then rediscovering the same one would put the user straight
+  //  back where they were, with no way to reach the screen they asked for.
+  const [changing, setChanging] = useState(false);
   const [tab, setTab] = useState(0);
 
   useEffect(() => {
-    if (!serverUrl()) return;
-    api.health()
-      .then((h) => setConnected(h.api_version === REQUIRED_API_VERSION))
-      .catch(() => setConnected(false));
+    // Try what was stored; failing that, try the server this page came from.
+    // A container serving both means the answer to "which server" is already
+    // in the address bar, and asking anyway is asking somebody to type back
+    // what they just typed in.
+    const candidates = [serverUrl(), originServer()].filter(Boolean) as string[];
+
+    (async () => {
+      for (const candidate of candidates) {
+        setServer(candidate, profile());
+        try {
+          const health = await api.health();
+          if (health.api_version === REQUIRED_API_VERSION) {
+            setConnected(true);
+            return;
+          }
+        } catch { /* try the next one */ }
+      }
+      // Nothing answered. Leave nothing stored, so the setup screen is not
+      // offering an address already known not to work as though it were fine.
+      forgetServer();
+      setConnected(false);
+    })();
   }, []);
 
-  if (!connected) return <ServerSetup onReady={() => setConnected(true)} />;
+  if (!connected || changing) {
+    return <ServerSetup onReady={() => { setChanging(false); setConnected(true); }} />;
+  }
 
   return (
     <Box>
@@ -97,7 +125,7 @@ export default function App() {
           <Typography variant="caption" color="text.secondary">
             {serverUrl()} · {profile()}
           </Typography>
-          <Button size="small" onClick={() => { forgetServer(); setConnected(false); }}>
+          <Button size="small" onClick={() => { forgetServer(); setChanging(true); }}>
             Change
           </Button>
         </Toolbar>

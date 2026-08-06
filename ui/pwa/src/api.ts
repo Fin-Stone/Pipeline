@@ -22,6 +22,28 @@ export function serverUrl(): string | null {
   return localStorage.getItem(SERVER_KEY);
 }
 
+/**
+ * The server this client was downloaded from, if it looks like one.
+ *
+ * When a single container serves both the app and the API — the shape most
+ * self-hosters expect — asking which server to talk to is asking a question
+ * whose answer is already on screen in the address bar. So the app offers
+ * that answer and only asks when it is wrong.
+ *
+ * This does **not** bake in an endpoint, which architecture §5.2 forbids and
+ * for good reason: the value is read at runtime from wherever the page came
+ * from, the user can still change it, and the same build serves a hosted
+ * deployment, a separate UI container, and a `vite dev` on port 5173.
+ */
+export function originServer(): string | null {
+  if (typeof window === "undefined") return null;
+  const { origin, protocol } = window.location;
+  // file:// has no origin worth probing, and a dev server on 5173 is not the
+  // API — it will fail the probe and the setup screen appears, which is
+  // correct rather than a special case.
+  return protocol.startsWith("http") ? origin : null;
+}
+
 export function setServer(url: string, profile: string): void {
   localStorage.setItem(SERVER_KEY, url.replace(/\/+$/, ""));
   localStorage.setItem(PROFILE_KEY, profile);

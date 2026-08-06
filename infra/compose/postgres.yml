@@ -20,7 +20,7 @@ x-postgres-url: &postgres_url
   DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-finstone}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-finstone}
 
 services:
-  api:
+  app:
     environment:
       <<: *postgres_url
     depends_on:

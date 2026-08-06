@@ -154,6 +154,17 @@ A bare 404 here is technically correct and useless: visiting the root is the
 first thing anyone does with a new self-hosted service, and answering nothing is
 how a working install looks broken.
 
+**A server carrying a client returns the client here instead**, as `text/html`
+with `Cache-Control: no-store`, and serves it for every other unmatched path so
+a refresh deep in the app is not a 404. The official image does; a `pip install`
+does not. A client must therefore not treat this route as a capability check —
+`GET /api/v1/health` is that, and is the only route that answers the question
+"can I talk to this server".
+
+Paths under `/api/`, plus `/docs`, `/redoc` and `/openapi.json`, **always belong
+to the server**. An unknown one is a JSON `404`, never the page — a client handed
+HTML with a `200` on it would parse the page it is running in as a ledger.
+
 ### `GET /api/v1/health`
 
 ```json

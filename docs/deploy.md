@@ -1,9 +1,14 @@
 # Running this on your own box
 
-Written against the machine it was built for: a small Intel N95 mini-PC running
-Ubuntu Server, on a home network, reached through nginx. Nothing here is
-specific to that hardware; it is named because every number below was measured
-on it rather than guessed.
+**Just want it running? [install.md](install.md) is the step-by-step.** One
+container, ten minutes, no clone.
+
+This page is the rest: a machine you intend to keep. It is written against the
+one it was built for — a small Intel N95 mini-PC running Ubuntu Server, on a
+home network, reached through nginx — and adds the things a permanent install
+wants and a first try does not: Postgres, a name on port 80, a systemd unit, a
+nightly backup, and TLS. Nothing here is specific to that hardware; it is named
+because every number below was measured on it rather than guessed.
 
 ---
 
@@ -61,9 +66,9 @@ one restore that matters.
 --no-systemd         skip boot-time start and the nightly backup
 ```
 
-Then open `http://finstone.lan` and enter **the same address** when the app asks
-which server to talk to. The client never has a server baked in — architecture
-§5.2 — so it asks once and remembers.
+Then open `http://finstone.lan`. There is nothing to type: the client reads the
+address the page came from. **Change** in the header is still there for pointing
+this client at a different server.
 
 ### What it actually did
 
@@ -87,18 +92,25 @@ Re-running the script is the upgrade path, and is safe:
 cd /opt/finstone && git pull && ./infra/scripts/install.sh
 ```
 
-## One origin, on purpose
+## One container, one origin
 
-nginx serves the UI at `/` and proxies `/api/` to the API on the same host, so a
-browser talks to exactly one origin and CORS never comes up. The containers bind
-to `127.0.0.1` only (`FINSTONE_BIND` in `.env`), which makes the proxy the only
-way in — and with no authentication anywhere, a second open port is not a
-convenience, it is the whole ledger.
+The image carries the built client and serves it beside the API, so a browser
+talks to exactly one origin and CORS never comes up. nginx is a plain reverse
+proxy with nothing to route.
 
 ```
-browser ──▶ nginx :80 ──┬──▶ 127.0.0.1:8080   ui   (static files)
-                        └──▶ 127.0.0.1:8000   api
+browser ──▶ nginx :80 ──▶ 127.0.0.1:8000 ──┬── /          the dashboard
+                                           └── /api/v1/   the API
 ```
+
+The container binds to `127.0.0.1` only (`FINSTONE_BIND` in `.env`), which makes
+the proxy the only way in — and with no authentication anywhere, a second open
+port is not a convenience, it is the whole ledger.
+
+This is also why there is nothing to type on first load: the client reads the
+address the page came from. It can still be pointed elsewhere, so a hosted
+deployment and a separately-served client both keep working — architecture §5.2
+is about nothing being *baked in at build time*, and nothing is.
 
 ## Getting statements onto the box
 
@@ -131,7 +143,7 @@ exists in exactly one place.
 ./infra/scripts/restore.sh <archive> --dry-run
 ```
 
-A restore stops the API first. Replacing every row under a live dashboard would
+A restore stops the app first. Replacing every row under a live dashboard would
 show figures that were never true of any ledger, which is worse than a minute of
 downtime.
 
@@ -209,7 +221,7 @@ lines; put them back, or keep them in a separate `include`d file.
 ```bash
 sudo systemctl status finstone            # is it meant to be up
 docker compose ps                         # is it up
-docker compose logs -f api                # what it is doing
+docker compose logs -f app                # what it is doing
 systemctl list-timers finstone-backup     # when the next backup runs
 journalctl -u finstone-backup             # how the last one went
 ```
@@ -227,9 +239,10 @@ docker compose --profile cli run --rm cli finstone review --profile prod --decid
 An N95 has four slow cores and no spare thermal headroom, which shows up in
 exactly two places.
 
-- **The first build takes minutes**, mostly the UI's npm install. The systemd
-  unit sets `TimeoutStartSec=0` so systemd does not kill it halfway and report a
-  failure that is really a slow box.
+- **The first build takes minutes**, mostly the client's npm install. The
+  systemd unit sets `TimeoutStartSec=0` so systemd does not kill it halfway and
+  report a failure that is really a slow box. Pulling the published image
+  instead skips this entirely — see [install.md](install.md).
 - **Ingest is CPU-bound** in PDF text extraction. It is a background job and it
   runs in its own container; leave it alone and read the dashboard.
 
@@ -244,8 +257,8 @@ instead of something cleverer.
 | Symptom | Cause |
 |---|---|
 | `cannot talk to the Docker daemon` | Not in the `docker` group, or you have not logged out since being added |
-| `port is already allocated` | Something else has 80, 8080 or 8000. Change `FINSTONE_UI_PORT` / `FINSTONE_API_PORT` in `.env` |
-| API restarts in a loop | `docker compose logs api`. Almost always a migration — the schema guard refuses to run at the wrong revision, on purpose |
+| `port is already allocated` | Something else has 80 or 8000. Change `FINSTONE_PORT` in `.env` |
+| The container restarts in a loop | `docker compose logs app`. Almost always a migration — the schema guard refuses to run at the wrong revision, on purpose |
 | nginx 502 | The stack is down, or `FINSTONE_BIND` is not `127.0.0.1:` while the proxy expects it there |
 | The app asks for a server and nothing works | Enter the address you type in the browser, including `http://`. Not `localhost` — that is the phone, not the box |
 | `bash: $'\r': command not found` | The repo was cloned with CRLF endings. `.gitattributes` prevents this; a very old clone predates it — re-clone |

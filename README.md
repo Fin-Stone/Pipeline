@@ -34,30 +34,42 @@ Every command that touches the ledger takes `--profile dummy|prod`. It selects t
 tree, the tenant, and that tenant's quarantine — real and synthetic documents share none of
 the three.
 
-## Running the whole thing
+## Running it
+
+One container. It serves the dashboard and the API on the same port, so there is
+nothing to configure to make the two halves talk to each other, and nothing to
+type on first load — the client reads the address the page came from.
 
 ```bash
-docker compose up
+docker run -d --name finstone --restart unless-stopped \
+  -p 8000:8000 \
+  -v finstone-data:/srv/finstone/data \
+  -v "$PWD/statements":/srv/finstone/uploads:ro \
+  ghcr.io/fin-stone/finstone:latest
 ```
 
-UI on http://localhost:8080, API on http://localhost:8000. Nothing to configure
-first: the database is SQLite inside `data/`, migrations run on start, and the UI asks
-for a server address rather than having one baked in. See
-[infra/compose/README.md](infra/compose/README.md) for the CLI container, Postgres, and
-what is mounted read-only.
+**[docs/install.md](docs/install.md) is the step-by-step** — Docker, statements
+in, first ingest, categorising, backups. Read its second section first: there is
+no authentication yet, and the network is currently the only access control there
+is.
 
-## On a machine of your own
+From a clone instead, which is what you want if you are changing anything:
 
 ```bash
-git clone <your-remote> /opt/finstone && cd /opt/finstone
+docker compose up -d --build
+```
+
+## On a machine you intend to keep
+
+```bash
+git clone https://github.com/Fin-Stone/Pipeline.git /opt/finstone && cd /opt/finstone
 ./infra/scripts/install.sh --server-name finstone.lan
 ```
 
-One command: Postgres, a password generated on that machine, nginx serving the
-UI and API on one origin, a systemd unit for boot, and a nightly backup. Running
-it again is the upgrade path. **[docs/deploy.md](docs/deploy.md)** is the whole
-story — read its first section, because there is no authentication yet and the
-network is currently the only access control there is.
+Adds Postgres with a password generated on that machine, nginx on port 80, a
+systemd unit for boot, and a nightly backup. Running it again is the upgrade
+path. **[docs/deploy.md](docs/deploy.md)** covers TLS, the auth stopgap, and what
+each part does.
 
 ```bash
 ./infra/scripts/restore.sh <archive>    # the other half of Rule 3
@@ -125,7 +137,8 @@ Three rules bind every contributor, human or agent. All are stated in full in
 - [docs/development-rules.md](docs/development-rules.md) states the three binding development rules.
 - [docs/ingestion.md](docs/ingestion.md) is the Phase 1 ingestion and storage design of record.
 - [docs/api-contracts.md](docs/api-contracts.md) is what a client is written against, and binding.
-- [docs/deploy.md](docs/deploy.md) is how to run this on your own box, and what it does not yet protect.
+- [docs/install.md](docs/install.md) is the step-by-step install, from nothing to a categorised ledger.
+- [docs/deploy.md](docs/deploy.md) is a permanent install — nginx, systemd, TLS — and what none of it yet protects.
 - [docs/backups.md](docs/backups.md) is what is worth backing up, and why a restore is the same command as a migration.
 - [docs/repo-structure.md](docs/repo-structure.md) explains the repository layout and startup strategy.
 - [docs/agent-doc-sync.md](docs/agent-doc-sync.md) defines the documentation synchronization contract.
