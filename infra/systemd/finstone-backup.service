@@ -1,0 +1,22 @@
+# One backup. Driven by finstone-backup.timer; run by hand to test it.
+#
+#     sudo systemctl start finstone-backup.service
+#     journalctl -u finstone-backup.service
+#
+# An untested backup is a rumour, and a timer nobody has ever fired is the same
+# thing with a schedule attached.
+
+[Unit]
+Description=Finstone nightly backup
+Requires=docker.service
+After=docker.service finstone.service
+
+[Service]
+Type=oneshot
+User=RUN_USER
+WorkingDirectory=INSTALL_DIR
+
+# The work lives in a script, not in ExecStart. Rotation needs a loop and a
+# sort, and a unit file is a bad place to hide either — this way the same
+# command can be run by hand, read, and changed without touching systemd.
+ExecStart=INSTALL_DIR/infra/scripts/backup.sh

@@ -1,0 +1,37 @@
+# The stack, brought up at boot and taken down cleanly on shutdown.
+#
+# Installed by infra/scripts/install.sh, which substitutes INSTALL_DIR,
+# RUN_USER and COMPOSE. Written as a template rather than generated from
+# nothing so that what systemd ends up running is reviewable here, in the
+# repository, rather than only on the box.
+#
+# `restart: unless-stopped` in Compose already brings containers back after a
+# crash or a Docker restart. This unit is for the other half: a clean boot
+# after `docker compose down`, and an ordering guarantee that the stack starts
+# after Docker and the network are actually up rather than merely enabled.
+
+[Unit]
+Description=Finstone finance pipeline
+Documentation=file://INSTALL_DIR/docs/deploy.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=RUN_USER
+WorkingDirectory=INSTALL_DIR
+
+# No timeout. The first start after an upgrade builds images, and on a low-power
+# box that is minutes — systemd killing the build halfway and marking the unit
+# failed is a worse outcome than waiting.
+TimeoutStartSec=0
+
+# --remove-orphans, so a service renamed or dropped in an upgrade does not
+# leave a container running against the same database.
+ExecStart=COMPOSE up -d --remove-orphans
+ExecStop=COMPOSE down
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+# Line endings, decided here rather than by whoever clones.
+#
+# The install path is a shell script and the deployment target is Linux. A
+# checkout on a machine with `core.autocrlf=true` — the Windows default —
+# rewrites these with CRLF, and then the box answers `bash: $'\r': command not
+# found` on the first line of the shebang. That failure names nothing useful
+# and costs an evening.
+#
+# This is not a style preference. Everything below is a file some other program
+# parses byte by byte.
+
+*.sh            text eol=lf
+*.service       text eol=lf
+*.timer         text eol=lf
+*.conf          text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+.env.example    text eol=lf
+alembic.ini     text eol=lf
+
+# Statements and archives. Never touched, never diffed — a "helpful"
+# normalisation pass over a PDF or a gzip is corruption.
+*.pdf           binary
+*.tar.gz        binary
+*.png           binary
+*.jpg           binary

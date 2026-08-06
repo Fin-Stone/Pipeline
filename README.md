@@ -46,6 +46,23 @@ for a server address rather than having one baked in. See
 [infra/compose/README.md](infra/compose/README.md) for the CLI container, Postgres, and
 what is mounted read-only.
 
+## On a machine of your own
+
+```bash
+git clone <your-remote> /opt/finstone && cd /opt/finstone
+./infra/scripts/install.sh --server-name finstone.lan
+```
+
+One command: Postgres, a password generated on that machine, nginx serving the
+UI and API on one origin, a systemd unit for boot, and a nightly backup. Running
+it again is the upgrade path. **[docs/deploy.md](docs/deploy.md)** is the whole
+story — read its first section, because there is no authentication yet and the
+network is currently the only access control there is.
+
+```bash
+./infra/scripts/restore.sh <archive>    # the other half of Rule 3
+```
+
 ## API
 
 The UI talks to the backend over HTTP and shares nothing else with it. The server address is
@@ -107,6 +124,9 @@ Three rules bind every contributor, human or agent. All are stated in full in
 - [finance-pipeline-architecture.md](finance-pipeline-architecture.md) is the design and architecture source of truth.
 - [docs/development-rules.md](docs/development-rules.md) states the three binding development rules.
 - [docs/ingestion.md](docs/ingestion.md) is the Phase 1 ingestion and storage design of record.
+- [docs/api-contracts.md](docs/api-contracts.md) is what a client is written against, and binding.
+- [docs/deploy.md](docs/deploy.md) is how to run this on your own box, and what it does not yet protect.
+- [docs/backups.md](docs/backups.md) is what is worth backing up, and why a restore is the same command as a migration.
 - [docs/repo-structure.md](docs/repo-structure.md) explains the repository layout and startup strategy.
 - [docs/agent-doc-sync.md](docs/agent-doc-sync.md) defines the documentation synchronization contract.
 - [AGENTS.md](AGENTS.md) provides the operating contract for agent-driven changes.

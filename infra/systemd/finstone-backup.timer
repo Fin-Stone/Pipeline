@@ -1,0 +1,25 @@
+# Nightly, and catching up if the box was off.
+#
+# The ledger's rows are regenerable from the store; the decisions in it are
+# not. Every category rule, every hand-set category, every row marked as a
+# transfer or hidden or paid back exists in exactly one place. That asymmetry
+# is why this timer is installed by default rather than offered as an option —
+# see docs/backups.md.
+
+[Unit]
+Description=Finstone nightly backup
+
+[Timer]
+OnCalendar=daily
+
+# The box is a mini-PC that may well be off at 00:00. Without this a backup
+# missed while it slept is simply never taken, which is exactly the machine
+# most likely to need one.
+Persistent=true
+
+# Nothing is racing for this window; the spread is only to avoid every timer on
+# the box waking the disk at the same instant.
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

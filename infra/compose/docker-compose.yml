@@ -37,7 +37,12 @@ services:
     <<: *app
     restart: unless-stopped
     ports:
-      - "${FINSTONE_API_PORT:-8000}:8000"
+      # `FINSTONE_BIND` is empty by default, so a laptop gets 0.0.0.0 and the
+      # phone on the sofa can reach it. A server install sets it to
+      # `127.0.0.1:` so the reverse proxy is the only way in — which matters
+      # more here than usual, because there is no authentication to fall back
+      # on if something else finds the port.
+      - "${FINSTONE_BIND:-}${FINSTONE_API_PORT:-8000}:8000"
     # Migrations first, every start. The schema guard refuses to run against a
     # database at the wrong revision, so this is what makes an upgraded image
     # come up rather than fail with a message nobody is watching for.
@@ -59,7 +64,7 @@ services:
       dockerfile: infra/compose/ui.Dockerfile
     restart: unless-stopped
     ports:
-      - "${FINSTONE_UI_PORT:-8080}:80"
+      - "${FINSTONE_BIND:-}${FINSTONE_UI_PORT:-8080}:80"
     depends_on:
       api:
         condition: service_started

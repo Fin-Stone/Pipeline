@@ -85,12 +85,25 @@ See [../../docs/backups.md](../../docs/backups.md).
 the build context entirely. Anything in a build context is baked into an image
 layer and travels wherever that image goes.
 
+## Which interface the ports land on
+
+`FINSTONE_BIND` is empty by default, so `8080` and `8000` are published on every
+interface — which is what a laptop wants, because the phone on the sofa has to
+be able to reach it.
+
+A server install sets it to `127.0.0.1:` so nothing but the reverse proxy can
+reach the containers. See [../../docs/deploy.md](../../docs/deploy.md); the
+install script does it for you.
+
 ## Before exposing this to a network
 
 **There is no authentication.** Not on the API, not on the UI. CORS defaults to
 permissive and that is honest rather than lax — it restricts browsers and not
 the `curl` beside them, so it buys nothing until there is something to protect.
 Keep the stack on a trusted network, or behind Tailscale, until auth exists.
+
+[../../docs/deploy.md](../../docs/deploy.md) says what a stopgap looks like and,
+more importantly, what it does not buy.
 
 ## Verified
 
