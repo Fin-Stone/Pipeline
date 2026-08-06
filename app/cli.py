@@ -1019,6 +1019,143 @@ def cmd_report(args) -> int:
     return 0
 
 
+def _mib(count: int) -> str:
+    return f"{count / (1 << 20):,.1f} MiB"
+
+
+def cmd_backup(args) -> int:
+    """Write the whole ledger, its originals and the learned layouts to one file.
+
+    Not profile-scoped. A backup is of the install, and restoring half of one is
+    not a restore — the dummy tenant costs almost nothing and its absence would
+    make a restored ledger fail its own tests.
+    """
+    from .pipeline import archive
+
+    config = load_config()
+    if args.out:
+        target = Path(args.out)
+    else:
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        target = config.data_dir / "backups" / f"finstone-{stamp}.tar.gz"
+
+    try:
+        manifest = archive.create(
+            config.database_url,
+            config.store_dir,
+            target,
+            learned_path=config.learned_rules_path,
+            include_store=not args.no_store,
+        )
+    except archive.ArchiveError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 4
+
+    size = target.stat().st_size
+    print(f"wrote {target}")
+    print(f"  size               {_mib(size)}")
+    print(f"  schema revision    {manifest.schema_revision}")
+    print(f"  rows               {manifest.total_rows:,}")
+    for name, count in sorted(manifest.rows.items()):
+        if count:
+            print(f"    {name:<20} {count:,}")
+    if args.no_store:
+        documents = manifest.rows.get("source_document", 0)
+        print(f"  originals          none  ({documents:,} documents cannot be reparsed from this)")
+    else:
+        print(f"  originals          {manifest.blobs:,}  ({_mib(manifest.blob_bytes)})")
+        if manifest.missing_originals:
+            print(f"    {manifest.missing_originals} referenced original(s) "
+                  "are not in the store and could not be saved")
+
+    if manifest.sanitised:
+        # Said out loud, because a backup that quietly alters what it saved is
+        # worse than one that fails.
+        total = sum(manifest.sanitised.values())
+        print(f"\n  {total} value(s) held a control character from text extraction")
+        for where, count in sorted(manifest.sanitised.items()):
+            print(f"    {where:<28} {count}")
+        print("    Replaced with a space. These are extraction artifacts, never")
+        print("    statement content, and Postgres refuses them outright.")
+
+    print("\n  finstone restore " + str(target))
+    print("  An untested backup is a rumour - restore it somewhere and check.")
+    return 0
+
+
+def cmd_restore(args) -> int:
+    """Rebuild a ledger from an archive, into whatever DATABASE_URL points at."""
+    from .pipeline import archive
+
+    config = load_config()
+    source = Path(args.archive)
+    if not source.exists():
+        print(f"error: no such archive: {source}", file=sys.stderr)
+        return 4
+
+    try:
+        manifest = archive.read_manifest(source)
+        print(f"archive            {source}")
+        print(f"  written          {manifest.created_at}")
+        print(f"  from             {manifest.source_engine}")
+        print(f"  schema revision  {manifest.schema_revision}")
+        print(f"  rows             {manifest.total_rows:,}")
+        print(f"  originals        {manifest.blobs:,}")
+        print(f"\ninto               {_safe_url(config.database_url)}")
+
+        result = archive.restore(
+            source,
+            config.database_url,
+            config.store_dir,
+            learned_path=config.learned_rules_path,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+    except archive.ArchiveError as exc:
+        print(f"\nerror: {exc}", file=sys.stderr)
+        return 4
+
+    if result.dry_run:
+        print("\ndry run - nothing was written")
+        return 0
+
+    print(f"\nrestored {sum(result.rows.values()):,} rows, {result.blobs:,} originals")
+    for name, count in sorted(result.rows.items()):
+        if count:
+            print(f"  {name:<22} {count:,}")
+
+    # The count the manifest promised against the count that landed. A restore
+    # that silently dropped rows is the failure this whole command exists to
+    # prevent, so it is checked rather than assumed.
+    short = {
+        name: (manifest.rows.get(name, 0), got)
+        for name, got in result.rows.items()
+        if manifest.rows.get(name, 0) != got
+    }
+    if result.upgraded_to:
+        print(f"\nmigrated {result.schema_revision} -> {result.upgraded_to}")
+        # Migrations legitimately change row counts, so a mismatch here is not
+        # evidence of anything.
+    elif short:
+        print("\nrow counts do not match the manifest:", file=sys.stderr)
+        for name, (expected, got) in sorted(short.items()):
+            print(f"  {name:<22} expected {expected:,}, restored {got:,}", file=sys.stderr)
+        return 5
+
+    print("\n  finstone status --profile prod")
+    return 0
+
+
+def _safe_url(url: str) -> str:
+    """A database URL with the password removed, for printing."""
+    from sqlalchemy.engine import make_url
+
+    try:
+        return make_url(url).render_as_string(hide_password=True)
+    except Exception:
+        return url
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="finstone", description="Self-hosted finance pipeline")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -1146,6 +1283,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--redact", action="store_true", help="mask descriptions and references")
     p.add_argument("--out", help="write to a file instead of stdout")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("backup", help="write the whole ledger and its originals to one archive")
+    p.add_argument(
+        "--out",
+        help="archive path; defaults to data/backups/finstone-<timestamp>.tar.gz",
+    )
+    p.add_argument(
+        "--no-store", action="store_true",
+        help="rows only, no original documents. Faster and much smaller, but a "
+             "restore from it cannot reparse anything.",
+    )
+    p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("restore", help="rebuild a ledger from an archive, on any engine")
+    p.add_argument("archive", help="path to a finstone archive")
+    p.add_argument(
+        "--force", action="store_true",
+        help="discard what is in the target database first. A restore replaces "
+             "everything; there is no merge.",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true",
+        help="say what the archive holds and what would happen, and write nothing",
+    )
+    p.set_defaults(func=cmd_restore)
 
     return parser
 

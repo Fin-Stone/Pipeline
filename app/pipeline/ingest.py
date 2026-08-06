@@ -29,7 +29,7 @@ from pathlib import Path
 from ..config import DOCUMENT_EXTENSIONS, Config
 from ..domain.dedupe import assign_seq, dedupe_key, sha256_file, statement_key
 from ..domain.models import IngestOutcome, ParsedDocument
-from ..domain.normalise import normalise_counterparty, normalise_description
+from ..domain.normalise import clean_raw, normalise_counterparty, normalise_description
 from ..parsers import fingerprint as fingerprinting
 from ..parsers import pdfio
 from ..parsers.registry import (
@@ -516,16 +516,20 @@ def _to_records(parsed: ParsedDocument) -> tuple[list[BalanceRecord], list[TxnRe
 
         seqs = assign_seq(account.txns)
         for txn, seq in zip(account.txns, seqs, strict=True):
-            description_norm = normalise_description(txn.description_raw)
+            # Cleaned once, here, before anything derives from it. Every parser
+            # feeds this path, so an extraction artifact is dealt with in one
+            # place rather than in each adapter that might produce one.
+            description_raw = clean_raw(txn.description_raw)
+            description_norm = normalise_description(description_raw)
             txns.append(TxnRecord(
                 account_key=key,
                 posted_date=txn.posted_date,
                 value_date=txn.value_date,
                 amount_minor=txn.amount_minor,
                 currency=txn.currency,
-                description_raw=txn.description_raw,
+                description_raw=description_raw,
                 description_norm=description_norm,
-                counterparty_norm=normalise_counterparty(txn.description_raw),
+                counterparty_norm=normalise_counterparty(description_raw),
                 fx_amount_minor=txn.fx_amount_minor,
                 fx_currency=txn.fx_currency,
                 fx_rate=txn.fx_rate,

@@ -17,6 +17,29 @@ _WHITESPACE = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^\w\s&/.*'-]")
 
 
+#: Control characters that are never in a bank statement and always come from
+#: text extraction. Tab, newline and carriage return are left alone: those are
+#: layout, and a parser may legitimately carry them through.
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def clean_raw(raw: str) -> str:
+    """Strip extraction artifacts from a description before it is stored.
+
+    `description_raw` means "as the bank printed it", not "as the PDF extractor
+    happened to decode it". A statement carrying a merchant's apostrophe came
+    through as a NUL byte, which SQLite stores happily and Postgres refuses
+    outright — so the ledger was portable right up until the day it had to move,
+    which is the day this matters.
+
+    Replaced with a space rather than dropped: the byte stood for a character,
+    and closing the gap would join two words that were never one.
+    """
+    if not raw:
+        return raw
+    return _CONTROL.sub(" ", raw)
+
+
 def normalise_description(raw: str) -> str:
     """Collapse a raw statement description to its stable form.
 

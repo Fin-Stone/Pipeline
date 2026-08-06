@@ -12,6 +12,9 @@ data/inbox/**
 data/store/**
 data/quarantine/**
 data/reports/**
+# A backup is the entire ledger and every original in one file. It is the last
+# thing that should ever reach a remote. See docs/backups.md.
+data/backups/**
 data/*.db
 data/*.db-journal
 data/*.sqlite3

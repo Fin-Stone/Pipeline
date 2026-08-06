@@ -42,11 +42,37 @@ service whether or not its profile is selected: a required password in the main
 file would make the plain `docker compose up` fail before it starts.
 
 ```bash
-POSTGRES_PASSWORD=... docker compose \
-    -f docker-compose.yml -f infra/compose/postgres.yml up
+cp .env.example .env      # set POSTGRES_PASSWORD
+docker compose -f docker-compose.yml -f infra/compose/postgres.yml up -d
 ```
 
 The image is pgvector so the later k-NN phase needs no image change.
+
+Postgres publishes on **127.0.0.1 only**. Nothing off the machine needs it, and
+the reason it is published at all is so the dual-engine test run can reach the
+real engine from the host:
+
+```bash
+docker compose -f docker-compose.yml -f infra/compose/postgres.yml \
+    exec db psql -U finstone -d postgres -c "CREATE DATABASE finstone_test;"
+TEST_DATABASE_URL='postgresql+psycopg://finstone:...@127.0.0.1:5432/finstone_test' pytest
+```
+
+That run is what keeps engine-specific SQL out of shared code. It is not
+optional decoration — it is how `GROUP_CONCAT` in a migration, and money totals
+arriving as strings, were both found.
+
+## Moving existing data onto Postgres
+
+Same two commands as a disaster restore, which is the point:
+
+```bash
+finstone backup --out data/backups/to-postgres.tar.gz
+DATABASE_URL='postgresql+psycopg://finstone:...@127.0.0.1:5432/finstone' \
+    finstone restore data/backups/to-postgres.tar.gz
+```
+
+See [../../docs/backups.md](../../docs/backups.md).
 
 ## What is mounted, and how
 
@@ -66,10 +92,13 @@ permissive and that is honest rather than lax — it restricts browsers and not
 the `curl` beside them, so it buys nothing until there is something to protect.
 Keep the stack on a trusted network, or behind Tailscale, until auth exists.
 
-## Unverified
+## Verified
 
-The compose configuration validates (`docker compose config`) for both the
-default and Postgres paths. **The images have never been built and the stack has
-never been started** — no Docker daemon was available when this was written.
-Expect the first `docker compose up` to surface build or runtime problems that
-configuration validation cannot catch.
+Both paths have been built and run: SQLite by default, and Postgres via the
+overlay with the full production ledger restored into it and every dashboard
+figure compared against the SQLite original. They match.
+
+The first real Postgres start is also what surfaced two bugs that configuration
+validation could never catch — a SQLite-only function in a migration, and money
+totals arriving as strings — so treat "it validates" and "it runs" as genuinely
+different claims.

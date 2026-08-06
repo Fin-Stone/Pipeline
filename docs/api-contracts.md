@@ -26,6 +26,13 @@ reintroduce exactly the error the ledger exists to avoid, so no endpoint emits
 one — not for a total, not for an average, not for a rounded display value.
 Formatting is the client's job.
 
+A JSON **string** breaks this promise just as badly as a float, and is the more
+likely way to break it: Postgres widens `SUM(bigint)` to `numeric` so it cannot
+overflow, which arrives as a `Decimal` and serialises as a quoted string. The
+same ledger then answers `/summary` with a number on SQLite and a string on
+Postgres. Every money sum is cast back to an integer in SQL. A client is
+entitled to `typeof === "number"` on every `_minor` field.
+
 **2. Amounts are signed by effect on the account.** Spending is **negative**,
 money in is positive, and card balances are stored negated so one formula
 covers both. The API does not flip signs for presentation.

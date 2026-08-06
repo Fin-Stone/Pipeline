@@ -79,6 +79,48 @@ class TestMoney:
         for row in body["by_category"]:
             assert isinstance(row["total_minor"], int)
 
+    def test_a_summed_total_is_an_integer_on_every_engine(self, client, repository):
+        """The case above passes on an empty ledger whatever the engine does,
+        because `sum([])` is 0 either way. With rows present, Postgres widens
+        `SUM(bigint)` to `numeric` and the total arrives as a JSON **string** —
+        which is what a household's real spending did the first time it moved
+        off SQLite. Nothing caught it, because no fixture had any money in it.
+        """
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256="e" * 64, institution="Test", doc_type="acc",
+                period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath="a.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [],
+            [TxnRecord(
+                account_key=account, posted_date=date(2026, 6, 3), amount_minor=-12345,
+                currency="SGD", description_raw="x", description_norm="X",
+                counterparty_norm="X", dedupe_key="k", seq=0,
+            )],
+        )
+
+        body = client.get(f"{PREFIX}/summary", params={"profile": "dummy"}).json()
+        assert body["total_minor"] == -12345
+        assert isinstance(body["total_minor"], int), (
+            f"total_minor came back as {type(body['total_minor']).__name__}"
+        )
+        for row in body["by_category"]:
+            assert isinstance(row["total_minor"], int)
+
     def test_an_open_range_has_no_average(self, client):
         """An average over an unbounded period is not a small number, it is
         not a number."""

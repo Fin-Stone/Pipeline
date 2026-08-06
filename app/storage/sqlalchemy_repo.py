@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import BigInteger, cast, create_engine, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -36,6 +36,23 @@ from . import schema
 #: Chunk size for the "which of these keys already exist" query. Keeps the
 #: parameter list well inside every driver's limit.
 _KEY_CHUNK = 500
+
+
+def sum_minor(column):
+    """SUM over minor units, as an integer on every engine.
+
+    Postgres widens `SUM(bigint)` to `numeric` to guarantee it cannot overflow,
+    and psycopg faithfully returns that as a `Decimal`. SQLite returns a plain
+    int. Left alone, the same ledger answers `/summary` with a JSON number on
+    one engine and a **string** on the other — which is what a household's
+    total spending did the first time it moved to Postgres, breaking the
+    contract's promise that money is integer minor units in every field.
+
+    Cast in SQL rather than coerced in Python so it is impossible to read a row
+    from one of these without the fix. A household's totals are nowhere near
+    a bigint, so the narrowing cannot lose anything.
+    """
+    return cast(func.sum(column), BigInteger)
 
 
 class SqlAlchemyLedgerRepository:
@@ -647,7 +664,7 @@ class SqlAlchemyLedgerRepository:
             select(
                 enrichment.category,
                 func.count().label("rows"),
-                func.sum(txn.amount_minor).label("total_minor"),
+                sum_minor(txn.amount_minor).label("total_minor"),
             )
             .select_from(
                 schema.txn.outerjoin(
@@ -680,14 +697,14 @@ class SqlAlchemyLedgerRepository:
             select(
                 enrichment.category,
                 func.count().label("rows"),
-                func.sum(txn.amount_minor).label("total_minor"),
+                sum_minor(txn.amount_minor).label("total_minor"),
             )
             .select_from(
                 schema.txn_enrichment.join(schema.txn, enrichment.txn_id == txn.id)
             )
             .where(enrichment.tenant_id == context.tenant_id)
             .group_by(enrichment.category)
-            .order_by(func.sum(txn.amount_minor))
+            .order_by(sum_minor(txn.amount_minor))
         )
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
