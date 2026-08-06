@@ -148,6 +148,20 @@ export interface MarkedTransfers {
 export interface CategoryUsage {
   name: string; exists: boolean; rules: number; transactions: number;
 }
+export interface CategoryRule {
+  id: number; pattern: string; category: string; weight: number; note: string;
+  created_at: string;
+  /** `operator` for a decision somebody made, `imported` for everything else.
+   *  Only the first kind is anybody's to take back. */
+  origin: "operator" | "imported";
+  /** The plain name, where the pattern is one escaped literal — which is what
+   *  every decision is. Null for a real expression, and then `pattern` is all
+   *  there is to show. */
+  counterparty: string | null;
+  /** Rows the name accounts for today. Null when there is no plain name to
+   *  count against, never zero-as-unknown. */
+  transactions: number | null;
+}
 export interface Candidate {
   id: number; posted_date: string; amount_minor: number; currency: string;
   counterparty_norm: string; description_raw: string;
@@ -217,6 +231,25 @@ export const api = {
     ),
   decide: (counterparty: string, category: string) =>
     call<{ created: boolean }>("/review/decide", { counterparty, category }, { method: "POST" }),
+  /** Takes a decision back in the words it was made in, so a client never has
+   *  to hold a rule id it was not shown. Removing nothing is not an error. */
+  undecide: (counterparty: string) =>
+    call<{ removed: number; was: { pattern: string; category: string }[] }>(
+      "/review/decide", { counterparty }, { method: "DELETE" },
+    ),
+  rules: (origin: "operator" | "imported" | "all" = "operator", q?: string, limit = 100) =>
+    call<{ total: number; rules: CategoryRule[] }>("/rules", { origin, q, limit }),
+  addRule: (pattern: string, category: string, weight = 0, note = "") =>
+    call<{ id: number | null; created: boolean }>(
+      "/rules", { pattern, category, weight, note }, { method: "POST" },
+    ),
+  /** `was` carries everything `addRule` needs to put it back — an id means
+   *  nothing once the row is gone. */
+  deleteRule: (rule_id: number) =>
+    call<{
+      deleted: boolean;
+      was: { pattern: string; category: string; weight: number; note: string } | null;
+    }>(`/rules/${rule_id}`, {}, { method: "DELETE" }),
 
   markedTransfers: () => call<MarkedTransfers>("/transfers/marked"),
   unmarkTransfer: (txn_id: number) =>

@@ -409,6 +409,22 @@ def consolidate(replies: dict, valid_categories=DEFAULT_CATEGORIES) -> list[Verd
 #: pattern that shipped with the product.
 OPERATOR_WEIGHT = 100
 
+#: The note `operator_rule` stamps on what it writes. Kept as a constant
+#: because `rule_origin` reads it back, and a decision that could not be told
+#: apart from an import afterwards could not be offered back for removal.
+OPERATOR_NOTE = "decided by operator"
+
+
+def rule_origin(weight: int, note: str) -> str:
+    """Who put a rule here — `operator` or `imported`.
+
+    Both halves of the pair have to agree. Weight alone is not enough: an
+    import is free to propose a weight, and a seed file is free to carry any
+    note. Only what `operator_rule` writes is somebody's decision, and only a
+    decision is a thing anybody should be invited to take back.
+    """
+    return "operator" if weight == OPERATOR_WEIGHT and note == OPERATOR_NOTE else "imported"
+
 
 @dataclass(frozen=True, slots=True)
 class ReviewItem:
@@ -482,7 +498,7 @@ def operator_rule(counterparty: str, category: str) -> tuple[str, str, int, str]
     """
     import re as _re
 
-    return (rf"^{_re.escape(counterparty)}$", category, OPERATOR_WEIGHT, "decided by operator")
+    return (rf"^{_re.escape(counterparty)}$", category, OPERATOR_WEIGHT, OPERATOR_NOTE)
 
 
 def coverage(counterparties, rules) -> dict:

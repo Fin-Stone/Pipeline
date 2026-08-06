@@ -339,6 +339,234 @@ class TestDeciding:
         assert again["created"] is False
 
 
+class TestUndeciding:
+    """Deciding was a one-way door: the rule went in and no route could name it
+    again, let alone remove it. Contract rule 2a — an inverse *and* a listing."""
+
+    def _decide(self, client, counterparty, category="Grocery"):
+        return client.post(
+            f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": counterparty, "category": category},
+        )
+
+    def test_a_decision_appears_in_the_listing(self, client):
+        self._decide(client, "FINDABLE SHOP")
+        body = client.get(f"{PREFIX}/rules", params={"profile": "dummy"}).json()
+        mine = [r for r in body["rules"] if r["counterparty"] == "FINDABLE SHOP"]
+        assert len(mine) == 1
+        assert mine[0]["category"] == "Grocery"
+        assert mine[0]["origin"] == "operator"
+
+    def test_the_listing_shows_the_name_not_the_pattern(self, client):
+        """A person is shown their own decision, not its implementation."""
+        self._decide(client, "A-SHOP (X)")
+        rule = next(
+            r for r in client.get(f"{PREFIX}/rules", params={"profile": "dummy"}).json()["rules"]
+            if r["counterparty"] == "A-SHOP (X)"
+        )
+        assert "\\" in rule["pattern"]  # escaped, as a decision must be
+        assert rule["counterparty"] == "A-SHOP (X)"
+
+    def test_taking_it_back_removes_it(self, client):
+        self._decide(client, "REGRETTED")
+        undone = client.request(
+            "DELETE", f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "REGRETTED"},
+        ).json()
+        assert undone["removed"] == 1
+        assert undone["was"] == [{"pattern": r"^REGRETTED$", "category": "Grocery"}]
+
+        body = client.get(f"{PREFIX}/rules", params={"profile": "dummy"}).json()
+        assert not [r for r in body["rules"] if r["counterparty"] == "REGRETTED"]
+
+    def test_taking_back_nothing_is_not_an_error(self, client):
+        """A second click on undo has to do what the first one did."""
+        self._decide(client, "ONCE")
+        for _ in range(2):
+            body = client.request(
+                "DELETE", f"{PREFIX}/review/decide",
+                params={"profile": "dummy", "counterparty": "ONCE"},
+            )
+            assert body.status_code == 200
+        assert body.json()["removed"] == 0
+
+    def test_the_name_is_matched_however_it_is_cased(self, client):
+        self._decide(client, "MIXED Case")
+        undone = client.request(
+            "DELETE", f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "mixed case"},
+        ).json()
+        assert undone["removed"] == 1
+
+    def test_deciding_again_after_undoing_works(self, client):
+        """Undo, then redo. The uniqueness constraint must not have kept the
+        name spoken for after the rule was removed."""
+        self._decide(client, "REDECIDED")
+        client.request(
+            "DELETE", f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "REDECIDED"},
+        )
+        again = self._decide(client, "REDECIDED", "Dining").json()
+        assert again["created"] is True
+
+    def test_undeciding_does_not_apply_either(self, client):
+        """Symmetric with deciding: neither writes through the ledger, so a
+        queue can be worked and reworked for one pass at the end."""
+        self._decide(client, "SYMMETRIC")
+        undone = client.request(
+            "DELETE", f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "SYMMETRIC"},
+        ).json()
+        assert undone["applied"] is False
+
+    def test_an_imported_rule_is_not_offered_as_a_decision(self, client):
+        """It was nobody's decision. Undoing one would promise something the
+        next import takes straight back — the same reason the matcher's own
+        transfer links are not listed."""
+        client.post(
+            f"{PREFIX}/rules",
+            params={"profile": "dummy", "pattern": "^SEEDED$", "category": "Grocery",
+                    "note": "agreed by 3/3 models"},
+        )
+        listed = client.get(f"{PREFIX}/rules", params={"profile": "dummy"}).json()
+        assert not [r for r in listed["rules"] if r["counterparty"] == "SEEDED"]
+
+        everything = client.get(
+            f"{PREFIX}/rules", params={"profile": "dummy", "origin": "all"}
+        ).json()
+        seeded = next(r for r in everything["rules"] if r["counterparty"] == "SEEDED")
+        assert seeded["origin"] == "imported"
+
+    def test_undeciding_leaves_an_imported_rule_alone(self, client):
+        client.post(
+            f"{PREFIX}/rules",
+            params={"profile": "dummy", "pattern": "^BORROWED$", "category": "Grocery"},
+        )
+        undone = client.request(
+            "DELETE", f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "BORROWED"},
+        ).json()
+        assert undone["removed"] == 0
+
+    def test_a_deleted_rule_says_enough_to_put_it_back(self, client):
+        """An id means nothing once the row is gone, so undo has to travel with
+        the response or it is a promise the client cannot keep."""
+        created = client.post(
+            f"{PREFIX}/rules",
+            params={"profile": "dummy", "pattern": "^RESTORE ME$", "category": "Dining",
+                    "weight": 7, "note": "why"},
+        ).json()
+        gone = client.delete(
+            f"{PREFIX}/rules/{created['id']}", params={"profile": "dummy"}
+        ).json()
+        assert gone["deleted"] is True
+        assert gone["was"] == {
+            "pattern": "^RESTORE ME$", "category": "Dining", "weight": 7, "note": "why",
+        }
+
+        back = client.post(f"{PREFIX}/rules", params={"profile": "dummy", **gone["was"]}).json()
+        assert back["created"] is True
+        # A new row. Its id is whatever the engine assigned — SQLite happily
+        # reuses the one just freed — so the response names it rather than
+        # letting a client carry on with the one it was holding.
+        assert back["id"] is not None
+        restored = client.get(
+            f"{PREFIX}/rules", params={"profile": "dummy", "origin": "all"}
+        ).json()["rules"]
+        assert [r for r in restored if r["id"] == back["id"]][0]["pattern"] == "^RESTORE ME$"
+
+    def test_deleting_a_rule_that_is_gone_is_not_an_error(self, client):
+        body = client.delete(f"{PREFIX}/rules/999999", params={"profile": "dummy"}).json()
+        assert body == {"rule_id": 999999, "deleted": False, "was": None, "applied": False}
+
+    def test_a_pattern_that_is_not_an_expression_is_refused(self, client):
+        """Rather than stored to throw on the next categorisation pass."""
+        response = client.post(
+            f"{PREFIX}/rules", params={"profile": "dummy", "pattern": "^(unclosed", "category": "Dining"},
+        )
+        assert response.status_code == 422
+
+    def test_an_unknown_category_is_refused_with_the_known_ones(self, client):
+        response = client.post(
+            f"{PREFIX}/rules",
+            params={"profile": "dummy", "pattern": "^X$", "category": "Nonsense"},
+        )
+        assert response.status_code == 422
+        assert "Grocery" in response.json()["detail"]["known"]
+
+    def test_the_listing_says_how_much_a_decision_covers(self, client, repository):
+        """"This covers 47 rows" is what makes removing one a considered act."""
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256="c" * 64, institution="Test", doc_type="acc",
+                period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath="a.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [],
+            [
+                TxnRecord(
+                    account_key=account, posted_date=date(2026, 6, 3 + i),
+                    amount_minor=-1000, currency="SGD",
+                    description_raw="COUNTED SHOP", description_norm="COUNTED SHOP",
+                    counterparty_norm="COUNTED SHOP", dedupe_key=f"c{i}", seq=i,
+                )
+                for i in range(3)
+            ],
+        )
+        self._decide(client, "COUNTED SHOP")
+        rule = next(
+            r for r in client.get(f"{PREFIX}/rules", params={"profile": "dummy"}).json()["rules"]
+            if r["counterparty"] == "COUNTED SHOP"
+        )
+        assert rule["transactions"] == 3
+
+    def test_a_rule_with_no_plain_name_reports_no_count(self, client):
+        """Null rather than zero. A real expression would need a scan to count
+        against, and a zero would read as "covers nothing", which is a
+        different claim from "not counted"."""
+        client.post(
+            f"{PREFIX}/rules",
+            params={"profile": "dummy", "pattern": "SHOP|STORE", "category": "Grocery"},
+        )
+        rule = next(
+            r for r in client.get(
+                f"{PREFIX}/rules", params={"profile": "dummy", "origin": "all"}
+            ).json()["rules"]
+            if r["pattern"] == "SHOP|STORE"
+        )
+        assert rule["counterparty"] is None and rule["transactions"] is None
+
+    def test_the_listing_can_be_searched(self, client):
+        self._decide(client, "NEEDLE SHOP")
+        self._decide(client, "HAYSTACK SHOP")
+        found = client.get(
+            f"{PREFIX}/rules", params={"profile": "dummy", "q": "needle"}
+        ).json()
+        assert [r["counterparty"] for r in found["rules"]] == ["NEEDLE SHOP"]
+
+    def test_the_newest_decision_is_first(self, client):
+        """The rule somebody wants to find is nearly always the one they just
+        wrote, and weight order buries it among everything else at 100."""
+        self._decide(client, "OLDER")
+        self._decide(client, "NEWER")
+        listed = client.get(f"{PREFIX}/rules", params={"profile": "dummy"}).json()
+        names = [r["counterparty"] for r in listed["rules"]]
+        assert names.index("NEWER") < names.index("OLDER")
+
+
 class TestTrend:
     def test_the_response_says_what_window_the_line_used(self, client):
         """A client labels the line from this. Deriving it client-side would

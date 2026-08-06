@@ -421,7 +421,9 @@ def cmd_review(args) -> int:
     ranking and the decision both live in the domain and the repository, and
     this is the thin caller that proves they work. See architecture §5.2.
     """
-    from .domain.categories import DEFAULT_CATEGORIES, Rule, operator_rule, review_queue
+    from .domain.categories import (
+        DEFAULT_CATEGORIES, Rule, operator_rule, review_queue, rule_origin,
+    )
     from .pipeline.diagnostics import _money, describe
 
     config = load_config()
@@ -430,6 +432,45 @@ def cmd_review(args) -> int:
         check_schema(repository)
         context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         repository.seed_categories(context, DEFAULT_CATEGORIES)
+
+        # Only the operator's own. An imported rule was nobody's decision, and
+        # offering to undo one would promise something the next import takes
+        # straight back — see `rule_origin`.
+        def decisions():
+            return [
+                (r, Rule(pattern=r["pattern"], category=r["category"]).literal)
+                for r in repository.list_category_rules(context)
+                if rule_origin(r["weight"], r["note"]) == "operator"
+            ]
+
+        if args.undecide:
+            wanted = args.undecide.strip().upper()
+            doomed = [r for r, literal in decisions() if literal == wanted]
+            for rule in doomed:
+                repository.delete_category_rule(context, rule["id"])
+            # Removing nothing is not an error: running this twice has to do
+            # what running it once did.
+            print(f"{args.undecide}   {len(doomed)} decision(s) removed")
+            if doomed:
+                print("  Run `finstone categorise --apply` to write the ledger back.")
+            return 0
+
+        if args.decided:
+            mine = decisions()
+            counts = repository.counterparty_row_counts(
+                context, [literal for _, literal in mine if literal]
+            )
+            print(f"profile              {args.profile}")
+            print(f"decided by hand      {len(mine)}\n")
+            if mine:
+                print(f"{'counterparty':<44}{'category':<18}{'rows':>6}")
+            for rule, literal in sorted(mine, key=lambda m: -(counts.get(m[1]) or 0)):
+                shown = describe(literal or rule["pattern"], args.redact)
+                print(f"{shown[:43]:<44}{rule['category'][:17]:<18}"
+                      f"{counts.get(literal, 0):>6}")
+            if mine:
+                print('\n  finstone review --undecide "<counterparty>"')
+            return 0
 
         if args.decide:
             categories = {c["name"].lower(): c["name"] for c in repository.list_categories(context)}
@@ -443,6 +484,7 @@ def cmd_review(args) -> int:
                   f"{'' if added else '   (already decided)'}")
             print("  Weighted above anything imported: deciding by hand ends the argument.")
             print("  Run `finstone categorise --apply` to write it through the ledger.")
+            print(f'  Undo with `finstone review --undecide "{args.decide}"`.')
             return 0
 
         rules = [
@@ -468,6 +510,7 @@ def cmd_review(args) -> int:
             print(f"{describe(item.counterparty, args.redact)[:43]:<44}"
                   f"{item.occurrences:>6}{_money(item.total_minor)}")
         print('\n  finstone review --decide "<counterparty>" --category "<category>"')
+        print('  finstone review --decided                 what you have settled so far')
     return 0
 
 
@@ -1220,6 +1263,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--redact", action="store_true", help="mask counterparty names")
     p.add_argument("--decide", metavar="COUNTERPARTY", help="settle one, exactly as listed")
     p.add_argument("--category", help="the category to settle it as")
+    p.add_argument("--undecide", metavar="COUNTERPARTY", help="take a decision back")
+    p.add_argument("--decided", action="store_true", help="what has been decided by hand")
     p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("propose", help="counterparties to ask a model about, sanitised")

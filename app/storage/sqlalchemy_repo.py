@@ -399,13 +399,62 @@ class SqlAlchemyLedgerRepository:
         """
         rule, cat = schema.category_rule.c, schema.category.c
         stmt = (
-            select(rule.id, rule.pattern, rule.weight, rule.note, cat.name.label("category"))
+            select(
+                rule.id, rule.pattern, rule.weight, rule.note, rule.created_at,
+                cat.name.label("category"),
+            )
             .select_from(schema.category_rule.join(schema.category, rule.category_id == cat.id))
             .where(rule.tenant_id == context.tenant_id)
             .order_by(rule.weight.desc(), rule.id)
         )
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def delete_category_rule(self, context: TenantContext, rule_id: int) -> bool:
+        """Remove one rule — the way back from a decision.
+
+        `False` for a rule that is not there, so deleting twice is the same as
+        deleting once: an undo that errors on a second click is worse than one
+        that does nothing.
+
+        Nothing else is touched. A rule decides what the *next* categorisation
+        pass writes, exactly as adding one does, so removing it is symmetric
+        with `add_category_rules` rather than a quiet rewrite of the ledger.
+        The enrichments the rule already produced carry `source: rule` and are
+        replaced wholesale by that pass — see `replace_rule_enrichments`.
+        """
+        rule = schema.category_rule.c
+        with self._engine.begin() as conn:
+            removed = conn.execute(schema.category_rule.delete().where(
+                (rule.tenant_id == context.tenant_id) & (rule.id == rule_id)
+            )).rowcount
+        return bool(removed)
+
+    def counterparty_row_counts(self, context: TenantContext, names) -> dict[str, int]:
+        """How many rows each of `names` accounts for.
+
+        What makes removing a decision a considered act rather than a guess:
+        "this covers 47 rows" is the difference between undoing a typo and
+        undoing a month of work. Counted over every row, including ones already
+        categorised, because a rule claims a name whatever else has been said
+        about it.
+
+        Compared exactly. `normalise_counterparty` upper-cases what it stores
+        and `Rule.literal` upper-cases what it extracts, so both sides are
+        already folded — and folding again in SQL would cost a full scan on
+        every call to buy nothing.
+        """
+        wanted = [n for n in dict.fromkeys(names) if n]
+        if not wanted:
+            return {}
+        txn = schema.txn.c
+        stmt = (
+            select(txn.counterparty_norm, func.count().label("rows"))
+            .where((txn.tenant_id == context.tenant_id) & txn.counterparty_norm.in_(wanted))
+            .group_by(txn.counterparty_norm)
+        )
+        with self._engine.connect() as conn:
+            return {row.counterparty_norm: row.rows for row in conn.execute(stmt)}
 
     def replace_rule_enrichments(self, context: TenantContext, decided) -> dict:
         """Write what the rules decided, and touch nothing a human decided.

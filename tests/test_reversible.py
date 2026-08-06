@@ -174,6 +174,76 @@ class TestAddingACategoryCanBeUndone:
         assert usage == {"exists": True, "rules": 0, "transactions": 1}
 
 
+class TestADecisionCanBeTakenBack:
+    """Deciding a counterparty writes a rule that outranks everything imported
+    and settles the name for good. That is a lot of consequence for one click,
+    and until now nothing could name the rule afterwards, let alone remove it.
+    """
+
+    def _decide(self, repository, context, counterparty, category="Dining"):
+        from app.domain.categories import operator_rule
+
+        if category not in {c["name"] for c in repository.list_categories(context)}:
+            repository.add_category(context, category)
+        repository.add_category_rules(context, [operator_rule(counterparty, category)])
+        return next(
+            r for r in repository.list_category_rules(context)
+            if r["pattern"] == rf"^{counterparty}$"
+        )
+
+    def test_the_rules_go_back_to_what_they_were(self, repository, context, ledger):
+        before = repository.list_category_rules(context)
+        rule = self._decide(repository, context, "COFFEE")
+        assert repository.list_category_rules(context) != before
+
+        assert repository.delete_category_rule(context, rule["id"]) is True
+        assert repository.list_category_rules(context) == before
+
+    def test_removing_one_twice_is_not_an_error(self, repository, context, ledger):
+        rule = self._decide(repository, context, "COFFEE")
+        assert repository.delete_category_rule(context, rule["id"]) is True
+        assert repository.delete_category_rule(context, rule["id"]) is False
+
+    def test_deciding_again_after_removing_works(self, repository, context, ledger):
+        """The uniqueness constraint must not have kept the name spoken for."""
+        from app.domain.categories import operator_rule
+
+        rule = self._decide(repository, context, "COFFEE")
+        repository.delete_category_rule(context, rule["id"])
+        assert repository.add_category_rules(
+            context, [operator_rule("COFFEE", "Dining")]
+        ) == 1
+
+    def test_removing_one_leaves_the_others_alone(self, repository, context, ledger):
+        doomed = self._decide(repository, context, "COFFEE")
+        kept = self._decide(repository, context, "DINNER")
+        repository.delete_category_rule(context, doomed["id"])
+        assert [r["id"] for r in repository.list_category_rules(context)] == [kept["id"]]
+
+    def test_a_decision_can_be_told_apart_from_an_import(self, repository, context, ledger):
+        """Only a decision is anybody's to take back. An imported rule was
+        nobody's, and offering to undo one would promise something the next
+        import takes straight back."""
+        from app.domain.categories import rule_origin
+
+        self._decide(repository, context, "COFFEE")
+        repository.add_category_rules(
+            context, [(r"^DINNER$", "Dining", 0, "agreed by 3/3 models")]
+        )
+        origins = {
+            r["pattern"]: rule_origin(r["weight"], r["note"])
+            for r in repository.list_category_rules(context)
+        }
+        assert origins == {r"^COFFEE$": "operator", r"^DINNER$": "imported"}
+
+    def test_how_much_a_decision_covers_can_be_asked(self, repository, context, ledger):
+        counts = repository.counterparty_row_counts(context, ["COFFEE", "DINNER", "NOTHING"])
+        assert counts == {"COFFEE": 1, "DINNER": 1}
+
+    def test_asking_about_nothing_costs_no_query(self, repository, context, ledger):
+        assert repository.counterparty_row_counts(context, []) == {}
+
+
 class TestUndoingIsIdempotent:
     """A double-click on Undo must not do something different from one click."""
 

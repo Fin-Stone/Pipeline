@@ -49,6 +49,8 @@ nobody can reach is not an undo:
 | `POST /paybacks` | `DELETE /paybacks/{expense_txn_id}` | `GET /paybacks` |
 | `POST /transactions/{id}/category` | `DELETE …/category`, or post another | `GET /transactions` |
 | `POST /categories` | `DELETE /categories/{name}` | `GET /categories` |
+| `POST /review/decide` | `DELETE /review/decide?counterparty=` | `GET /rules` |
+| `POST /rules` | `DELETE /rules/{id}` | `GET /rules?origin=all` |
 
 **A new endpoint that changes a figure must add a row to that table.** Marking a
 transfer had the inverse and not the listing for a while: the row vanished from
@@ -386,6 +388,92 @@ Settles one counterparty for good. `201` on success.
 separate pass so a run of decisions costs one write rather than one each. Until
 then `/summary` will not reflect them. A client working through a queue should
 decide freely and apply once at the end.
+
+### `DELETE /api/v1/review/decide?counterparty=`
+
+Takes a decision back, keyed on the name it was made about rather than on a rule
+id. A client working the queue decided about a *counterparty*; asking it to
+remember an id it was never shown would put the undo out of reach of the screen
+that needs it.
+
+```json
+{ "counterparty": "SOME SHOP", "removed": 1,
+  "was": [{ "pattern": "^SOME SHOP$", "category": "Grocery" }], "applied": false }
+```
+
+- Matches the name **case-insensitively**.
+- **Only the operator's own rules.** An imported one was nobody's decision and
+  is not what this route promised to reverse — `DELETE /rules/{id}` is for when
+  one of those really is the thing in the way.
+- Removing nothing is **not an error**; `removed` is `0`, so a second click does
+  what the first one did.
+- `applied` is `false` for the same reason deciding's is. Neither direction
+  writes through the ledger, so a queue can be worked and reworked for one pass
+  at the end.
+
+### `GET /api/v1/rules?origin=&q=&limit=`
+
+The rules deciding this ledger, **newest first**, and who put each one there.
+
+```json
+{ "total": 3, "rules": [{
+  "id": 812, "pattern": "^SOME SHOP$", "category": "Grocery",
+  "weight": 100, "note": "decided by operator", "created_at": "2026-08-06T…",
+  "origin": "operator", "counterparty": "SOME SHOP", "transactions": 47 }] }
+```
+
+- `origin` is `operator` (the default), `imported`, or `all`. It defaults to
+  `operator` because that is the answer to the question anybody arrives with —
+  *what have I decided?* The imported set is large and was nobody's decision.
+- `origin: "operator"` means **exactly what `POST /review/decide` writes**: the
+  operator weight *and* the operator note. Weight alone is not enough — an
+  import is free to propose one.
+- `counterparty` is the plain name where the pattern is one escaped literal,
+  which every decision is. **Show it, not the pattern**; a person looking at
+  `^IKEA\-RESTAURANT$` is looking at the implementation of their own decision.
+  `null` for a real expression, and then `pattern` is all there is.
+- `transactions` is how many rows that name accounts for today, so removing a
+  rule can be a considered act. `null` — never `0` — where there is no plain
+  name to count against: "not counted" is a different claim from "covers
+  nothing".
+- Sorted by insertion order, not by weight. The rule somebody wants is nearly
+  always the one they just wrote, and weight order buries it among everything
+  else at 100.
+
+### `POST /api/v1/rules?pattern=&category=&weight=&note=`
+
+`201`. Puts a rule back — the inverse of removing one, and the only thing that
+can restore an imported rule. Takes the pattern **verbatim** rather than a
+counterparty: what is being undone is a rule, and rebuilding one from a name
+would not reproduce anything that was a real expression.
+
+```json
+{ "id": 813, "pattern": "^SOME SHOP$", "category": "Grocery",
+  "created": true, "applied": false }
+```
+
+- `422` for a pattern that is not a valid expression, rather than storing
+  something that throws on the next categorisation pass.
+- `422` with the known categories for a category the tenant does not have.
+- Adding one that already exists is **not an error**; `created` is `false`.
+- **`id` is a new id.** The row is a new row, and an engine may reuse the one
+  just freed. A client that deleted a rule and put it back must read this rather
+  than carry on with the id it was holding.
+
+### `DELETE /api/v1/rules/{rule_id}`
+
+```json
+{ "rule_id": 812, "deleted": true, "applied": false,
+  "was": { "pattern": "^SOME SHOP$", "category": "Grocery",
+           "weight": 100, "note": "decided by operator" } }
+```
+
+**`was` is the point.** A rule id means nothing once the row is gone, so the
+response carries everything `POST /rules` needs to put it back. Without that,
+undo would be a promise the client could not keep.
+
+Deleting something already gone is `deleted: false` with `was: null`, not `404`
+— the same shape as unhiding twice.
 
 ### `GET /api/v1/transfers`
 

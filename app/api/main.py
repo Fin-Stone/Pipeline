@@ -36,6 +36,7 @@ from ..domain.categories import (
     RuleSet,
     operator_rule,
     review_queue,
+    rule_origin,
 )
 from ..domain.networth import Declared, change, net_worth
 from ..domain.recurrence import Occurrence, find_series
@@ -485,6 +486,214 @@ def decide(handle: Session, counterparty: str, category: str) -> dict:
         "created": bool(added),
         # The ledger is not rewritten here: applying is a separate, explicit
         # pass so a run of decisions costs one write rather than one each.
+        "applied": False,
+    }
+
+
+def _literal_name(pattern: str) -> str | None:
+    """The plain name a pattern matches, if it matches exactly one.
+
+    `None` for a real expression, and also for a pattern that no longer
+    compiles: a single unusable rule left by some past import must not be able
+    to take down the listing that exists to let somebody remove it.
+    """
+    try:
+        return Rule(pattern=pattern, category="").literal
+    except ValueError:
+        return None
+
+
+def _decisions_for(handle: Session, counterparty: str) -> list[dict]:
+    """The operator's own rules that settle exactly this counterparty.
+
+    Matched on the name rather than on the pattern, because a client that made
+    a decision knows what it decided about and should not have to reconstruct
+    the escaping to take it back. Case-insensitive for the same reason.
+    """
+    wanted = (counterparty or "").strip().upper()
+    if not wanted:
+        return []
+    return [
+        r for r in handle.repository.list_category_rules(handle.context)
+        if rule_origin(r["weight"], r["note"]) == "operator"
+        and _literal_name(r["pattern"]) == wanted
+    ]
+
+
+@app.delete(f"{PREFIX}/review/decide", tags=["categorisation"])
+def undecide(handle: Session, counterparty: str) -> dict:
+    """Take back a decision, in the same words it was made in.
+
+    The inverse of `POST /review/decide`, keyed on the counterparty rather than
+    on a rule id: a client working through the queue decided about a *name*,
+    and asking it to remember an id it was never shown would put the undo out
+    of reach of the screen that needs it.
+
+    Only the operator's own rules are in scope. An imported one was nobody's
+    decision, is not what this route promised to reverse, and has `DELETE
+    /rules/{id}` for when it really is the thing in the way.
+
+    Removing nothing is not an error — `removed` is `0` — so a second click
+    does what the first one did.
+    """
+    doomed = _decisions_for(handle, counterparty)
+    for rule in doomed:
+        handle.repository.delete_category_rule(handle.context, rule["id"])
+    return {
+        "counterparty": counterparty,
+        "removed": len(doomed),
+        # What it used to say, so the client can put it back verbatim.
+        "was": [{"pattern": r["pattern"], "category": r["category"]} for r in doomed],
+        # Symmetric with deciding: neither writes through the ledger, so a
+        # queue can be worked and reworked for one pass at the end.
+        "applied": False,
+    }
+
+
+@app.get(f"{PREFIX}/rules", tags=["categorisation"])
+def rules(
+    handle: Session,
+    origin: Annotated[str, Query(pattern="^(operator|imported|all)$")] = "operator",
+    q: str | None = None,
+    limit: Annotated[int, Query(le=500)] = 100,
+) -> dict:
+    """The rules deciding this ledger, and who put each one there.
+
+    Defaults to `operator` because that is the answer to the question anybody
+    actually arrives with — *what have I decided?* The imported set is large,
+    was nobody's decision, and reads as noise beside a handful of deliberate
+    ones.
+
+    Newest first. A rule somebody wants to find is nearly always the one they
+    just wrote, and weight order buries it among everything else at 100.
+
+    `transactions` is how many rows a rule's name accounts for today, so
+    removing one can be a considered act rather than a guess. It is counted
+    only for rules that match a single literal name — anything with real regex
+    in it would need a scan, and none of what this route is for has any.
+    """
+    stored = handle.repository.list_category_rules(handle.context)
+    wanted = [
+        (r, rule_origin(r["weight"], r["note"]), _literal_name(r["pattern"]))
+        for r in stored
+    ]
+    if origin != "all":
+        wanted = [w for w in wanted if w[1] == origin]
+    if q:
+        needle = q.strip().upper()
+        wanted = [
+            w for w in wanted
+            if needle in w[0]["pattern"].upper() or needle in w[0]["category"].upper()
+        ]
+
+    total = len(wanted)
+    # By id, which is insertion order. `created_at` would say the same thing
+    # and is naive on one engine and aware on the other, so sorting on it is a
+    # portability hazard for no gain.
+    wanted.sort(key=lambda w: w[0]["id"], reverse=True)
+    shown = wanted[:limit]
+    counts = handle.repository.counterparty_row_counts(
+        handle.context, [literal for _, _, literal in shown if literal]
+    )
+    return {
+        "total": total,
+        "rules": [
+            {
+                "id": r["id"],
+                "pattern": r["pattern"],
+                "category": r["category"],
+                "weight": r["weight"],
+                "note": r["note"],
+                "created_at": r["created_at"],
+                "origin": origin_of,
+                # The plain name, where there is one. A client showing
+                # `^IKEA\-RESTAURANT$` to a person is showing them the
+                # implementation of their own decision.
+                "counterparty": literal,
+                "transactions": counts.get(literal) if literal else None,
+            }
+            for r, origin_of, literal in shown
+        ],
+    }
+
+
+@app.post(f"{PREFIX}/rules", tags=["categorisation"], status_code=201)
+def add_rule(
+    handle: Session,
+    pattern: str,
+    category: str,
+    weight: int = 0,
+    note: str = "",
+) -> dict:
+    """Put a rule back — the inverse of removing one.
+
+    Exists so that `DELETE /rules/{id}` is not a one-way door for the imported
+    set, which nothing in the API could otherwise restore. Deliberately takes
+    the pattern verbatim rather than a counterparty: what is being undone is a
+    rule, and rebuilding one from a name would not reproduce a real expression.
+
+    `422` for a pattern that is not a valid expression, rather than storing
+    something that will throw on the next categorisation pass.
+    """
+    handle.repository.seed_categories(handle.context, DEFAULT_CATEGORIES)
+    known = {c["name"].lower(): c["name"] for c in handle.repository.list_categories(handle.context)}
+    chosen = known.get(category.lower())
+    if chosen is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "unknown category", "known": sorted(known.values())},
+        )
+    try:
+        Rule(pattern=pattern, category=chosen)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": str(exc)}) from exc
+
+    added = handle.repository.add_category_rules(
+        handle.context, [(pattern, chosen, weight, note)]
+    )
+    restored = next(
+        (r for r in handle.repository.list_category_rules(handle.context)
+         if r["pattern"] == pattern and r["category"] == chosen),
+        None,
+    )
+    return {
+        # The row is a new row, and its id is whatever the engine assigned —
+        # SQLite reuses one just freed. Named here so a client that deleted a
+        # rule and put it back is not left holding an id nothing answers to.
+        "id": restored["id"] if restored else None,
+        "pattern": pattern,
+        "category": chosen,
+        "created": bool(added),
+        "applied": False,
+    }
+
+
+@app.delete(f"{PREFIX}/rules/{{rule_id}}", tags=["categorisation"])
+def delete_rule(handle: Session, rule_id: int) -> dict:
+    """Remove one rule, and say what it was.
+
+    `was` is the whole point: a rule id means nothing once the row is gone, so
+    the response carries everything `POST /rules` needs to put it back. Without
+    that, undo would be a promise the client could not keep.
+
+    Deleting something already gone is `deleted: false`, not `404` — the same
+    shape as unhiding twice.
+    """
+    found = next(
+        (r for r in handle.repository.list_category_rules(handle.context)
+         if r["id"] == rule_id),
+        None,
+    )
+    if found is None:
+        return {"rule_id": rule_id, "deleted": False, "was": None, "applied": False}
+    handle.repository.delete_category_rule(handle.context, rule_id)
+    return {
+        "rule_id": rule_id,
+        "deleted": True,
+        "was": {
+            "pattern": found["pattern"], "category": found["category"],
+            "weight": found["weight"], "note": found["note"],
+        },
         "applied": False,
     }
 
