@@ -30,7 +30,13 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import PROFILE_PROD, Config, load_config
-from ..domain.categories import DEFAULT_CATEGORIES, Rule, operator_rule, review_queue
+from ..domain.categories import (
+    DEFAULT_CATEGORIES,
+    Rule,
+    RuleSet,
+    operator_rule,
+    review_queue,
+)
 from ..domain.networth import Declared, change, net_worth
 from ..domain.recurrence import Occurrence, find_series
 from ..storage.factory import build_repository
@@ -71,24 +77,52 @@ def _config() -> Config:
     return load_config()
 
 
-class _Session:
-    """One request's repository and tenant.
+#: One repository per database URL, for the life of the process.
+#:
+#: **The engine is shared; the tenant is not.** Building a repository is lazy
+#: and free, but the first query on a new engine pays a full connect — 27ms of
+#: TCP and authentication against Postgres, against 8ms for the query it was
+#: opened to run. Disposing it at the end of every request threw that away and
+#: paid it again on the next one, so three quarters of every response was
+#: connection setup.
+#:
+#: This is safe because a repository is not bound to a tenant. Every method
+#: takes a `TenantContext` and filters on it — the tenant-isolation tests exist
+#: to keep it that way — so what must stay per-request is the *context*, and it
+#: does. Sharing the pool underneath changes nothing about who can see what.
+_REPOSITORIES: dict[str, object] = {}
 
-    Opened and closed per request rather than held: the tenant is a property of
-    the caller, and a long-lived handle bound to one tenant is how a hosted
-    deployment leaks between households.
-    """
+
+def _repository_for(config: Config):
+    repository = _REPOSITORIES.get(config.database_url)
+    if repository is None:
+        repository = build_repository(config)
+        _REPOSITORIES[config.database_url] = repository
+    return repository
+
+
+def reset_repositories() -> None:
+    """Drop every pooled engine. For tests, which build a database per case."""
+    for repository in _REPOSITORIES.values():
+        repository.close()
+    _REPOSITORIES.clear()
+
+
+class _Session:
+    """One request's tenant, over a shared connection pool."""
 
     def __init__(self, config: Config, profile: str):
         self.config = config
         self.profile = profile
-        self.repository = build_repository(config)
+        self.repository = _repository_for(config)
         self.context = self.repository.resolve_context(
             config.tenant_for(profile), config.member_email
         )
 
     def close(self) -> None:
-        self.repository.close()
+        # Deliberately not disposing: the pool outlives the request. Connections
+        # are returned to it by the context managers around each query.
+        pass
 
 
 def session(
@@ -383,10 +417,10 @@ def recurring(
 @app.get(f"{PREFIX}/review", tags=["categorisation"])
 def review(handle: Session, limit: Annotated[int, Query(le=500)] = 50) -> dict:
     """What still needs a person, ranked by what deciding it is worth."""
-    rules = [
+    rules = RuleSet(
         Rule(pattern=r["pattern"], category=r["category"], weight=r["weight"], note=r["note"])
         for r in handle.repository.list_category_rules(handle.context)
-    ]
+    )
     targets = handle.repository.list_categorisation_targets(handle.context)
     queue = review_queue(
         ((t["counterparty_norm"], t["amount_minor"]) for t in targets), rules

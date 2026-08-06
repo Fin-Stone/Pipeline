@@ -570,7 +570,13 @@ def cmd_categorise(args) -> int:
     the gaps it ranks: the counterparties costing the most coverage are exactly
     the rules worth writing next, and guessing at that order wastes the effort.
     """
-    from .domain.categories import DEFAULT_CATEGORIES, Rule, categorise, coverage
+    from .domain.categories import (
+        DEFAULT_CATEGORIES,
+        Rule,
+        RuleSet,
+        categorise,
+        coverage,
+    )
     from .pipeline.diagnostics import _money, describe
 
     config = load_config()
@@ -585,10 +591,12 @@ def cmd_categorise(args) -> int:
     finally:
         repository.close()
 
-    rules = [
+    # Indexed once and reused by every pass below. Nearly every stored rule
+    # matches exactly one name, so this turns the scan into a lookup.
+    rules = RuleSet(
         Rule(pattern=r["pattern"], category=r["category"], weight=r["weight"], note=r["note"])
         for r in stored
-    ]
+    )
     report = coverage([t["counterparty_norm"] or "" for t in targets], rules)
     spend = {t["id"]: t["amount_minor"] for t in targets}
 

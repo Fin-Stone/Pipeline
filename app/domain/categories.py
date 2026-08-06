@@ -52,6 +52,36 @@ DEFAULT_CATEGORIES: tuple[str, ...] = (
 UNCATEGORISED = "Others"
 
 
+#: A pattern that is `^...$` around nothing but an escaped literal. That is
+#: what `operator_rule` produces, so on a working install almost every rule is
+#: one — see RuleSet.
+_ANCHORED = re.compile(r"\A\^(.*)\$\Z", re.DOTALL)
+_UNESCAPE = re.compile(r"\\(.)", re.DOTALL)
+
+
+def _literal_of(pattern: str) -> str | None:
+    """The whole name `pattern` matches, if it matches exactly one name.
+
+    Decided by round-trip rather than by inspection: unescape the body, escape
+    it again, and accept only if that reproduces the original. Anything with
+    real regex in it fails that and is left to be scanned.
+    """
+    anchored = _ANCHORED.match(pattern)
+    if not anchored:
+        return None
+    body = anchored.group(1)
+    try:
+        plain = _UNESCAPE.sub(r"\1", body)
+    except re.error:  # pragma: no cover - sub on a literal cannot fail
+        return None
+    if re.escape(plain) != body:
+        return None
+    # `$` also matches before a trailing newline, which a dict lookup would
+    # not. Names are normalised and never contain one, but the fast path has
+    # to be exactly equivalent or it is not a fast path, it is a bug.
+    return plain.upper() if "\n" not in plain else None
+
+
 @dataclass(frozen=True, slots=True)
 class Rule:
     """One pattern, and what it means.
@@ -69,6 +99,10 @@ class Rule:
     #: Free text for the operator, shown when explaining a decision.
     note: str = ""
     _compiled: re.Pattern = field(init=False, repr=False, compare=False, default=None)
+    #: The whole name this rule matches, upper-cased, when its pattern is an
+    #: anchored literal and nothing more. `None` for a rule that is a real
+    #: expression. See RuleSet for what this buys.
+    literal: str | None = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
         try:
@@ -76,6 +110,7 @@ class Rule:
         except re.error as exc:
             raise ValueError(f"rule pattern {self.pattern!r} is not valid: {exc}") from exc
         object.__setattr__(self, "_compiled", compiled)
+        object.__setattr__(self, "literal", _literal_of(self.pattern))
 
     def matches(self, counterparty: str) -> bool:
         return bool(self._compiled.search(counterparty or ""))
@@ -115,6 +150,46 @@ class Decision:
         return self.rule is None or bool(self.contested)
 
 
+class RuleSet(tuple):
+    """Rules, with the exact-match ones indexed by the name they match.
+
+    A tuple, so it can be passed anywhere a list of rules already goes and
+    nothing else has to know it exists.
+
+    **Why.** A decided counterparty becomes `^<escaped name>$` — see
+    `operator_rule` — so on a working install nearly every rule matches exactly
+    one name and is a dictionary key wearing a regex costume. Scanning all of
+    them against every name made `/review` run 536 patterns over 1,131 distinct
+    counterparties: 600,000 regex searches to answer a question that is mostly
+    a lookup, and the endpoint took a quarter of a second doing it.
+
+    Rules that are genuinely expressions are still scanned. The answer is
+    identical either way; only the work differs.
+    """
+
+    # No __slots__: a tuple subclass cannot have them, and the two attributes
+    # below live in an instance dict instead.
+
+    def __new__(cls, rules=()):
+        self = super().__new__(cls, rules)
+        exact: dict[str, list] = {}
+        general: list = []
+        for rule in self:
+            if rule.literal is None:
+                general.append(rule)
+            else:
+                exact.setdefault(rule.literal, []).append(rule)
+        self._exact = exact
+        self._general = general
+        return self
+
+    def matching(self, counterparty: str) -> list:
+        name = counterparty or ""
+        found = list(self._exact.get(name.upper(), ()))
+        found.extend(rule for rule in self._general if rule._compiled.search(name))
+        return found
+
+
 def categorise(counterparty: str, rules) -> Decision:
     """The category for one counterparty, and why.
 
@@ -122,8 +197,14 @@ def categorise(counterparty: str, rules) -> Decision:
     two rules pointing at *different* categories is left undecided — the row
     is contested and goes to review. A tie between rules agreeing on the same
     category is not a disagreement at all, and resolves quietly.
+
+    Pass a `RuleSet` when categorising many names; a plain sequence still works
+    and is scanned.
     """
-    matched = [rule for rule in rules if rule.matches(counterparty)]
+    if isinstance(rules, RuleSet):
+        matched = rules.matching(counterparty)
+    else:
+        matched = [rule for rule in rules if rule.matches(counterparty)]
     if not matched:
         return Decision(category=UNCATEGORISED)
 
@@ -219,19 +300,22 @@ def propose(rows, rules=(), *, suggest=(), by: str = "value") -> list[Proposal]:
     """
     from .recurrence import is_conduit
 
+    rules = RuleSet(rules)
+    suggest = RuleSet(suggest)
     counts: dict[str, int] = {}
     amounts: dict[str, list[int]] = {}
+    # Tallied first and judged once per distinct name, as in `review_queue`.
     for counterparty, amount_minor in rows:
         name = (counterparty or "").strip()
-        if not name or is_personal(name) or is_conduit(name):
-            continue
-        if categorise(name, rules).rule is not None:
+        if not name:
             continue
         counts[name] = counts.get(name, 0) + 1
         amounts.setdefault(name, []).append(abs(amount_minor))
 
     proposals = []
     for name, count in counts.items():
+        if is_personal(name) or is_conduit(name) or categorise(name, rules).rule is not None:
+            continue
         hint = categorise(name, suggest)
         proposals.append(Proposal(
             counterparty=name,
@@ -355,14 +439,18 @@ def review_queue(rows, rules, *, verdicts=None) -> list[ReviewItem]:
     from .recurrence import is_conduit
 
     verdicts = verdicts or {}
+    rules = RuleSet(rules)
     counts: dict[str, int] = {}
     totals: dict[str, int] = {}
 
+    # Tally first, judge second. The three predicates below are pure functions
+    # of the name, and `categorise` runs every rule against it — on this corpus
+    # that was 536 rules over 3,620 rows, nearly two million regex matches, for
+    # roughly nine hundred distinct names. Judging the names instead of the rows
+    # is the same answer for a quarter of the work.
     for counterparty, amount_minor in rows:
         name = (counterparty or "").strip()
-        if not name or is_personal(name) or is_conduit(name):
-            continue
-        if categorise(name, rules).rule is not None:
+        if not name:
             continue
         counts[name] = counts.get(name, 0) + 1
         totals[name] = totals.get(name, 0) + abs(amount_minor)
@@ -376,6 +464,10 @@ def review_queue(rows, rules, *, verdicts=None) -> list[ReviewItem]:
             disputed=bool(getattr(verdicts.get(name), "needs_review", False)),
         )
         for name, count in counts.items()
+        # Conduits and personal counterparties are excluded, as everywhere
+        # else — they are not spending anyone needs to classify.
+        if not is_personal(name) and not is_conduit(name)
+        and categorise(name, rules).rule is None
     ]
     return sorted(items, key=lambda i: (-i.total_minor, i.counterparty))
 
@@ -403,8 +495,15 @@ def coverage(counterparties, rules) -> dict:
     decided = contested = 0
     unmatched: dict[str, int] = {}
 
+    # Counted by row, decided by name. `categorise` is a pure function of the
+    # two, and a household's ledger names the same shop hundreds of times.
+    rules = RuleSet(rules)
+    seen: dict[str, Decision] = {}
+
     for counterparty in counterparties:
-        decision = categorise(counterparty, rules)
+        decision = seen.get(counterparty)
+        if decision is None:
+            decision = seen[counterparty] = categorise(counterparty, rules)
         if decision.contested:
             contested += 1
         elif decision.rule is not None:

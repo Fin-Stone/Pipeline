@@ -14,7 +14,13 @@ pytest.importorskip("fastapi", reason="API extra not installed")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.api.main import API_VERSION, PREFIX, app, _config  # noqa: E402
+from app.api.main import (  # noqa: E402
+    API_VERSION,
+    PREFIX,
+    app,
+    _config,
+    reset_repositories,
+)
 
 
 @pytest.fixture
@@ -30,8 +36,13 @@ def client(config, repository):
     url = repository.engine.url.render_as_string(hide_password=False)
     against = replace(config, database_url=url)
     app.dependency_overrides[_config] = lambda: against
+    # The app pools one engine per URL for the life of the process. Each case
+    # here builds its own database, so the pool is dropped between them —
+    # otherwise engines accumulate and hold handles on deleted SQLite files.
+    reset_repositories()
     with TestClient(app) as c:
         yield c
+    reset_repositories()
     app.dependency_overrides.clear()
 
 

@@ -141,6 +141,34 @@ class SqlAlchemyLedgerRepository:
             ).inserted_primary_key[0]
 
     def resolve_context(self, tenant_slug: str, member_email: str | None = None) -> TenantContext:
+        """The tenant and member every request runs as.
+
+        Read first, create second. The ensure_* path costs three round trips —
+        find or make the tenant, find or make the member, then read the role —
+        and every API request paid all three to discover that nothing had
+        changed since the last one. On an existing install the answer is one
+        join, and creation is a first-run event.
+
+        Not cached. A context is an identity, and a stale identity is the one
+        kind of wrong a multi-tenant system cannot afford: `restore` renumbers
+        tenants, and a process holding the old id would keep answering with
+        somebody else's ledger. Nine milliseconds is not worth that.
+        """
+        if member_email:
+            tenant, member = schema.tenant.c, schema.member.c
+            found = select(tenant.id, member.id.label("member_id"), member.role).select_from(
+                schema.tenant.join(
+                    schema.member,
+                    (member.tenant_id == tenant.id) & (member.email == member_email),
+                )
+            ).where(tenant.slug == tenant_slug)
+            with self._engine.connect() as conn:
+                row = conn.execute(found).one_or_none()
+            if row is not None:
+                return TenantContext(
+                    tenant_id=row.id, member_id=row.member_id, role=row.role
+                )
+
         tenant_id = self.ensure_tenant(tenant_slug)
         member_id = None
         role = "owner"

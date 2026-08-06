@@ -14,10 +14,12 @@ from app.domain.categories import (
     UNCATEGORISED,
     Proposal,
     Rule,
+    RuleSet,
     categorise,
     consolidate,
     coverage,
     gate_amount,
+    operator_rule,
     propose,
 )
 
@@ -41,6 +43,70 @@ class TestMatching:
         nothing for months."""
         with pytest.raises(ValueError):
             Rule(r"unclosed(", "Grocery")
+
+
+class TestRuleSet:
+    """An index over the exact-match rules.
+
+    It exists only to be faster, so the thing worth testing is that it is never
+    *different*. Every case here compares it against the plain scan it replaced
+    — a fast path that disagrees is not a fast path, it is a bug that only
+    shows up on the installs with enough rules to matter.
+    """
+
+    def _both(self, name, rules):
+        return categorise(name, list(rules)), categorise(name, RuleSet(rules))
+
+    def test_a_decided_counterparty_is_recognised_as_exact(self):
+        """`operator_rule` is what generates nearly every rule on a working
+        install, so its output is the shape the index has to recognise."""
+        pattern, category, weight, note = operator_rule("AUNTIE ANNE'S JEWEL", "Dining")
+        assert Rule(pattern, category, weight, note).literal == "AUNTIE ANNE'S JEWEL"
+
+    def test_a_real_expression_is_not_indexed(self):
+        assert Rule(r"fairprice", "Grocery").literal is None
+        assert Rule(r"^IKEA.*", "Furnishing").literal is None
+        assert Rule(r"^(A|B)$", "Other").literal is None
+
+    def test_an_exact_rule_still_matches_case_insensitively(self):
+        rules = [Rule(*operator_rule("SHENG SIONG", "Grocery"))]
+        scanned, indexed = self._both("sheng siong", rules)
+        assert scanned.category == indexed.category == "Grocery"
+
+    def test_an_exact_rule_does_not_match_a_longer_name(self):
+        """`^X$` is a whole-name claim. A dict keyed on X must not answer for
+        'X TAMPINES', which is exactly what a substring index would do."""
+        rules = [Rule(*operator_rule("IKEA", "Furnishing"))]
+        scanned, indexed = self._both("IKEA TAMPINES", rules)
+        assert scanned.rule is None and indexed.rule is None
+
+    def test_exact_and_general_rules_are_both_found(self):
+        rules = [Rule(*operator_rule("GRAB", "Transport")), Rule(r"grab", "Other", weight=5)]
+        scanned, indexed = self._both("GRAB", rules)
+        assert scanned.category == indexed.category
+
+    def test_two_exact_rules_on_one_name_still_contest(self):
+        """Contest detection reads every rule that matched, not the first. An
+        index returning one of them would silently settle a disagreement."""
+        rules = [
+            Rule(*operator_rule("SOMEWHERE", "Dining")),
+            Rule(*operator_rule("SOMEWHERE", "Grocery")),
+        ]
+        scanned, indexed = self._both("SOMEWHERE", rules)
+        assert scanned.contested and indexed.contested
+        assert scanned.category == indexed.category == UNCATEGORISED
+
+    def test_an_unmatched_name_is_unmatched_either_way(self):
+        rules = [Rule(*operator_rule("SOMEWHERE", "Dining"))]
+        scanned, indexed = self._both("ELSEWHERE", rules)
+        assert scanned.rule is None and indexed.rule is None
+
+    def test_it_is_a_sequence_of_the_rules_it_was_given(self):
+        """Passed anywhere a list of rules goes today, so nothing else needs to
+        know it exists."""
+        rules = [Rule(r"a", "Dining"), Rule(r"b", "Grocery")]
+        assert list(RuleSet(rules)) == rules
+        assert len(RuleSet(rules)) == 2
 
 
 class TestSpecificity:
