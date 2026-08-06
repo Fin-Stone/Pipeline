@@ -121,8 +121,26 @@ export interface Trend {
 }
 export interface Txn {
   id: number; posted_date: string; amount_minor: number; currency: string;
-  counterparty_norm: string; account_id: number; institution: string;
+  counterparty_norm: string; description_raw: string;
+  account_id: number; institution: string;
   account_ref_masked: string; category: string | null; source: string | null;
+  /** What has come back for this charge, and what it therefore really cost.
+   *  Both, always: a figure the client derived itself cannot be audited
+   *  against the total above it. Zero and equal to amount_minor for almost
+   *  every row. */
+  paid_back_minor: number;
+  effective_amount_minor: number;
+}
+
+export interface Payback {
+  id: number; expense_txn_id: number; income_txn_id: number;
+  amount_minor: number; note: string; linked_at: string;
+  posted_date: string; counterparty_norm: string; institution: string;
+}
+export interface Candidate {
+  id: number; posted_date: string; amount_minor: number; currency: string;
+  counterparty_norm: string; description_raw: string;
+  institution: string; account_ref_masked: string;
 }
 export interface HiddenRow {
   id: number; posted_date: string; amount_minor: number;
@@ -149,6 +167,11 @@ export interface Filters {
    *  exclusion has to reach it or the totals describe a different set of
    *  transactions from the one on screen. */
   exclude_txn_id?: number[];
+  /** Free text. **The server drops the date range when this is set**, because
+   *  someone searching for a merchant is searching precisely because they do
+   *  not know which month it was in. Every endpoint honours it, so the totals,
+   *  the chart and the list still describe the same rows. */
+  q?: string;
 }
 
 export const api = {
@@ -183,4 +206,19 @@ export const api = {
     ),
   decide: (counterparty: string, category: string) =>
     call<{ created: boolean }>("/review/decide", { counterparty, category }, { method: "POST" }),
+
+  paybacks: (expense_txn_id: number) =>
+    call<{ paybacks: Payback[]; count: number; total_minor: number }>(
+      "/paybacks", { expense_txn_id },
+    ),
+  paybackCandidates: (expense_txn_id: number, q?: string, days?: number) =>
+    call<{ candidates: Candidate[]; count: number }>(
+      "/paybacks/candidates", { expense_txn_id, q, days },
+    ),
+  linkPaybacks: (expense_txn_id: number, income_txn_id: number[]) =>
+    call<{ paid_back_minor: number; effective_amount_minor: number; linked: number }>(
+      "/paybacks", { expense_txn_id, income_txn_id }, { method: "POST" },
+    ),
+  unlinkPaybacks: (expense_txn_id: number) =>
+    call<{ unlinked: number }>(`/paybacks/${expense_txn_id}`, {}, { method: "DELETE" }),
 };

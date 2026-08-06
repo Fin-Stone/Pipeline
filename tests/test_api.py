@@ -193,6 +193,126 @@ class TestFilters:
         assert plain["total_minor"] == explicit["total_minor"]
 
 
+class TestSearch:
+    """Finding one line item, which the review queue cannot do.
+
+    `/review` groups by counterparty and so has no date — by design, because it
+    asks what a merchant is. The other question, "what was that charge and when",
+    needs the ledger itself.
+    """
+
+    @pytest.fixture
+    def ledger(self, repository):
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        rows = [
+            # Long ago, so a six-month window would hide it.
+            (date(2022, 3, 4), -24800, "IKEA TAMPINES", "IKEA TAMPINES SI NG 04MAR"),
+            (date(2026, 7, 2), -1860, "IKEA-RESTAURANT", "CARD TRANSACTION IKEA-RESTAURANT"),
+            # Normalisation strips the reference, so this is findable only by
+            # what the statement actually printed.
+            (date(2026, 7, 3), -5000, "SOME SHOP", "GIRO PAYMENT REF Z8891 SOME SHOP"),
+            (date(2026, 7, 4), -700, "100% OFF SALE", "100% OFF SALE"),
+        ]
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256="d" * 64, institution="Test", doc_type="acc",
+                period_start=date(2022, 1, 1), period_end=date(2026, 12, 31),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath="a.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [],
+            [
+                TxnRecord(
+                    account_key=account, posted_date=day, amount_minor=amount,
+                    currency="SGD", description_raw=raw, description_norm=norm,
+                    counterparty_norm=norm, dedupe_key=f"s{i}", seq=i,
+                )
+                for i, (day, amount, norm, raw) in enumerate(rows)
+            ],
+        )
+        return context
+
+    def _search(self, client, q, **extra):
+        body = client.get(
+            f"{PREFIX}/transactions", params={"profile": "dummy", "q": q, **extra}
+        ).json()
+        return [t["counterparty_norm"] for t in body["transactions"]]
+
+    def test_it_finds_a_charge_outside_the_window(self, client, ledger):
+        """The reason a search ignores the date range: somebody searching for a
+        merchant is searching precisely because they do not know which month it
+        was in. Confining that to the last six would return nothing and look
+        like an answer."""
+        found = self._search(client, "ikea", since="2026-01-01", until="2026-12-31")
+        assert "IKEA TAMPINES" in found
+
+    def test_a_search_says_its_range_is_open(self, client, ledger):
+        """So a client can explain the null averages rather than look broken."""
+        body = client.get(
+            f"{PREFIX}/summary",
+            params={"profile": "dummy", "q": "ikea", "since": "2026-01-01"},
+        ).json()
+        assert body["range"]["since"] is None
+        assert body["q"] == "ikea"
+
+    def test_it_is_case_insensitive(self, client, ledger):
+        assert self._search(client, "IkEa") == self._search(client, "ikea")
+
+    def test_it_searches_what_the_statement_printed(self, client, ledger):
+        """Normalisation strips references and mechanism words, so the text the
+        operator remembers seeing often survives only in description_raw."""
+        assert self._search(client, "Z8891") == ["SOME SHOP"]
+
+    def test_a_percent_sign_is_a_percent_sign(self, client, ledger):
+        """Unescaped, `%` is a LIKE wildcard and this would quietly match the
+        entire ledger while looking like a working search."""
+        assert self._search(client, "100%") == ["100% OFF SALE"]
+
+    def test_an_underscore_is_not_a_wildcard(self, client, ledger):
+        assert self._search(client, "IKEA_") == []
+
+    def test_every_figure_on_screen_honours_it(self, client, ledger):
+        """The totals, the chart and the list are one screen. A search that
+        narrowed only the list would leave them describing different sets of
+        transactions — the failure §5.1(A) exists to prevent."""
+        params = {"profile": "dummy", "q": "ikea"}
+        summary = client.get(f"{PREFIX}/summary", params=params).json()
+        trend = client.get(f"{PREFIX}/trend", params=params).json()
+        listing = client.get(f"{PREFIX}/transactions", params=params).json()
+
+        assert summary["total_minor"] == -24800 - 1860
+        assert sum(p["out_minor"] for p in trend["points"]) == summary["total_minor"]
+        assert len(listing["transactions"]) == 2
+
+    def test_the_raw_description_comes_back(self, client, ledger):
+        """A normalised name is often not what the operator remembers, so the
+        row has to be able to show both."""
+        body = client.get(
+            f"{PREFIX}/transactions", params={"profile": "dummy", "q": "Z8891"}
+        ).json()
+        assert body["transactions"][0]["description_raw"].startswith("GIRO PAYMENT")
+
+    def test_blank_search_is_no_search(self, client, ledger):
+        """Whitespace in the box must not silently discard the date range."""
+        body = client.get(
+            f"{PREFIX}/summary",
+            params={"profile": "dummy", "q": "   ", "since": "2026-01-01", "until": "2026-12-31"},
+        ).json()
+        assert body["q"] is None
+        assert body["range"]["since"] == "2026-01-01"
+
+
 class TestDeciding:
     def test_an_unknown_category_is_refused_with_the_known_ones(self, client):
         """A client should be able to show the user what it may choose."""

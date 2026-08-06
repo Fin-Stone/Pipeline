@@ -73,6 +73,23 @@ unbounded.
 | `category` | string | Repeatable |
 | `exclude_txn_id` | int | Repeatable. Hidden for this request only. |
 | `direction` | `out` \| `in` \| `net` | Which side of zero. Defaults to `out`. |
+| `q` | string | Free text. **Drops the date range.** See below. |
+
+**`q` searches the whole ledger and ignores `since`/`until`.** Somebody
+searching for a merchant is searching precisely because they do not know which
+month it was in; silently confining that to the requested window would return
+nothing and look like an answer. Account and category filters still apply —
+those are explicit choices the user can see.
+
+The drop happens once, in the shared filter dependency, so `/summary`, `/trend`
+and `/transactions` cannot disagree about what is on screen. The response
+reports `range.since: null` and echoes `q`, so a client can explain the null
+averages rather than look broken. Blank or whitespace-only is not a search.
+
+Matched case-insensitively against **both** `counterparty_norm` and
+`description_raw`: normalisation strips references and mechanism words, so the
+text a user remembers seeing on the statement often survives only in the raw
+description. `%` and `_` are literal characters, not wildcards.
 
 **`direction` selects a side, it does not change the sign convention.** `out`
 keeps only rows below zero and `in` only rows above; `net` keeps both and
@@ -169,6 +186,17 @@ that is the truth about it, not an error to be filtered out.
 
 Rows on the requested side of zero, newest first, with `limit` (≤1000, default
 200) and `offset`.
+
+Each row carries **two amounts**: `amount_minor` as the statement stated it, and
+`effective_amount_minor` after anything paid back for it, with
+`paid_back_minor` between them. They are equal for almost every row. Show both
+where they differ — a client that displays only the second is showing a figure
+that disagrees with the bank statement and cannot be audited against it, and a
+client that computes the second itself is doing arithmetic on money this API
+promised to do.
+
+`description_raw` is what the statement printed, beside the normalised
+`counterparty_norm`.
 Each row carries `id`, `posted_date`, `amount_minor`, `currency`,
 `counterparty_norm`, `account_id`, `institution`, `account_ref_masked`,
 `category`, `source`.
@@ -360,6 +388,88 @@ already part of a link.
 `{ "unmarked": true }`. Removes an operator's mark only; the matcher's own
 links are untouched.
 
+---
+
+## Paybacks
+
+One person pays for a group and the others settle up afterwards. Recorded
+faithfully, that reads as two lies: $300 of Dining and $270 of income from
+nowhere, when the household spent $30 and earned nothing.
+
+**A payback is not a transfer, and the difference is the whole point.** A
+transfer moves money between the household's own accounts, so neither leg is
+real activity and both are excluded. Here the charge *was* real — just smaller
+than the statement says. So a payback link **reduces the charge** and removes
+the inflow from income. The signs already do the arithmetic:
+`amount_minor + Σ paybacks`.
+
+The charge itself stays in every figure. Excluding it, as a transfer would,
+would erase the household's own share along with everyone else's.
+
+**A payback settles one charge and no other**, enforced in the schema. One
+person's $60 discounting two dinners would take $120 off spending on the
+strength of $60. A link consumes the whole inflow; splitting one transfer across
+two charges is not supported.
+
+### `GET /api/v1/paybacks?expense_txn_id=`
+
+```json
+{ "paybacks": [{ "id": 3, "expense_txn_id": 812, "income_txn_id": 940,
+                 "amount_minor": 6000, "note": "", "linked_at": "...",
+                 "posted_date": "2026-06-04", "counterparty_norm": "...",
+                 "institution": "DBS" }],
+  "count": 1, "total_minor": 6000 }
+```
+
+Omit `expense_txn_id` for every link in the tenant.
+
+### `GET /api/v1/paybacks/candidates?expense_txn_id=&q=&days=&limit=`
+
+Inflows that could be somebody settling this charge, **nearest the charge's own
+date first** — a payback usually follows within days, and the user is scanning
+for it rather than reading a ledger. `days` bounds the window either side; `q`
+searches as above.
+
+Anything already spoken for — settling another charge, part of a transfer,
+hidden — **is not offered at all**. Linking it would be refused, and offering a
+choice that cannot be taken is worse than not offering it.
+
+404 if the charge is not in this ledger.
+
+### `POST /api/v1/paybacks?expense_txn_id=&income_txn_id=&income_txn_id=`
+
+`income_txn_id` is repeatable, so linking five people is one round trip and
+either all of it lands or none of it does. A partial success would leave a
+charge discounted by an amount nobody chose.
+
+```json
+{ "expense_txn_id": 812, "linked": 4,
+  "paid_back_minor": 24000, "effective_amount_minor": -6000 }
+```
+
+**422, with a reason naming the numbers**, when the ledger says no:
+
+| Refused | Why |
+|---|---|
+| More back than was spent | A charge cannot become income. Being paid back *exactly* is fine — you fronted it and were not eating. |
+| The inflow already settles another charge | One payback, one charge |
+| The charge is money in, or a payback is money out | The shapes are not interchangeable |
+| Either side is a transfer leg or hidden | Money moved to oneself was never anyone's repayment |
+
+404 when a transaction is not in this ledger.
+
+### `DELETE /api/v1/paybacks/{expense_txn_id}?income_txn_id=`
+
+Unlinks one payback, or every payback on the charge when `income_txn_id` is
+omitted. The charge goes back to what the statement said.
+
+### What paybacks do not change
+
+`/review`, `/recurring` and categorisation all keep reading the **raw** amount.
+A $300 dinner is a Dining charge whoever ended up paying for it, and a rule is
+about the merchant, not about who paid you back. The adjustment belongs to
+figures that total money, and to nothing that asks what a transaction was.
+
 ### `GET /api/v1/growth`
 
 Net worth over time. Takes `months` (1–120, default 6) and `every` =
@@ -413,6 +523,8 @@ Named so that their absence is a decision rather than an oversight.
 | Missing | Why it matters |
 |---|---|
 | Applying decisions | `/review/decide` records; nothing writes it through. CLI does this today. |
+| Surviving a reparse | `reparse` deletes and rewrites a document's rows with new ids, so hidden rows, hand-set categories, manual transfer marks and paybacks are **silently discarded**. Re-matching them by `dedupe_key` — which is stable across a reparse and exists for exactly this — is the fix and is not built. |
+| Splitting one payback across two charges | A link consumes the whole inflow. The schema carries an amount so this can be added without a migration; the unallocated remainder would then have to keep counting as income. |
 | Renaming or merging a category | `POST` adds; neither rename nor merge exists, and both must rewrite the enrichments that named the old one. |
 | A category weight or budget | Categories carry `position` and nothing else, so no endpoint can say a month was over or under. |
 | Reviewing what is *already* categorised | `/review` lists only unmatched counterparties, so a wrong rule among the 398 is invisible until someone happens to see the row. |

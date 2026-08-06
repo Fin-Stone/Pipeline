@@ -301,6 +301,39 @@ transfer_link = Table(
     UniqueConstraint("tenant_id", "out_txn_id", name="uq_transfer_link_out"),
     UniqueConstraint("tenant_id", "in_txn_id", name="uq_transfer_link_in"),
 )
+#: Money that came back for one specific charge.
+#:
+#: Distinct from `transfer_link`, and the difference is the whole point. A
+#: transfer moves money between the household's own accounts, so **neither** leg
+#: is real activity and both are excluded. A payback is four colleagues settling
+#: their share of a dinner: the inflow is not income, but the charge was real
+#: and part of it was genuinely spent. Excluding both would erase the household's
+#: own share; excluding neither leaves $300 in Dining against $270 of income
+#: from nowhere. So this shape reduces the charge instead.
+#:
+#: The signs already do the arithmetic — the expense is negative and the payback
+#: positive, so `amount_minor + Σ paybacks` is what was actually spent.
+payback_link = Table(
+    "payback_link",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("expense_txn_id", Integer, ForeignKey("txn.id"), nullable=False),
+    Column("income_txn_id", Integer, ForeignKey("txn.id"), nullable=False),
+    # What this link applies against the charge. Always the whole inflow today —
+    # the uniqueness below enforces it — and stored rather than derived so that
+    # splitting one transfer across two charges becomes possible later without a
+    # migration. Partial allocation would need the unspent remainder to keep
+    # counting as income, which nothing yet asks for.
+    Column("amount_minor", BigInteger, nullable=False),
+    Column("note", Text, nullable=False, server_default=""),
+    Column("linked_at", DateTime(timezone=True), nullable=False),
+    # An inflow settles one charge and no other. Without this, linking the same
+    # payback twice would quietly discount two charges with one person's money.
+    UniqueConstraint("tenant_id", "income_txn_id", name="uq_payback_income"),
+)
+Index("ix_payback_expense", payback_link.c.tenant_id, payback_link.c.expense_txn_id)
+
 Index("ix_txn_source_document", txn.c.source_document_id)
 Index("ix_txn_tenant", txn.c.tenant_id)
 
@@ -373,6 +406,7 @@ TENANT_SCOPED_TABLES = (
     account,
     txn,
     transfer_link,
+    payback_link,
     category,
     category_rule,
     hidden_txn,

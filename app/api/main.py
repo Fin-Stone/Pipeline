@@ -151,6 +151,10 @@ def _filters(
         list[int] | None,
         Query(description="Repeatable. Hidden for this request only."),
     ] = None,
+    q: Annotated[
+        str | None,
+        Query(description="Free text. Searches the whole ledger, ignoring the date range."),
+    ] = None,
 ) -> dict:
     """The axes every figure is derivable from. See §5.1(B).
 
@@ -159,13 +163,21 @@ def _filters(
     totals and the trend describing a different set of transactions from the
     one on screen — so the exclusion is passed to the server, which owns the
     arithmetic, and every figure moves together.
+
+    **A search drops the date range**, here rather than in each endpoint, so
+    `/summary`, `/trend` and `/transactions` cannot disagree about what is on
+    screen. Somebody searching for a merchant is searching precisely because
+    they do not know which month it was in; silently confining that to the last
+    six would return nothing and look like an answer.
     """
+    searching = bool(q and q.strip())
     return {
-        "since": since,
-        "until": until,
+        "since": None if searching else since,
+        "until": None if searching else until,
         "account_ids": account_id,
         "categories": category,
         "exclude_txn_ids": exclude_txn_id,
+        "q": q.strip() if searching else None,
     }
 
 
@@ -241,6 +253,9 @@ def summary(handle: Session, filters: Filters, direction: Direction = "out") -> 
     return {
         "currency": "SGD",
         "direction": direction,
+        # Echoed so a client can say "these figures describe a search", and
+        # so a null range is explained rather than looking like a bug.
+        "q": filters["q"],
         "range": {"since": since, "until": until, "days": days},
         "total_minor": total,
         "by_category": sorted(
@@ -305,6 +320,7 @@ def trend(
         "currency": "SGD",
         "bucket": chosen,
         "rolling_window": window,
+        "q": filters["q"],
         "range": {"since": since, "until": until, "days": days},
         # Each point carries out, in and net, so one call serves the spending
         # chart, the income chart and the net one without three chances for the
@@ -356,11 +372,16 @@ def transactions(
     limit: Annotated[int, Query(le=1000)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
-    """Transactions, newest first. Transfers and hidden rows already excluded."""
+    """Transactions, newest first. Transfers and hidden rows already excluded.
+
+    Each row carries `amount_minor` as the statement stated it and
+    `effective_amount_minor` after anything paid back for it. Show both: a
+    figure a client derived itself cannot be audited against the total above it.
+    """
     rows = handle.repository.list_spending(
         handle.context, direction=direction, limit=limit, offset=offset, **filters
     )
-    return {"transactions": rows, "limit": limit, "offset": offset}
+    return {"transactions": rows, "limit": limit, "offset": offset, "q": filters["q"]}
 
 
 @app.get(f"{PREFIX}/recurring", tags=["dashboard"])
@@ -502,6 +523,88 @@ def mark_transfer(
 def unmark_transfer(handle: Session, txn_id: int) -> dict:
     """Undo an operator's mark. The matcher's own links are untouched."""
     return {"txn_id": txn_id, "unmarked": handle.repository.unmark_transfer(handle.context, txn_id)}
+
+
+# --- paybacks ---------------------------------------------------------------
+# One person pays for a group and the others settle up. Without this the ledger
+# reads a $300 dinner and $270 of income from nowhere, when $30 was spent and
+# nothing was earned. Distinct from a transfer, which excludes both legs — here
+# the charge was real, just smaller than the statement says.
+
+
+@app.get(f"{PREFIX}/paybacks", tags=["ledger"])
+def paybacks(handle: Session, expense_txn_id: Annotated[int | None, Query()] = None) -> dict:
+    """What has come back, and against which charge."""
+    rows = handle.repository.list_paybacks(handle.context, expense_txn_id)
+    return {
+        "paybacks": rows,
+        "count": len(rows),
+        "total_minor": sum(r["amount_minor"] for r in rows),
+    }
+
+
+@app.get(f"{PREFIX}/paybacks/candidates", tags=["ledger"])
+def payback_candidates(
+    handle: Session,
+    expense_txn_id: int,
+    q: Annotated[str | None, Query(description="Free text over the inflows")] = None,
+    days: Annotated[
+        int | None, Query(ge=1, le=3650, description="Only within this many days of the charge"),
+    ] = None,
+    limit: Annotated[int, Query(le=500)] = 100,
+) -> dict:
+    """Inflows that could be somebody settling this charge.
+
+    Nearest the charge's own date first, because a payback usually follows
+    within days. Anything already spoken for — settling another charge, part of
+    a transfer, hidden — is not offered at all: linking it would be refused, and
+    offering a choice that cannot be taken is worse than not offering it.
+    """
+    try:
+        rows = handle.repository.list_payback_candidates(
+            handle.context, expense_txn_id, q=q, within_days=days, limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"candidates": rows, "count": len(rows)}
+
+
+@app.post(f"{PREFIX}/paybacks", tags=["ledger"], status_code=201)
+def link_paybacks(
+    handle: Session,
+    expense_txn_id: int,
+    income_txn_id: Annotated[list[int], Query(description="Repeatable")],
+    note: str = "",
+) -> dict:
+    """Say these inflows settle part of this charge.
+
+    Repeatable `income_txn_id`, so linking five people is one round trip and
+    either all of it lands or none of it does. A partial success here would
+    leave a charge discounted by an amount the operator never chose.
+    """
+    try:
+        result = handle.repository.link_paybacks(
+            handle.context, expense_txn_id, income_txn_id, note=note,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        # 422 rather than 400: the request was well formed, the ledger says no.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"expense_txn_id": expense_txn_id, **result}
+
+
+@app.delete(f"{PREFIX}/paybacks/{{expense_txn_id}}", tags=["ledger"])
+def unlink_paybacks(
+    handle: Session,
+    expense_txn_id: int,
+    income_txn_id: Annotated[
+        int | None, Query(description="Just this one; omit to unlink them all"),
+    ] = None,
+) -> dict:
+    """Undo a payback. The charge goes back to what the statement said."""
+    removed = handle.repository.unlink_paybacks(handle.context, expense_txn_id, income_txn_id)
+    return {"expense_txn_id": expense_txn_id, "unlinked": removed}
 
 
 @app.get(f"{PREFIX}/growth", tags=["dashboard"])

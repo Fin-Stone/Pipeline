@@ -38,6 +38,27 @@ from . import schema
 _KEY_CHUNK = 500
 
 
+def _matches(q: str):
+    """Free-text search over what a transaction says it was.
+
+    Both columns, because they answer different questions. `counterparty_norm`
+    is what the review queue and the rules key on, but normalisation strips
+    mechanism words and references — so the operator searching for the text they
+    remember seeing on the statement needs `description_raw` too.
+
+    `icontains` with `autoescape` rather than a hand-built LIKE: a `%` typed
+    into the search box is a percent sign the operator is looking for, not a
+    wildcard that quietly matches the whole ledger. SQLAlchemy renders it as
+    `lower(x) LIKE lower(y)` on SQLite and `ILIKE` on Postgres, so one
+    expression serves both engines.
+    """
+    txn = schema.txn.c
+    return (
+        txn.counterparty_norm.icontains(q, autoescape=True)
+        | txn.description_raw.icontains(q, autoescape=True)
+    )
+
+
 def sum_minor(column):
     """SUM over minor units, as an integer on every engine.
 
@@ -443,12 +464,18 @@ class SqlAlchemyLedgerRepository:
         disagree about what counts are worse than any of them being wrong on
         its own â€” the screen shows them side by side.
 
-        Excluded: transfers between the household's own accounts, rows the
-        operator has hidden, and anything the caller is hiding for this request
-        only. The last of those is what makes session-level hiding change the
-        averages rather than just the list.
+        Excluded: transfers between the household's own accounts, inflows that
+        settle a shared charge, rows the operator has hidden, and anything the
+        caller is hiding for this request only. The last of those is what makes
+        session-level hiding change the averages rather than just the list.
+
+        Note what is *not* excluded: the shared charge itself. It was real
+        spending, just less of it than the statement says, so it stays in and
+        `_paid_back` shrinks it. Dropping it would erase the household's own
+        share along with everyone else's.
         """
         txn, link, hidden = schema.txn.c, schema.transfer_link.c, schema.hidden_txn.c
+        payback = schema.payback_link.c
         # `in_txn_id` is nullable for a one-sided manual link, and a NULL inside
         # a NOT IN makes the whole predicate NULL — which excludes every row
         # rather than none. Marking a single transfer once emptied the entire
@@ -459,11 +486,16 @@ class SqlAlchemyLedgerRepository:
             )
         )
         put_away = select(hidden.txn_id).where(hidden.tenant_id == context.tenant_id)
+        # Not income: somebody paying back their share of something already
+        # counted. NOT NULL, so the trap above cannot bite here — but it is the
+        # same shape, so it is written the same way.
+        settled = select(payback.income_txn_id).where(payback.tenant_id == context.tenant_id)
 
         where = (
             (txn.tenant_id == context.tenant_id)
             & txn.id.notin_(linked)
             & txn.id.notin_(put_away)
+            & txn.id.notin_(settled)
         )
         # Direction is a parameter, not a constant, because the household wants
         # to know what it earned as well as what it spent — and the net of the
@@ -476,6 +508,42 @@ class SqlAlchemyLedgerRepository:
         if exclude_txn_ids:
             where = where & txn.id.notin_(list(exclude_txn_ids))
         return where
+
+    def _paid_back(self, context: TenantContext):
+        """Per charge, how much has come back for it. A joinable subquery.
+
+        Grouped once and outer-joined rather than correlated per row, so the
+        three places that total money stay one pass each.
+
+        Used by every figure that *sums* money and by none that ask what a
+        transaction was. A $300 dinner is a Dining charge whoever ended up
+        paying for it, so categorisation, recurrence and the review queue all
+        keep reading the raw amount — see `list_categorisation_targets`.
+        """
+        payback = schema.payback_link.c
+        return (
+            select(
+                payback.expense_txn_id.label("txn_id"),
+                # `sum_minor`, not a bare SUM. Postgres widens SUM(bigint) to
+                # numeric, and adding that to a bigint gives numeric all the way
+                # out to a quoted JSON string — which is how a trend point's
+                # out_minor stopped being a number the moment paybacks existed.
+                sum_minor(payback.amount_minor).label("paid_back"),
+            )
+            .where(payback.tenant_id == context.tenant_id)
+            .group_by(payback.expense_txn_id)
+            .subquery("paid_back")
+        )
+
+    @staticmethod
+    def _effective(paid_back):
+        """A transaction's amount after anything that came back for it.
+
+        The signs do the arithmetic: a -300.00 charge with +270.00 of paybacks
+        is -30.00. COALESCE because the outer join gives NULL for the
+        overwhelming majority of rows, which nobody has paid back anything for.
+        """
+        return schema.txn.c.amount_minor + func.coalesce(paid_back.c.paid_back, 0)
 
     def list_hidden(self, context: TenantContext) -> list[dict]:
         """What has been put away, and what it comes to.
@@ -529,9 +597,10 @@ class SqlAlchemyLedgerRepository:
 
     def spending_trend(
         self, context: TenantContext, *, bucket: str, since=None, until=None,
-        account_ids=None, categories=None, exclude_txn_ids=None, rolling: int = 0,
+        account_ids=None, categories=None, exclude_txn_ids=None, q=None,
+        rolling: int = 0,
     ) -> list[dict]:
-        """Spending totalled per period.
+        """Money totalled per period.
 
         Bucketed in Python rather than in SQL: date truncation is the most
         dialect-specific thing either engine does, and Rule 1's seam is worth
@@ -539,8 +608,10 @@ class SqlAlchemyLedgerRepository:
         not a warehouse.
         """
         txn = schema.txn.c
+        paid_back = self._paid_back(context)
         stmt = (
-            select(txn.posted_date, txn.amount_minor)
+            select(txn.posted_date, self._effective(paid_back))
+            .select_from(schema.txn.outerjoin(paid_back, paid_back.c.txn_id == txn.id))
             # Both directions in one pass: a bucket needs what went out, what
             # came in, and the net, and three queries would be three chances
             # for the filters to drift apart.
@@ -554,6 +625,8 @@ class SqlAlchemyLedgerRepository:
             stmt = stmt.where(txn.posted_date <= until)
         if account_ids:
             stmt = stmt.where(txn.account_id.in_(list(account_ids)))
+        if q:
+            stmt = stmt.where(_matches(q))
         if categories:
             enrichment = schema.txn_enrichment.c
             stmt = stmt.where(txn.id.in_(
@@ -631,6 +704,7 @@ class SqlAlchemyLedgerRepository:
         categories=None,
         exclude_txn_ids=None,
         direction: str = "out",
+        q=None,
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict]:
@@ -648,12 +722,19 @@ class SqlAlchemyLedgerRepository:
         txn, enrichment, account = (
             schema.txn.c, schema.txn_enrichment.c, schema.account.c,
         )
+        paid_back = self._paid_back(context)
         stmt = (
             select(
                 txn.id, txn.posted_date, txn.amount_minor, txn.currency,
-                txn.counterparty_norm, txn.account_id,
+                txn.counterparty_norm, txn.description_raw, txn.account_id,
                 account.institution, account.account_ref_masked,
                 enrichment.category, enrichment.source,
+                # Both figures, never one. A client showing "-30.00" with no
+                # sight of the -300.00 it came from cannot be audited, and a
+                # client doing the subtraction itself is doing arithmetic on
+                # money this API promised to do for it.
+                func.coalesce(paid_back.c.paid_back, 0).label("paid_back_minor"),
+                self._effective(paid_back).label("effective_amount_minor"),
             )
             .select_from(
                 schema.txn
@@ -663,6 +744,7 @@ class SqlAlchemyLedgerRepository:
                     (enrichment.txn_id == txn.id)
                     & (enrichment.tenant_id == context.tenant_id),
                 )
+                .outerjoin(paid_back, paid_back.c.txn_id == txn.id)
             )
             .where(self._spending_base(
                 context, exclude_txn_ids=exclude_txn_ids, direction=direction,
@@ -675,6 +757,8 @@ class SqlAlchemyLedgerRepository:
             stmt = stmt.where(txn.posted_date <= until)
         if account_ids:
             stmt = stmt.where(txn.account_id.in_(list(account_ids)))
+        if q:
+            stmt = stmt.where(_matches(q))
         if categories:
             stmt = stmt.where(enrichment.category.in_(list(categories)))
 
@@ -685,14 +769,16 @@ class SqlAlchemyLedgerRepository:
     def spending_summary(
         self, context: TenantContext, *, since=None, until=None,
         account_ids=None, categories=None, exclude_txn_ids=None, direction="out",
+        q=None,
     ) -> list[dict]:
         """Totals per category over the same filters, for the headline figures."""
         txn, enrichment = schema.txn.c, schema.txn_enrichment.c
+        paid_back = self._paid_back(context)
         stmt = (
             select(
                 enrichment.category,
                 func.count().label("rows"),
-                sum_minor(txn.amount_minor).label("total_minor"),
+                sum_minor(self._effective(paid_back)).label("total_minor"),
             )
             .select_from(
                 schema.txn.outerjoin(
@@ -700,6 +786,7 @@ class SqlAlchemyLedgerRepository:
                     (enrichment.txn_id == txn.id)
                     & (enrichment.tenant_id == context.tenant_id),
                 )
+                .outerjoin(paid_back, paid_back.c.txn_id == txn.id)
             )
             .where(self._spending_base(
                 context, exclude_txn_ids=exclude_txn_ids, direction=direction,
@@ -712,6 +799,8 @@ class SqlAlchemyLedgerRepository:
             stmt = stmt.where(txn.posted_date <= until)
         if account_ids:
             stmt = stmt.where(txn.account_id.in_(list(account_ids)))
+        if q:
+            stmt = stmt.where(_matches(q))
         if categories:
             stmt = stmt.where(enrichment.category.in_(list(categories)))
 
@@ -850,6 +939,206 @@ class SqlAlchemyLedgerRepository:
             ).rowcount
         return bool(removed)
 
+    # -- paybacks ------------------------------------------------------------
+
+    def list_paybacks(self, context: TenantContext, expense_txn_id: int | None = None):
+        """What has come back, and for which charge."""
+        payback, txn, account = schema.payback_link.c, schema.txn.c, schema.account.c
+        stmt = (
+            select(
+                payback.id, payback.expense_txn_id, payback.income_txn_id,
+                payback.amount_minor, payback.note, payback.linked_at,
+                txn.posted_date, txn.counterparty_norm, account.institution,
+            )
+            .select_from(
+                schema.payback_link
+                .join(schema.txn, payback.income_txn_id == txn.id)
+                .join(schema.account, txn.account_id == account.id)
+            )
+            .where(payback.tenant_id == context.tenant_id)
+            .order_by(txn.posted_date, payback.id)
+        )
+        if expense_txn_id is not None:
+            stmt = stmt.where(payback.expense_txn_id == expense_txn_id)
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def list_payback_candidates(
+        self, context: TenantContext, expense_txn_id: int, *,
+        q=None, within_days: int | None = None, limit: int = 100,
+    ) -> list[dict]:
+        """Inflows that could be somebody settling this charge.
+
+        Ordered by how far each sits from the charge's own date, because a
+        payback usually follows within days and the operator is scanning for it
+        rather than reading a ledger. Anything already spoken for — settling
+        another charge, part of a transfer, hidden — is not offered: the link
+        would be refused, and offering a choice that cannot be taken is worse
+        than not offering it.
+        """
+        txn, account = schema.txn.c, schema.account.c
+        with self._engine.connect() as conn:
+            charge_date = conn.execute(
+                select(txn.posted_date).where(
+                    (txn.tenant_id == context.tenant_id) & (txn.id == expense_txn_id)
+                )
+            ).scalar_one_or_none()
+        if charge_date is None:
+            raise LookupError(f"no transaction {expense_txn_id} in this ledger")
+
+        stmt = (
+            select(
+                txn.id, txn.posted_date, txn.amount_minor, txn.currency,
+                txn.counterparty_norm, txn.description_raw,
+                account.institution, account.account_ref_masked,
+            )
+            .select_from(schema.txn.join(schema.account, txn.account_id == account.id))
+            .where(self._spending_base(context, direction="in"))
+        )
+        if q:
+            stmt = stmt.where(_matches(q))
+        if within_days is not None:
+            stmt = stmt.where(
+                txn.posted_date >= charge_date - timedelta(days=within_days)
+            ).where(
+                txn.posted_date <= charge_date + timedelta(days=within_days)
+            )
+
+        with self._engine.connect() as conn:
+            rows = [dict(r._mapping) for r in conn.execute(stmt)]
+        # Sorted in Python: "absolute days from the charge" is an expression
+        # both engines spell differently, and this is a page of rows.
+        rows.sort(key=lambda r: (abs((r["posted_date"] - charge_date).days), -r["id"]))
+        return rows[:limit]
+
+    def link_paybacks(
+        self, context: TenantContext, expense_txn_id: int, income_txn_ids, note: str = "",
+    ) -> dict:
+        """Record that these inflows settle part of this charge.
+
+        Every check runs inside the transaction that writes, so two clients
+        linking the same inflow cannot both win. Refuses rather than clamps:
+        a payback that silently did less than it said would leave the operator
+        looking at a number they cannot explain, which is the failure this
+        feature exists to remove.
+        """
+        txn, payback = schema.txn.c, schema.payback_link.c
+        wanted = list(dict.fromkeys(income_txn_ids))  # de-duplicated, order kept
+        if not wanted:
+            raise ValueError("no paybacks given")
+
+        with self._engine.begin() as conn:
+            amounts = dict(conn.execute(
+                select(txn.id, txn.amount_minor).where(
+                    (txn.tenant_id == context.tenant_id)
+                    & txn.id.in_([expense_txn_id, *wanted])
+                )
+            ).all())
+
+            if expense_txn_id not in amounts:
+                raise LookupError(f"no transaction {expense_txn_id} in this ledger")
+            charge = amounts[expense_txn_id]
+            if charge >= 0:
+                raise ValueError(
+                    f"transaction {expense_txn_id} is not a charge: it is money in, "
+                    "and a payback settles money out"
+                )
+
+            missing = [i for i in wanted if i not in amounts]
+            if missing:
+                raise LookupError(f"no transaction {missing[0]} in this ledger")
+            not_income = [i for i in wanted if amounts[i] <= 0]
+            if not_income:
+                raise ValueError(
+                    f"transaction {not_income[0]} is not money in, so it cannot be a payback"
+                )
+
+            taken = conn.execute(
+                select(payback.income_txn_id, payback.expense_txn_id).where(
+                    (payback.tenant_id == context.tenant_id)
+                    & payback.income_txn_id.in_(wanted)
+                )
+            ).all()
+            if taken:
+                income_id, other = taken[0]
+                raise ValueError(
+                    f"transaction {income_id} already settles charge {other}. "
+                    "One payback cannot discount two charges."
+                )
+
+            # A leg of a transfer is money the household moved to itself; it was
+            # never anyone's repayment, and counting it as one would discount a
+            # real charge with the household's own money.
+            link = schema.transfer_link.c
+            entangled = conn.execute(
+                select(txn.id).where(
+                    txn.id.in_([expense_txn_id, *wanted])
+                    & (
+                        txn.id.in_(
+                            select(link.out_txn_id).where(link.tenant_id == context.tenant_id)
+                        )
+                        | txn.id.in_(
+                            select(link.in_txn_id).where(
+                                (link.tenant_id == context.tenant_id)
+                                & link.in_txn_id.isnot(None)
+                            )
+                        )
+                        | txn.id.in_(
+                            select(schema.hidden_txn.c.txn_id).where(
+                                schema.hidden_txn.c.tenant_id == context.tenant_id
+                            )
+                        )
+                    )
+                )
+            ).scalars().all()
+            if entangled:
+                raise ValueError(
+                    f"transaction {entangled[0]} is already a transfer or hidden, "
+                    "so it is not part of this charge"
+                )
+
+            already = conn.execute(
+                select(func.coalesce(func.sum(payback.amount_minor), 0)).where(
+                    (payback.tenant_id == context.tenant_id)
+                    & (payback.expense_txn_id == expense_txn_id)
+                )
+            ).scalar_one()
+            adding = sum(amounts[i] for i in wanted)
+            if already + adding > -charge:
+                raise ValueError(
+                    f"that is more than the charge: {(already + adding) / 100:,.2f} back "
+                    f"against {-charge / 100:,.2f} spent. A charge cannot become income."
+                )
+
+            conn.execute(schema.payback_link.insert(), [{
+                "tenant_id": context.tenant_id,
+                "expense_txn_id": expense_txn_id,
+                "income_txn_id": income_id,
+                "amount_minor": amounts[income_id],
+                "note": note,
+                "linked_at": datetime.now(timezone.utc),
+            } for income_id in wanted])
+
+        return {
+            "linked": len(wanted),
+            "paid_back_minor": already + adding,
+            "effective_amount_minor": charge + already + adding,
+        }
+
+    def unlink_paybacks(
+        self, context: TenantContext, expense_txn_id: int, income_txn_id: int | None = None,
+    ) -> int:
+        """Undo one payback, or every payback on a charge."""
+        payback = schema.payback_link.c
+        where = (
+            (payback.tenant_id == context.tenant_id)
+            & (payback.expense_txn_id == expense_txn_id)
+        )
+        if income_txn_id is not None:
+            where = where & (payback.income_txn_id == income_txn_id)
+        with self._engine.begin() as conn:
+            return conn.execute(schema.payback_link.delete().where(where)).rowcount or 0
+
     def replace_transfer_links(self, context: TenantContext, links) -> int:
         """Rebuild this tenant's links from scratch, atomically.
 
@@ -907,10 +1196,22 @@ class SqlAlchemyLedgerRepository:
             if document_id is None:
                 return False
 
-            # Links first: they point at these rows, and a transfer link is a
-            # claim about a ledger that is about to change. Rebuilding it is a
-            # single command, so dropping it costs nothing and keeping it would
-            # block the delete on a foreign key.
+            # Everything pointing at these rows goes first, or the delete below
+            # fails on a foreign key.
+            #
+            # It used to clear only `transfer_link`, and SQLite does not enforce
+            # foreign keys unless asked to, so nothing noticed. Postgres always
+            # does: `reparse` on any document whose rows had been categorised
+            # died with a constraint violation, and by then the prod ledger held
+            # nearly two thousand enrichment rows.
+            #
+            # **This loses operator decisions, and that is a known defect rather
+            # than a design.** A reparse assigns new `txn.id` values, so a hidden
+            # row, a hand-set category or a manual transfer mark cannot follow
+            # its transaction across. Re-matching them by `dedupe_key` — which is
+            # stable across a reparse and is exactly what it exists for — is the
+            # fix, and it is its own piece of work. Recorded in
+            # docs/api-contracts.md so it is a decision and not an oversight.
             doomed = select(schema.txn.c.id).where(
                 (schema.txn.c.tenant_id == context.tenant_id)
                 & (schema.txn.c.source_document_id == document_id)
@@ -924,6 +1225,17 @@ class SqlAlchemyLedgerRepository:
                     )
                 )
             )
+            conn.execute(
+                schema.payback_link.delete().where(
+                    (schema.payback_link.c.tenant_id == context.tenant_id)
+                    & (
+                        schema.payback_link.c.expense_txn_id.in_(doomed)
+                        | schema.payback_link.c.income_txn_id.in_(doomed)
+                    )
+                )
+            )
+            for table in (schema.hidden_txn, schema.txn_enrichment, schema.txn_series_link):
+                conn.execute(table.delete().where(table.c.txn_id.in_(doomed)))
             conn.execute(
                 schema.txn.delete().where(
                     (schema.txn.c.tenant_id == context.tenant_id)

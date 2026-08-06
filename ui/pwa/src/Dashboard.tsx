@@ -18,10 +18,15 @@ import {
 } from "@mui/material";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import UndoIcon from "@mui/icons-material/Undo";
-import { Button, IconButton, List, ListItem, ListItemText, Tooltip } from "@mui/material";
+import SearchIcon from "@mui/icons-material/Search";
+import ClearIcon from "@mui/icons-material/Clear";
+import {
+  Button, IconButton, InputAdornment, List, ListItem, ListItemText, Tooltip,
+} from "@mui/material";
 import {
   Account, ApiError, Category, Direction, Filters, Summary, Trend as TrendData, Txn, api,
 } from "./api";
+import PaybackDialog from "./PaybackDialog";
 import Trend from "./Trend";
 import { magnitude, money, monthsAgo, today } from "./money";
 
@@ -68,6 +73,12 @@ export default function Dashboard({ mode }: { mode: Mode }) {
   const [until, setUntil] = useState(today());
   const [accountIds, setAccountIds] = useState<number[]>([]);
   const [categoryNames, setCategoryNames] = useState<string[]>([]);
+  // Two pieces of state for one box: what has been typed, and what has been
+  // asked for. Firing a request per keystroke would put five half-typed
+  // searches in flight and let the slowest one win.
+  const [typed, setTyped] = useState("");
+  const [query, setQuery] = useState("");
+  const [linking, setLinking] = useState<Txn | null>(null);
   // Income only: the bars can show what came in, or what was left after it all
   // went out again. The second is the number that answers "are we ahead".
   const [measure, setMeasure] = useState<"in_minor" | "net_minor">("in_minor");
@@ -83,6 +94,7 @@ export default function Dashboard({ mode }: { mode: Mode }) {
   const [muted, setMuted] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     // The taxonomy is tenant data. It is fetched, never hardcoded, because a
@@ -93,12 +105,20 @@ export default function Dashboard({ mode }: { mode: Mode }) {
   }, []);
 
   useEffect(() => {
+    const timer = setTimeout(() => setQuery(typed.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [typed]);
+
+  useEffect(() => {
     setLoading(true);
     // The muted ids go to the server with everything else, so the total, the
-    // averages, the bars and the list all describe the same set of rows.
+    // averages, the bars and the list all describe the same set of rows. `q`
+    // goes with them for the same reason — the server drops the date range when
+    // it is set, and it has to do that for every figure at once or the screen
+    // starts contradicting itself.
     const filters: Filters = {
       since, until, account_id: accountIds, category: categoryNames,
-      exclude_txn_id: muted,
+      exclude_txn_id: muted, q: query || undefined,
     };
     Promise.all([
       api.summary(filters, words.direction),
@@ -113,7 +133,12 @@ export default function Dashboard({ mode }: { mode: Mode }) {
       })
       .catch((e) => setError(String(e instanceof ApiError ? e.detail : e)))
       .finally(() => setLoading(false));
-  }, [since, until, accountIds, categoryNames, muted, mode, words.direction]);
+  }, [since, until, accountIds, categoryNames, muted, mode, words.direction, query, reloads]);
+
+  /** Bump to re-run the effect above after a write the server owns. */
+  function reload() {
+    setReloads((n) => n + 1);
+  }
 
   async function recategorise(id: number, name: string) {
     await api.setCategory(id, name);
@@ -210,9 +235,35 @@ export default function Dashboard({ mode }: { mode: Mode }) {
                 ))}
               </Select>
             </FormControl>
+            <TextField
+              size="small" label="Search" placeholder="merchant, or text off the statement"
+              value={typed} onChange={(e) => setTyped(e.target.value)}
+              sx={{ minWidth: 240, flexGrow: 1 }}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment>
+                ),
+                endAdornment: typed ? (
+                  <InputAdornment position="end">
+                    <IconButton size="small" onClick={() => setTyped("")}>
+                      <ClearIcon fontSize="small" />
+                    </IconButton>
+                  </InputAdornment>
+                ) : null,
+              }}
+            />
           </Stack>
         </CardContent>
       </Card>
+
+      {query && (
+        // Said plainly, because the alternative is a search that silently
+        // returns nothing for a charge two years old and looks like an answer.
+        <Alert severity="info" icon={<SearchIcon />}>
+          Searching the whole ledger for “{query}” — the date range above is
+          ignored. Everything on this page describes the matches.
+        </Alert>
+      )}
 
       {loading && <LinearProgress />}
 
@@ -298,8 +349,22 @@ export default function Dashboard({ mode }: { mode: Mode }) {
                 key={t.id} divider disableGutters
                 secondaryAction={
                   <Stack direction="row" spacing={0.5} alignItems="center">
+                    {/* Both figures when part of it came back. The original is
+                        struck through rather than replaced: a number that
+                        silently disagrees with the statement is unauditable. */}
+                    {t.paid_back_minor !== 0 && (
+                      <Typography
+                        sx={{
+                          fontVariantNumeric: "tabular-nums",
+                          textDecoration: "line-through",
+                          color: "text.disabled", fontSize: 13,
+                        }}
+                      >
+                        {money(t.amount_minor)}
+                      </Typography>
+                    )}
                     <Typography sx={{ fontVariantNumeric: "tabular-nums", mr: 1 }}>
-                      {money(t.amount_minor)}
+                      {money(t.effective_amount_minor)}
                     </Typography>
                     <Tooltip title="Hide for this session">
                       <IconButton size="small"
@@ -307,6 +372,13 @@ export default function Dashboard({ mode }: { mode: Mode }) {
                         <VisibilityOffIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
+                    {t.amount_minor < 0 && (
+                      <Tooltip title="Someone paid you back for part of this">
+                        <Button size="small" onClick={() => setLinking(t)}>
+                          {t.paid_back_minor !== 0 ? "paybacks ✓" : "paybacks"}
+                        </Button>
+                      </Tooltip>
+                    )}
                     <Tooltip title="Not real money in or out — a move between your own accounts">
                       <Button size="small" onClick={() => markTransfer(t.id)}>
                         transfer
@@ -319,10 +391,20 @@ export default function Dashboard({ mode }: { mode: Mode }) {
                 <ListItemText
                   primary={t.counterparty_norm || "(no counterparty)"}
                   secondary={
-                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.5 }}>
+                    <Stack direction="row" spacing={1} alignItems="center"
+                      sx={{ mt: 0.5 }} flexWrap="wrap">
                       <Typography variant="caption" color="text.secondary">
                         {t.posted_date} · {t.institution}
                       </Typography>
+                      {/* What the statement actually printed, when it differs.
+                          Normalisation strips references and mechanism words,
+                          so this is often the text the operator remembers. */}
+                      {t.description_raw && t.description_raw !== t.counterparty_norm && (
+                        <Typography variant="caption" color="text.disabled" noWrap
+                          sx={{ maxWidth: 260 }}>
+                          {t.description_raw}
+                        </Typography>
+                      )}
                       <Select
                         size="small" variant="standard" displayEmpty
                         value={t.category ?? ""}
@@ -343,11 +425,21 @@ export default function Dashboard({ mode }: { mode: Mode }) {
               </ListItem>
             ))}
             {txns.length === 0 && (
-              <Typography color="text.secondary">{words.empty}</Typography>
+              <Typography color="text.secondary">
+                {query ? `Nothing matches “${query}”.` : words.empty}
+              </Typography>
             )}
           </List>
         </CardContent>
       </Card>
+
+      {linking && (
+        <PaybackDialog
+          charge={linking}
+          onClose={() => setLinking(null)}
+          onLinked={reload}
+        />
+      )}
 
       <Card variant="outlined">
         <CardContent>
