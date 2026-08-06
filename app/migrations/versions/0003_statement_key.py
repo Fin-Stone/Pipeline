@@ -59,24 +59,46 @@ def upgrade() -> None:
         batch.add_column(sa.Column("statement_key", sa.String(64)))
 
     conn = op.get_bind()
+    # Grouped in Python, not in SQL. `GROUP_CONCAT` is SQLite's spelling and
+    # Postgres has `string_agg` with a different signature, so aggregating here
+    # would make this migration run on one engine and fail on the other — which
+    # it did, on the first real Postgres start. Joining refs into a string only
+    # to split them again was also one comma in an account reference away from
+    # producing a wrong key.
+    #
+    # Ordered so the result does not depend on the order an engine happens to
+    # return rows in: where a ledger already holds two documents for one
+    # statement, the lower id keeps the key on every engine.
     rows = conn.execute(sa.text("""
-        SELECT d.id, d.doc_type, d.period_start, d.period_end,
-               GROUP_CONCAT(DISTINCT a.account_ref_masked) refs
+        SELECT d.id, d.tenant_id, d.doc_type, d.period_start, d.period_end,
+               a.account_ref_masked AS ref
         FROM source_document d
         JOIN statement_balance b ON b.source_document_id = d.id
         JOIN account a ON a.id = b.account_id
-        GROUP BY d.id, d.doc_type, d.period_start, d.period_end
+        ORDER BY d.id
     """)).all()
 
-    seen: set[tuple[int, str]] = set()
+    documents: dict[int, dict] = {}
     for row in rows:
-        refs = [r for r in (row.refs or "").split(",") if r]
+        entry = documents.setdefault(row.id, {
+            "tenant_id": row.tenant_id,
+            "doc_type": row.doc_type,
+            "period_start": row.period_start,
+            "period_end": row.period_end,
+            "refs": set(),
+        })
+        if row.ref:
+            entry["refs"].add(row.ref)
+
+    seen: set[tuple[int, str]] = set()
+    for document_id, entry in documents.items():
+        refs = entry["refs"]
         if not refs:
             continue
-        key = _statement_key(row.doc_type, row.period_start, row.period_end, refs)
-        tenant = conn.execute(
-            sa.text("SELECT tenant_id FROM source_document WHERE id = :id"), {"id": row.id}
-        ).scalar_one()
+        key = _statement_key(
+            entry["doc_type"], entry["period_start"], entry["period_end"], refs
+        )
+        tenant = entry["tenant_id"]
         # A ledger built before this migration can already contain two
         # documents for one statement — that is the situation it exists to
         # prevent. The first keeps the key; later ones are left null rather
@@ -87,7 +109,7 @@ def upgrade() -> None:
         seen.add((tenant, key))
         conn.execute(
             sa.text("UPDATE source_document SET statement_key = :k WHERE id = :id"),
-            {"k": key, "id": row.id},
+            {"k": key, "id": document_id},
         )
 
     with op.batch_alter_table("source_document") as batch:

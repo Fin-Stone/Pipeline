@@ -7,14 +7,17 @@ tests pass against a schema nobody is running. This compares the two directly.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from app.storage import schema
 
 REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 
 
 def _migrated_inspector(tmp_path):
@@ -124,6 +127,86 @@ def test_migration_is_reversible(tmp_path):
     command.downgrade(config, "base")
     remaining = set(inspect(create_engine(url)).get_table_names()) - {"alembic_version"}
     assert remaining == set()
+
+
+class TestOnPostgres:
+    """Every migration must run on the engine an operator actually deploys.
+
+    These were SQLite-only, and that is exactly how `GROUP_CONCAT` — SQLite's
+    spelling, with no Postgres equivalent of the same name — reached a real
+    first start on Postgres and failed the API container in a restart loop. A
+    migration is the one piece of code that runs against a live ledger with no
+    chance to back out, so it is the last place a dialect assumption belongs.
+    """
+
+    @pytest.fixture
+    def url(self):
+        if not TEST_DATABASE_URL:
+            pytest.skip("set TEST_DATABASE_URL to run the migrations on Postgres")
+        engine = create_engine(TEST_DATABASE_URL)
+        # A migration run owns the whole database, so it starts from nothing.
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
+        engine.dispose()
+        return TEST_DATABASE_URL
+
+    def _config(self, url):
+        config = AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+        config.set_main_option("script_location", str(REPO_ROOT / "app" / "migrations"))
+        config.set_main_option("sqlalchemy.url", url)
+        config.attributes["url_set_by_caller"] = True
+        return config
+
+    def test_every_migration_runs(self, url):
+        command.upgrade(self._config(url), "head")
+        tables = set(inspect(create_engine(url)).get_table_names()) - {"alembic_version"}
+        assert tables == set(schema.metadata.tables)
+
+    def test_the_backfills_run_with_data_present(self, url):
+        """Empty-database runs miss half of what a migration does. 0003
+        backfills a statement key from rows that must already exist, and a
+        backfill is where dialect differences actually bite.
+        """
+        config = self._config(url)
+        command.upgrade(config, "0002_dummy_tenant")
+
+        engine = create_engine(url)
+        with engine.begin() as conn:
+            tenant_id = conn.execute(text("SELECT id FROM tenant WHERE slug='default'")).scalar_one()
+            conn.execute(text("""
+                INSERT INTO source_document
+                    (tenant_id, sha256, institution, doc_type, period_start, period_end,
+                     storage_path, parse_status, source_profile, source_relpath, fetched_at)
+                VALUES (:t, :sha, 'Test', 'acc', '2026-06-01', '2026-06-30',
+                        'x', 'imported', 'dummy', 'a.pdf', now())
+            """), {"t": tenant_id, "sha": "a" * 64})
+            document_id = conn.execute(text("SELECT id FROM source_document")).scalar_one()
+            conn.execute(text("""
+                INSERT INTO account
+                    (tenant_id, institution, account_ref_masked, sub_account_label,
+                     currency, kind)
+                VALUES (:t, 'Test', '1234', '', 'SGD', 'deposit')
+            """), {"t": tenant_id})
+            account_id = conn.execute(text("SELECT id FROM account")).scalar_one()
+            conn.execute(text("""
+                INSERT INTO statement_balance
+                    (tenant_id, source_document_id, account_id,
+                     opening_balance_minor, closing_balance_minor)
+                VALUES (:t, :d, :a, 0, 0)
+            """), {"t": tenant_id, "d": document_id, "a": account_id})
+
+        command.upgrade(config, "head")
+
+        with engine.connect() as conn:
+            key = conn.execute(text("SELECT statement_key FROM source_document")).scalar_one()
+        assert key and len(key) == 64, "the backfill did not run"
+
+    def test_migration_is_reversible(self, url):
+        config = self._config(url)
+        command.upgrade(config, "head")
+        command.downgrade(config, "base")
+        remaining = set(inspect(create_engine(url)).get_table_names()) - {"alembic_version"}
+        assert remaining == set()
 
 
 class TestSchemaVersionGuard:

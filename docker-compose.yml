@@ -3,5 +3,11 @@
 # The stack itself lives in infra/, where the rest of the deployment does. This
 # file exists so the command works where an operator will actually type it,
 # rather than requiring them to know the layout first.
+# Named here as well as in the included file. An `include:` does not inherit the
+# included file's project name, so without this the same stack comes up as two
+# different projects depending on whether the Postgres overlay was passed — two
+# sets of containers, two volumes, and a port clash to explain it.
+name: finstone
+
 include:
   - infra/compose/docker-compose.yml

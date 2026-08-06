@@ -6,6 +6,8 @@ current implementation. A test here failing means somebody's install breaks.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 pytest.importorskip("fastapi", reason="API extra not installed")
@@ -17,9 +19,17 @@ from app.api.main import API_VERSION, PREFIX, app, _config  # noqa: E402
 
 @pytest.fixture
 def client(config, repository):
-    """`repository` is depended on for its schema, not its handle: it builds
-    the tables in the same database the API will open for itself."""
-    app.dependency_overrides[_config] = lambda: config
+    """Point the API at whichever database `repository` was parametrised onto.
+
+    The API opens its own handle from the config rather than reusing the
+    fixture's, so the config has to name the same database. It did not: it
+    always named SQLite, so every one of these ran against an empty file on the
+    Postgres pass and asserted the shape of nothing. Twenty-one of them passed
+    that way for as long as the dual-engine run went unexercised.
+    """
+    url = repository.engine.url.render_as_string(hide_password=False)
+    against = replace(config, database_url=url)
+    app.dependency_overrides[_config] = lambda: against
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

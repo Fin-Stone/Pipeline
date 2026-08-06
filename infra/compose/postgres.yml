@@ -37,6 +37,13 @@ services:
   db:
     image: pgvector/pgvector:pg17
     restart: unless-stopped
+    ports:
+      # Loopback only, and deliberately so. The dual-engine test run is what
+      # keeps Postgres-isms out of shared code — it is how `GROUP_CONCAT` in a
+      # migration was found — and it cannot run against a database it cannot
+      # reach from the host. Binding 0.0.0.0 would put the ledger on the LAN,
+      # which nothing needs and no authentication yet protects.
+      - "127.0.0.1:${FINSTONE_DB_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-finstone}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
