@@ -893,6 +893,28 @@ table does not know is **dropped rather than guessed at**, because a character
 invented here would be indistinguishable downstream from one that was really on
 the statement.
 
+### The table has to cover every size, not every character
+
+The digest keys on the bitmap **and its pixel size**, because the same pixel run at two
+widths is two different pictures. That is right, and it has a cost worth stating plainly:
+a generator that sets the same character at several sizes needs an entry per size.
+
+A table built from two statements covered only the sizes those two used. Other months of the
+same statement then lost characters — a closing balance of `225.08` read as `225.0`, a year
+as `202` — and a dropped glyph is silent by design. Four of seven statements were rejected or
+misread, and the two that had built the table passed perfectly throughout.
+
+Two things follow, and both are in place:
+
+- **The table is built from the whole corpus**, by matching an unlabelled bitmap against
+  labelled ones from the same statements after normalising both to a common grid. Where shape
+  alone was too close to call, the arithmetic decided: a balance chain that only closes if a
+  particular bitmap is an `8` is proof that it is one.
+- **The tests sweep every statement present** rather than sampling one, and check that each
+  statement opens where the previous closed. That chain is the sharpest check available — a
+  misread closing balance can still reconcile inside its own document if the rows were
+  misread to match, but it cannot agree with the next statement's opening.
+
 ### What it cannot recover, and why that is safe
 
 Case, for the letters whose capital is the same shape as the small form — c, o,

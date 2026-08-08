@@ -121,6 +121,14 @@ def digest_of(raw: bytes, width: int, height: int) -> str:
 
     Size is folded in because the same pixel run at two different widths is two
     different pictures, and a bare content hash would conflate them.
+
+    The cost of that is worth stating, because it caused a real failure: a
+    generator setting the same character at several sizes needs an entry for
+    each, and a table built from two statements covered only the sizes those
+    two used. Other months of the same statement dropped digits — `225.08`
+    came back as `225.0`, a year as `202` — and dropping is silent by design.
+    The table is now built from the whole corpus, and the tests sweep every
+    statement present rather than sampling one. See `TestEveryStatementInTheCorpus`.
     """
     return hashlib.sha1(f"{width}x{height}".encode() + raw).hexdigest()[:16]
 

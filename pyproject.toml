@@ -31,6 +31,20 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+# Data files an adapter needs at runtime. Without this they are simply absent
+# from the wheel — `packages.find` collects Python packages, and a directory
+# with no `__init__.py` is not one.
+#
+# It fails in the worst possible way: nothing errors. The glyph table is the
+# alphabet for statements drawn as bitmaps rather than typed, and an empty
+# alphabet decodes every one of them to nothing at all. The adapter is
+# registered, its signature matches no line on a page that now has no lines,
+# and the statement is reported as an unknown format. Which is what the
+# published image did, while the same code read the same file correctly from a
+# source checkout.
+[tool.setuptools.package-data]
+"app.parsers" = ["glyph_tables/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

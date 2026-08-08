@@ -33,6 +33,9 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+# setuptools leaves these behind after `pip wheel .`
+build/
+dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

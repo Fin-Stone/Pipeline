@@ -60,6 +60,95 @@ class TestWhenItEngages:
         assert glyphs.page_needs_glyphs(page) is True
 
 
+def _statements(dummy_root):
+    return sorted((dummy_root / "HSBC Bank" / "cc").glob("*.pdf"))
+
+
+class TestEveryStatementInTheCorpus:
+    """Not one sample — all of them, because one was the whole problem.
+
+    The table was built from two statements and keys each character on its
+    bitmap *and its pixel size*. Other months set the same characters a little
+    larger or smaller, so their bitmaps were absent, and an absent bitmap is
+    dropped rather than guessed at. That is the right default and it is silent:
+    `225.08` came back as `225.0`, a year as `202`, and four of seven
+    statements were rejected or misread.
+
+    So the corpus is swept rather than sampled. A new statement dropped into
+    `uploads/dummy` is covered the moment it is there.
+    """
+
+    def test_every_statement_reconciles(self, dummy_root):
+        found = _statements(dummy_root)
+        if not found:
+            pytest.skip("no HSBC samples in uploads/dummy/")
+
+        from app.parsers.hsbc.cc import HsbcCardAdapter
+
+        adapter = HsbcCardAdapter()
+        wrong = []
+        for path in found:
+            try:
+                account = adapter.parse(path).accounts[0]
+            except Exception as exc:
+                wrong.append(f"{path.name}: {type(exc).__name__}: {exc}")
+                continue
+            moved = sum(t.amount_minor for t in account.txns)
+            if account.opening_balance_minor + moved != account.closing_balance_minor:
+                wrong.append(
+                    f"{path.name}: {account.opening_balance_minor} + {moved} "
+                    f"!= {account.closing_balance_minor}"
+                )
+        assert not wrong, "\n".join(wrong)
+
+    def test_the_balances_form_an_unbroken_chain(self, dummy_root):
+        """Each statement opens where the last one closed.
+
+        The sharpest check there is, and the one that caught the dropped
+        digits: a misread closing balance still reconciles inside its own
+        statement if the rows were misread to match, but it cannot agree with
+        the *next* statement's opening. Nothing in a single document can
+        substitute for it.
+        """
+        found = _statements(dummy_root)
+        if len(found) < 2:
+            pytest.skip("need consecutive HSBC statements in uploads/dummy/")
+
+        from app.parsers.hsbc.cc import HsbcCardAdapter
+
+        adapter = HsbcCardAdapter()
+        periods = sorted(
+            (
+                (parsed.period_start, parsed.accounts[0], path.name)
+                for path, parsed in ((p, adapter.parse(p)) for p in found)
+            ),
+        )
+        breaks = [
+            f"{name} opens at {account.opening_balance_minor} but "
+            f"{previous_name} closed at {previous.closing_balance_minor}"
+            for (_, previous, previous_name), (_, account, name)
+            in zip(periods, periods[1:], strict=False)
+            if account.opening_balance_minor != previous.closing_balance_minor
+        ]
+        assert not breaks, "\n".join(breaks)
+
+    def test_a_quiet_month_is_not_a_failure(self, dummy_root):
+        """A card with no activity states the same balance twice and prints no
+        rows. Reading that as a parse failure would quarantine a document that
+        is perfectly correct."""
+        found = _statements(dummy_root)
+        if not found:
+            pytest.skip("no HSBC samples in uploads/dummy/")
+
+        from app.parsers.hsbc.cc import HsbcCardAdapter
+
+        adapter = HsbcCardAdapter()
+        for path in found:
+            account = adapter.parse(path).accounts[0]
+            if not account.txns:
+                assert account.opening_balance_minor == account.closing_balance_minor
+
+
 class TestReadingAnHsbcStatement:
     """The end-to-end claim, on the real document.
 
