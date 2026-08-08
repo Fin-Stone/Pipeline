@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pdfplumber
 
+from . import glyphs
+
 #: Words whose baselines are within this many points belong to the same row.
 DEFAULT_LINE_TOLERANCE = 4.0
 
@@ -163,5 +165,11 @@ def _load_with(path: Path, password: str, tolerance: float) -> Document:
         pages = []
         for index, page in enumerate(pdf.pages, start=1):
             words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+            if not words and glyphs.page_needs_glyphs(page):
+                # A page with no characters and thousands of one-bit pictures
+                # is a page whose text was *drawn*. Reconstructed here rather
+                # than in an adapter, so every adapter, the fingerprinter and
+                # the diagnostics stay unaware it happened. See glyphs.py.
+                words = glyphs.read_page(page)
             pages.append(Page(index, float(page.width), float(page.height), group_words(words, tolerance, index)))
         return Document(path=path, metadata=dict(pdf.metadata or {}), pages=tuple(pages))

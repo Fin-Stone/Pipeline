@@ -835,3 +835,48 @@ statements. A second run inserts nothing.
 - [development-rules.md](development-rules.md) — the two binding development rules
 - [repo-structure.md](repo-structure.md) — repository layout
 - [AGENTS.md](../AGENTS.md) — operating contract for agent-driven changes
+
+## HSBC, and statements with no text in them
+
+HSBC's generator — OpenText's Output Transformation Engine — draws every
+character as a separate one-bit bitmap and embeds no fonts. `pdfplumber` and
+`pypdf` both extract **zero characters**: a card statement is 8,862 tiny
+pictures arranged to look like words. No pattern-matching adapter can read
+that, because there is nothing to match against.
+
+`app/parsers/glyphs.py` reconstructs the text before any adapter sees the
+document, and **it is not OCR**. A generator draws the same character from the
+same bitmap every time, so 17,007 glyph instances across two statements come
+from only 472 distinct images. Recognition is therefore a dictionary lookup on
+the bitmap's hash — exact, deterministic, and unable to mistake an 8 for a 3.
+The alphabet was built once by matching each distinct bitmap against rendered
+system fonts, and lives in `app/parsers/glyph_tables/` as data.
+
+It engages only where it must: a page with real characters is left alone, and a
+page needs thousands of one-bit images before it is tried at all. A glyph the
+table does not know is **dropped rather than guessed at**, because a character
+invented here would be indistinguishable downstream from one that was really on
+the statement.
+
+### What it cannot recover, and why that is safe
+
+Case, for the letters whose capital is the same shape as the small form — c, o,
+s, u, v, w, x, z. Nothing about the picture of an `o` says which it is; only its
+size relative to its neighbours does. That is resolved per line, where a single
+font size makes it meaningful, and the residual errors cannot matter:
+counterparties are upper-cased by normalisation, month names and `CR` markers
+are read case-insensitively, and digits have no case at all.
+
+**The balance check is what proves the decode.** A statement whose amounts were
+misread does not reconcile. Both HSBC samples do, to the cent — which is a
+stronger guarantee than any OCR confidence score.
+
+Two bugs this found, both of which would have been silent:
+
+- **A gap threshold scaled to glyph height** split `188.81` into `1 88.81`,
+  because a `1` is narrow and leaves as much blank after it as a real space
+  does. The threshold is a fraction of glyph *width* now.
+- **`\bCR\b`** matched nothing on `188.81cR`, where the marker is glued to the
+  figure and there is no word boundary before the `C`. Every credit read as a
+  purchase, so the card payment counted as a second charge and the closing
+  balance flipped sign.
