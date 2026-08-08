@@ -122,6 +122,11 @@ export interface Series {
 export interface Recurring {
   currency: string; monthly_commitment_minor: number;
   series: Series[]; due_soon: Series[]; overdue: Series[]; lapsed: Series[];
+  dismissed_count: number;
+}
+export interface Dismissed {
+  merchant_norm: string; amount_centre_minor: number;
+  note: string; dismissed_at: string;
 }
 export interface ReviewItem { counterparty: string; occurrences: number; total_minor: number }
 export interface Review { outstanding: number; value_at_stake_minor: number; items: ReviewItem[] }
@@ -292,6 +297,23 @@ export const api = {
   unhide: (txn_id: number) =>
     call<{ restored: boolean }>(`/hidden/${txn_id}`, {}, { method: "DELETE" }),
   recurring: () => call<Recurring>("/recurring"),
+  /** Says a detected series is not a subscription. Recurrence is a good guess
+   *  and still a guess, and the rules that find real premiums are the same
+   *  ones that occasionally find three holidays settled up. */
+  dismissRecurring: (merchant: string, amountCentreMinor: number) =>
+    call<{ dismissed: boolean }>(
+      "/recurring/dismiss",
+      { merchant, amount_centre_minor: amountCentreMinor },
+      { method: "POST" },
+    ),
+  restoreRecurring: (merchant: string, amountCentreMinor: number) =>
+    call<{ restored: boolean }>(
+      "/recurring/dismiss",
+      { merchant, amount_centre_minor: amountCentreMinor },
+      { method: "DELETE" },
+    ),
+  dismissedRecurring: () =>
+    call<{ total: number; dismissed: Dismissed[] }>("/recurring/dismissed"),
   review: (limit = 50) => call<Review>("/review", { limit }),
   transfers: () => call<Transfers>("/transfers"),
   /** Reports by default. `apply` is what makes it true; `save` is what makes

@@ -52,6 +52,7 @@ nobody can reach is not an undo:
 | `POST /review/decide` | `DELETE /review/decide?counterparty=` | `GET /rules` |
 | `POST /rules` | `DELETE /rules/{id}` | `GET /rules?origin=all` |
 | `POST /documents` | `DELETE /documents/{sha256}` | `GET /documents` |
+| `POST /recurring/dismiss` | `DELETE /recurring/dismiss` | `GET /recurring/dismissed` |
 | `POST /transfers/rematch?apply=true` | run it again with the old window | `GET /transfers` |
 
 **A new endpoint that changes a figure must add a row to that table.** Marking a
@@ -456,7 +457,64 @@ old subscriptions.
 
 `price_changes` is what serves "trend subscription pricing": each entry is
 `{on, from_minor, to_minor}`. A price rise is a fact about a subscription, not
-a new subscription.
+a new subscription — and so is a **cut**, which a client should not draw as bad
+news: it is the evidence that a plan change actually took effect.
+
+A change needs only **two** payments at the new price, not the three a series
+needs. Requiring three would mean a price change is visible a quarter after it
+happened, which is when it stops being worth telling anybody. The evidence is
+not the short run on its own; it is that an established series stops exactly
+where it starts, on the same cadence.
+
+**Two commitments at the same price with one provider are two series.** Billed
+a fortnight apart, their merged gaps alternate and average to "fortnightly", so
+they were reported as one subscription at half the true commitment. Splitting is
+a last resort applied only to a run that yields no series at all — anything
+threaded at three times its period also covers every row, so a looser rule turns
+one monthly premium into three quarterly ones.
+
+**A direct debit the bank never named is grouped by its exact amount** and
+labelled `Unnamed direct debit`, or with whatever name the bank did print on the
+statements where it printed one. `GIRO PAYMENTS / COLLECTIONS VIA GIRO` names
+nobody, and seven insurance premiums were invisible because the same policy
+appeared under two or three such names and each fragment fell below three
+occurrences.
+
+### `POST /api/v1/recurring/dismiss?merchant=&amount_centre_minor=&note=`
+
+Says a detected series is not a subscription. `201`.
+
+```json
+{ "merchant": "...", "amount_centre_minor": 2300, "dismissed": true }
+```
+
+- **Because detection is a guess.** Three payments of the same amount a year
+  apart are usually a premium and are sometimes three people settling up after
+  three holidays. The rules that find the real ones are the same rules that
+  occasionally find these, so the answer is a cheap way to say no rather than a
+  stricter detector.
+- Keyed on the **name and amount the operator was shown**, not on transaction
+  ids — a reparse replaces those. The detection pass stays a pure function of
+  the ledger and goes on producing the series; this removes it from the reading
+  only, so `DELETE` restores exactly what was there.
+- A dismissed series leaves `series`, `due_soon`, `overdue`, `lapsed` **and**
+  `monthly_commitment_minor`. `dismissed_count` says how many are held back.
+- **Nothing about the transactions changes.** A dismissal is a fact about the
+  reading, not about the rows.
+- A series whose price later moves reappears, deliberately: the commitment that
+  was dismissed is not the one now on the statement.
+- Saying it twice is not an error — `dismissed` is `false`.
+
+### `DELETE /api/v1/recurring/dismiss?merchant=&amount_centre_minor=`
+
+Puts it back. `restored` is `false` when there was nothing to put back, so a
+second click does what the first one did.
+
+### `GET /api/v1/recurring/dismissed`
+
+Everything said not to be a subscription, with `merchant_norm`,
+`amount_centre_minor`, `note` and `dismissed_at`. Contract rule 2a: without it
+the series would vanish from every screen with nothing to name it by.
 
 ### `GET /api/v1/review`
 

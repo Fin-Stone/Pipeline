@@ -106,6 +106,33 @@ class TestEveryExclusionComesBack:
         repository.clear_human_category(context, ledger["coffee"])
         assert _figures(repository, context) == before
 
+    def test_clearing_every_correction_at_once(self, repository, context, ledger):
+        """The bulk revert, for an operator who has moved to maintaining rules.
+
+        A row-level correction beats the rules by design — that is the whole
+        point of one — so while any survive, the rules cannot be seen. Listed
+        before it deletes, because doing forty-five at once has no inverse and
+        a record the operator can act on is the honest substitute.
+        """
+        repository.set_human_category(context, ledger["coffee"], "Dining")
+        repository.set_human_category(context, ledger["dinner"], "Dining")
+
+        listed = repository.list_human_categories(context)
+        assert {row["id"] for row in listed} == {ledger["coffee"], ledger["dinner"]}
+        assert all(row["category"] == "Dining" for row in listed)
+
+        assert repository.clear_human_categories(context) == 2
+        assert repository.list_human_categories(context) == []
+
+    def test_clearing_leaves_what_the_rules_decided(self, repository, context, ledger):
+        """Only corrections go. A rule pass is regenerable and is not the
+        operator's own work in the way a correction is."""
+        repository.replace_rule_enrichments(context, [(ledger["coffee"], "Grocery", 1.0)])
+        repository.set_human_category(context, ledger["dinner"], "Dining")
+
+        assert repository.clear_human_categories(context) == 1
+        assert {row["category"] for row in repository.category_totals(context)} == {"Grocery"}
+
 
 class TestAMarkCanBeFound:
     """Undo is only real if the thing to undo can be named later.

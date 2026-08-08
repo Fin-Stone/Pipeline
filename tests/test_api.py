@@ -940,6 +940,130 @@ class TestShape:
         assert isinstance(body["monthly_commitment_minor"], int)
 
 
+class TestSayingItIsNotASubscription:
+    """Detection is a good guess and still a guess.
+
+    Widening it to find direct debits the bank never named was a deliberate
+    trade: more real commitments, and the occasional wrong one. The answer to
+    the wrong ones is not a stricter detector — that goes back to missing seven
+    insurance premiums — but a cheap way to say no.
+    """
+
+    def _seed_a_series(self, repository, counterparty="YEARLY THING"):
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256="d" * 64, institution="Test", doc_type="acc",
+                period_start=date(2023, 1, 1), period_end=date(2026, 6, 30),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath="d.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [],
+            [
+                TxnRecord(
+                    account_key=account, posted_date=date(year, 6, 15),
+                    amount_minor=-2300, currency="SGD",
+                    description_raw=counterparty, description_norm=counterparty,
+                    counterparty_norm=counterparty, dedupe_key=f"yr{year}", seq=year,
+                )
+                for year in (2023, 2024, 2025)
+            ],
+        )
+
+    def _recurring(self, client):
+        return client.get(f"{PREFIX}/recurring", params={"profile": "dummy"}).json()
+
+    def _names(self, body):
+        return {
+            s["merchant"]
+            for s in body["series"] + body["lapsed"] + body["overdue"] + body["due_soon"]
+        }
+
+    def test_a_dismissed_series_leaves_every_list_and_the_total(self, client, repository):
+        self._seed_a_series(repository)
+        before = self._recurring(client)
+        assert "YEARLY THING" in self._names(before)
+
+        client.post(
+            f"{PREFIX}/recurring/dismiss",
+            params={"profile": "dummy", "merchant": "YEARLY THING",
+                    "amount_centre_minor": 2300},
+        )
+        after = self._recurring(client)
+        assert "YEARLY THING" not in self._names(after)
+        assert after["monthly_commitment_minor"] != before["monthly_commitment_minor"]             or before["monthly_commitment_minor"] == 0
+
+    def test_it_can_be_found_again(self, client, repository):
+        """Contract rule 2a: an undo nobody can reach is not an undo. Without a
+        listing the series would vanish with nothing to name it by."""
+        self._seed_a_series(repository)
+        client.post(
+            f"{PREFIX}/recurring/dismiss",
+            params={"profile": "dummy", "merchant": "YEARLY THING",
+                    "amount_centre_minor": 2300},
+        )
+        body = client.get(f"{PREFIX}/recurring/dismissed", params={"profile": "dummy"}).json()
+        assert body["total"] == 1
+        assert body["dismissed"][0]["merchant_norm"] == "YEARLY THING"
+
+    def test_putting_it_back_restores_it_exactly(self, client, repository):
+        """The pass stays a pure function of the ledger, so the series is still
+        being computed — a dismissal only removes it from the reading."""
+        self._seed_a_series(repository)
+        before = self._recurring(client)
+        params = {"profile": "dummy", "merchant": "YEARLY THING",
+                  "amount_centre_minor": 2300}
+
+        client.post(f"{PREFIX}/recurring/dismiss", params=params)
+        restored = client.request(
+            "DELETE", f"{PREFIX}/recurring/dismiss", params=params,
+        ).json()
+
+        assert restored["restored"] is True
+        assert self._recurring(client)["series"] == before["series"]
+
+    def test_dismissing_twice_is_not_an_error(self, client, repository):
+        self._seed_a_series(repository)
+        params = {"profile": "dummy", "merchant": "YEARLY THING",
+                  "amount_centre_minor": 2300}
+        assert client.post(f"{PREFIX}/recurring/dismiss", params=params).json()["dismissed"] is True
+        assert client.post(f"{PREFIX}/recurring/dismiss", params=params).json()["dismissed"] is False
+
+    def test_restoring_something_that_was_never_dismissed_is_not_an_error(self, client):
+        body = client.request(
+            "DELETE", f"{PREFIX}/recurring/dismiss",
+            params={"profile": "dummy", "merchant": "NOTHING", "amount_centre_minor": 1},
+        ).json()
+        assert body["restored"] is False
+
+    def test_a_dismissal_does_not_touch_the_transactions(self, client, repository):
+        """It is a fact about the *reading*, not about the rows."""
+        self._seed_a_series(repository)
+        before = client.get(
+            f"{PREFIX}/transactions", params={"profile": "dummy"},
+        ).json()["transactions"]
+        client.post(
+            f"{PREFIX}/recurring/dismiss",
+            params={"profile": "dummy", "merchant": "YEARLY THING",
+                    "amount_centre_minor": 2300},
+        )
+        after = client.get(
+            f"{PREFIX}/transactions", params={"profile": "dummy"},
+        ).json()["transactions"]
+        assert [r["id"] for r in after] == [r["id"] for r in before]
+
+
 class TestRecategorisingASubscription:
     """A subscription filed wrongly has to be correctable where it is noticed.
 

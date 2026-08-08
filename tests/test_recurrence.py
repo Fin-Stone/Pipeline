@@ -241,3 +241,167 @@ class TestConfidence:
         ]
         found = find_series(rows)
         assert found and 0.0 < found[0].confidence < 1.0
+
+
+class TestTwoPlansAtOnePrice:
+    """One provider, two plans, the same price, billed a fortnight apart.
+
+    Averaged together their gaps alternate 14 and 17 days, which lands on
+    "fortnightly" — so two monthly plans were reported as one fortnightly one,
+    at half the true commitment, and a price cut on one of them was invisible
+    because the other went on at the old price.
+    """
+
+    #: The real dates, off the operator's statements. Two plans that drift
+    #: independently, which is why their merged gaps alternate 14, 16, 17, 18
+    #: and describe no period at all.
+    DATES = (
+        date(2025, 9, 30), date(2025, 10, 30), date(2025, 11, 15), date(2025, 11, 29),
+        date(2025, 12, 16), date(2025, 12, 30), date(2026, 1, 16), date(2026, 1, 30),
+        date(2026, 2, 17), date(2026, 3, 3), date(2026, 3, 19), date(2026, 4, 2),
+    )
+
+    def _two_plans(self, merchant, amount, months=6):
+        return [
+            Occurrence(txn_id=100 + i, merchant_norm=merchant, amount_minor=amount,
+                       posted_date=day)
+            for i, day in enumerate(self.DATES)
+        ]
+
+    def test_they_are_two_monthly_plans_not_one_fortnightly(self):
+        series = find_series(self._two_plans("gomo", -1833))
+        assert len(series) == 2
+        assert all(s.period_label == "monthly" for s in series)
+
+    def test_the_commitment_is_the_sum_of_both(self):
+        series = find_series(self._two_plans("gomo", -1833))
+        assert sum(s.monthly_equivalent_minor for s in series) == 1833 * 2
+
+    def test_a_run_that_already_describes_something_is_left_alone(self):
+        """The safeguard, and it is load-bearing. Anything threaded at three
+        times its period also accounts for every row, in three tidy strands —
+        so a rule that splits on "the strands fit better" splits everything. An
+        irregular monthly premium became three quarterly ones this way."""
+        rows = [
+            Occurrence(txn_id=i, merchant_norm="premium", amount_minor=-80000,
+                       posted_date=day)
+            for i, day in enumerate([
+                date(2025, 1, 15), date(2025, 2, 17), date(2025, 3, 14),
+                date(2025, 4, 15), date(2025, 5, 19), date(2025, 6, 16),
+                date(2025, 7, 15), date(2025, 8, 18), date(2025, 9, 15),
+                date(2025, 10, 15), date(2025, 11, 17), date(2025, 12, 15),
+            ])
+        ]
+        series = find_series(rows)
+        assert len(series) == 1 and series[0].period_label == "monthly"
+
+    def test_a_genuine_fortnightly_series_is_left_alone(self):
+        """The guard on the guard. Anything threaded at three times its period
+        also covers every row, so a rule loose enough to find two monthly plans
+        would just as happily find three quarterly ones."""
+        rows = [
+            Occurrence(txn_id=i, merchant_norm="gym", amount_minor=-2500,
+                       posted_date=date(2026, 1, 5) + timedelta(days=14 * i))
+            for i in range(10)
+        ]
+        series = find_series(rows)
+        assert len(series) == 1 and series[0].period_label == "fortnightly"
+
+    def test_a_monthly_series_is_not_read_as_three_quarterly_ones(self):
+        rows = _monthly("rent", -120000, months=12, start_year=2026) if False else [
+            Occurrence(txn_id=i, merchant_norm="rent", amount_minor=-120000,
+                       posted_date=date(2025, 1, 5) + timedelta(days=30 * i))
+            for i in range(18)
+        ]
+        series = find_series(rows)
+        assert len(series) == 1 and series[0].period_label == "monthly"
+
+
+class TestAPriceChangeTooRecentToBeASeries:
+    """A subscription whose price changed last month has two payments at the
+    new price, and three are needed to establish one. Requiring three would
+    mean a change is only visible a quarter after it happened — which is
+    exactly when it stops being worth telling anybody."""
+
+    def _cut(self, was, now, before=5, after=2):
+        rows = [
+            Occurrence(txn_id=i, merchant_norm="gomo", amount_minor=was,
+                       posted_date=date(2026, 1, 5) + timedelta(days=30 * i))
+            for i in range(before)
+        ]
+        rows += [
+            Occurrence(txn_id=50 + i, merchant_norm="gomo", amount_minor=now,
+                       posted_date=date(2026, 1, 5) + timedelta(days=30 * (before + i)))
+            for i in range(after)
+        ]
+        return rows
+
+    def test_the_cut_is_recorded_on_the_series(self):
+        series = find_series(self._cut(-1833, -1333))
+        assert len(series) == 1
+        assert series[0].amount_centre_minor == 1333
+        assert series[0].price_changes[-1].from_minor == 1833
+        assert series[0].price_changes[-1].to_minor == 1333
+
+    def test_one_payment_is_not_yet_a_change(self):
+        """One is a coincidence with a plausible date; two show the cadence
+        carried on."""
+        series = find_series(self._cut(-1833, -1333, after=1))
+        assert series[0].price_changes == ()
+
+    def test_an_unrelated_large_payment_is_not_a_price_rise(self):
+        """A tier change doubles a bill; it does not multiply it by eighty."""
+        series = find_series(self._cut(-1000, -80000, after=2))
+        assert all(not s.price_changes for s in series)
+
+    def test_the_same_amount_again_is_not_a_change(self):
+        """`400.00 -> 400.00` tells the operator nothing and looks like news."""
+        series = find_series(self._cut(-40000, -40000))
+        assert series[0].price_changes == ()
+
+
+class TestPaymentsTheBankDidNotName:
+    """A direct debit that reads only `GIRO PAYMENTS / COLLECTIONS VIA GIRO`
+    names nobody, and no amount of normalising recovers a name that was never
+    printed. Seven insurance premiums were invisible for this reason."""
+
+    def _yearly(self, merchant, amount, years=3, txn_from=1):
+        return [
+            Occurrence(txn_id=txn_from + i, merchant_norm=merchant, amount_minor=amount,
+                       posted_date=date(2023 + i, 6, 15))
+            for i in range(years)
+        ]
+
+    def test_an_unnamed_direct_debit_is_still_found(self):
+        series = find_series(self._yearly("GIRO PAYMENTS / COLLECTIONS VIA GIRO", -82600))
+        assert len(series) == 1
+        assert series[0].period_label == "yearly"
+        assert series[0].merchant_norm == "Unnamed direct debit"
+
+    def test_a_reference_stuck_to_the_rail_is_still_the_rail(self):
+        """The same mechanism arrives bare and with the bank's own reference."""
+        rows = self._yearly("GIRO PAYMENTS / COLLECTIONS VIA GIRO H123456789", -82600)
+        assert len(find_series(rows)) == 1
+
+    def test_the_named_half_and_the_unnamed_half_are_one_policy(self):
+        """The case that was actually missed: the same premium filed under the
+        insurer on two statements and under the rail on two others, so neither
+        half reached the three occurrences a series needs."""
+        rows = self._yearly("ACME", -82600, years=2, txn_from=1)
+        rows += [
+            Occurrence(txn_id=10 + i, merchant_norm="GIRO PAYMENTS / COLLECTIONS VIA GIRO",
+                       amount_minor=-82600, posted_date=date(2025 + i, 6, 15))
+            for i in range(2)
+        ]
+        series = find_series(rows)
+        assert len(series) == 1
+        assert series[0].occurrences == 4
+        # Labelled with the name the bank did print, where it printed one.
+        assert series[0].merchant_norm == "ACME"
+
+    def test_a_named_payee_on_a_rail_prefix_is_not_grouped_by_amount(self):
+        """`FAST PRU- INSURANCE PREMIUM` does name a payee."""
+        from app.domain.recurrence import is_rail
+
+        assert is_rail("FAST PRU- INSURANCE PREMIUM") is False
+        assert is_rail("FAST") is True

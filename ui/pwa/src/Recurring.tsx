@@ -9,12 +9,15 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import {
-  Alert, Card, CardContent, Chip, Divider, FormControl, LinearProgress, List,
-  ListItem, ListItemText, MenuItem, Select, Stack, Tooltip, Typography,
+  Alert, Button, Card, CardContent, Chip, Divider, FormControl, IconButton,
+  LinearProgress, List, ListItem, ListItemText, MenuItem, Select, Stack,
+  Tooltip, Typography,
 } from "@mui/material";
 import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
-import { ApiError, Category, Recurring as RecurringData, Series, api } from "./api";
+import CloseIcon from "@mui/icons-material/Close";
+import UndoIcon from "@mui/icons-material/Undo";
+import { ApiError, Category, Dismissed, Recurring as RecurringData, Series, api } from "./api";
 import { magnitude } from "./money";
 
 /**
@@ -26,11 +29,12 @@ import { magnitude } from "./money";
  * disagree. Correcting it here reaches every row of the series and every other
  * transaction from that merchant at once.
  */
-function SeriesRow({ s, note, categories, onCategorise }: {
+function SeriesRow({ s, note, categories, onCategorise, onDismiss }: {
   s: Series;
   note?: string;
   categories: Category[];
   onCategorise: (merchant: string, category: string) => Promise<void>;
+  onDismiss: (s: Series) => Promise<void>;
 }) {
   const change = s.price_changes.at(-1);
   const cheaper = change ? change.to_minor < change.from_minor : false;
@@ -39,13 +43,22 @@ function SeriesRow({ s, note, categories, onCategorise }: {
   return (
     <ListItem divider disableGutters
       secondaryAction={
-        <Stack alignItems="flex-end">
-          <Typography sx={{ fontVariantNumeric: "tabular-nums" }}>
-            {magnitude(s.amount_centre_minor)}
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            {magnitude(s.monthly_equivalent_minor)}/mo
-          </Typography>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Stack alignItems="flex-end">
+            <Typography sx={{ fontVariantNumeric: "tabular-nums" }}>
+              {magnitude(s.amount_centre_minor)}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {magnitude(s.monthly_equivalent_minor)}/mo
+            </Typography>
+          </Stack>
+          {/* Detection is a guess, so saying no is one click and is listed
+              below where it can be taken back. */}
+          <Tooltip title="Not a subscription">
+            <IconButton size="small" onClick={() => onDismiss(s)}>
+              <CloseIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
         </Stack>
       }
     >
@@ -101,11 +114,14 @@ function SeriesRow({ s, note, categories, onCategorise }: {
 export default function Recurring() {
   const [data, setData] = useState<RecurringData | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [dismissed, setDismissed] = useState<Dismissed[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    Promise.all([api.recurring(), api.categories()])
-      .then(([r, c]) => { setData(r); setCategories(c.categories); })
+    Promise.all([api.recurring(), api.categories(), api.dismissedRecurring()])
+      .then(([r, c, d]) => {
+        setData(r); setCategories(c.categories); setDismissed(d.dismissed);
+      })
       .catch((e) => setError(String(e instanceof ApiError ? e.detail : e)));
   }, []);
 
@@ -116,6 +132,16 @@ export default function Recurring() {
   // commitment above it did not would be a page disagreeing with itself.
   const categorise = useCallback(async (merchant: string, category: string) => {
     await api.decide(merchant, category);
+    load();
+  }, [load]);
+
+  const dismiss = useCallback(async (s: Series) => {
+    await api.dismissRecurring(s.merchant, s.amount_centre_minor);
+    load();
+  }, [load]);
+
+  const restore = useCallback(async (d: Dismissed) => {
+    await api.restoreRecurring(d.merchant_norm, d.amount_centre_minor);
     load();
   }, [load]);
 
@@ -152,7 +178,7 @@ export default function Recurring() {
             <List dense>
               {data.due_soon.map((s) => (
                 <SeriesRow key={s.merchant} s={s}
-                  categories={categories} onCategorise={categorise} />
+                  categories={categories} onCategorise={categorise} onDismiss={dismiss} />
               ))}
             </List>
           </CardContent>
@@ -166,7 +192,7 @@ export default function Recurring() {
             <List dense>
               {data.overdue.map((s) => (
                 <SeriesRow key={s.merchant} s={s} note={`expected ${s.expected_next}`}
-                  categories={categories} onCategorise={categorise} />
+                  categories={categories} onCategorise={categorise} onDismiss={dismiss} />
               ))}
             </List>
           </CardContent>
@@ -184,7 +210,7 @@ export default function Recurring() {
           <List dense>
             {data.series.map((s) => (
               <SeriesRow key={s.merchant + s.amount_centre_minor} s={s}
-                categories={categories} onCategorise={categorise} />
+                categories={categories} onCategorise={categorise} onDismiss={dismiss} />
             ))}
           </List>
           {data.series.length === 0 && (
@@ -203,7 +229,34 @@ export default function Recurring() {
             <List dense>
               {data.lapsed.map((s) => (
                 <SeriesRow key={s.merchant} s={s} note={`last seen ${s.last_seen}`}
-                  categories={categories} onCategorise={categorise} />
+                  categories={categories} onCategorise={categorise} onDismiss={dismiss} />
+              ))}
+            </List>
+          </CardContent>
+        </Card>
+      )}
+      {dismissed.length > 0 && (
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="h6" color="text.secondary">Not subscriptions</Typography>
+            <Typography variant="caption" color="text.secondary">
+              Detection is a guess, and these are the ones you said it got wrong.
+              They stay out of the total until you put them back.
+            </Typography>
+            <List dense>
+              {dismissed.map((d) => (
+                <ListItem key={d.merchant_norm + d.amount_centre_minor} divider disableGutters
+                  secondaryAction={
+                    <Button size="small" startIcon={<UndoIcon />} onClick={() => restore(d)}>
+                      Put back
+                    </Button>
+                  }
+                >
+                  <ListItemText
+                    primary={d.merchant_norm}
+                    secondary={`${magnitude(d.amount_centre_minor)} · dismissed ${d.dismissed_at.slice(0, 10)}`}
+                  />
+                </ListItem>
               ))}
             </List>
           </CardContent>

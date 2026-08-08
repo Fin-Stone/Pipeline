@@ -719,11 +719,29 @@ def cmd_categorise(args) -> int:
         check_schema(repository)
         context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         seeded = repository.seed_categories(context, DEFAULT_CATEGORIES)
+
+        cleared = []
+        if args.clear_manual:
+            # Read before deleting. Doing forty-five of these at once has no
+            # inverse route, and a printed record the operator can act on is
+            # the honest substitute for one.
+            cleared = repository.list_human_categories(context)
+            repository.clear_human_categories(context)
+
         categories = repository.list_categories(context)
         stored = repository.list_category_rules(context)
         targets = repository.list_categorisation_targets(context)
     finally:
         repository.close()
+
+    if cleared:
+        print(f"row-level corrections removed  {len(cleared)}")
+        print("  Listed because nothing can put them back automatically:\n")
+        for row in cleared:
+            print(f"    {row['posted_date']}  {_money(row['amount_minor'])}  "
+                  f"{describe(row['counterparty_norm'] or '', args.redact)[:34]:<36}"
+                  f"{row['category']}")
+        print()
 
     # Indexed once and reused by every pass below. Nearly every stored rule
     # matches exactly one name, so this turns the scan into a lookup.
@@ -1377,6 +1395,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true", help="write the categories to the ledger")
     p.add_argument("--limit", type=int, default=20, help="gaps to list (default 20)")
     p.add_argument("--redact", action="store_true", help="mask counterparty names")
+    p.add_argument(
+        "--clear-manual", action="store_true",
+        help="drop every row-level correction first, so the rules decide again. "
+             "Prints each one it removes; there is no inverse.",
+    )
     p.set_defaults(func=cmd_categorise)
 
     p = sub.add_parser("recurring", help="the payments that repeat, and what they cost")

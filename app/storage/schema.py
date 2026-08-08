@@ -455,11 +455,43 @@ account_card_number = Table(
     ),
 )
 
+#: Series the operator says are not a subscription.
+#:
+#: Recurrence is a *guess* — a good one, and still a guess. Three payments of
+#: the same amount a year apart are usually a premium and are sometimes three
+#: people settling up after three holidays. The detector cannot tell, and the
+#: rules that find the real ones are exactly the rules that occasionally find
+#: these, so the answer is not a stricter detector but a cheap way to say no.
+#:
+#: Held beside the ledger and keyed on what the operator was shown — a name and
+#: an amount — rather than on transaction ids, which a reparse replaces. The
+#: pass is a pure function of the ledger and is re-run on every request, so a
+#: dismissal has to survive being re-derived from scratch.
+#:
+#: A series whose price then moves reappears, deliberately: the commitment the
+#: operator dismissed is not the one now on the statement, and staying silent
+#: about the change would be the wrong half of "trivial to undo".
+recurrence_dismissal = Table(
+    "recurrence_dismissal",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("merchant_norm", Text, nullable=False),
+    Column("amount_centre_minor", BigInteger, nullable=False),
+    Column("note", Text, nullable=False, server_default=""),
+    Column("dismissed_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint(
+        "tenant_id", "merchant_norm", "amount_centre_minor",
+        name="uq_recurrence_dismissal",
+    ),
+)
+
 TENANT_SCOPED_TABLES = (
     source_document,
     tenant_setting,
     account,
     account_card_number,
+    recurrence_dismissal,
     txn,
     transfer_link,
     payback_link,

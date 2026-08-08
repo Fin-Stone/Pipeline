@@ -460,6 +460,47 @@ class SqlAlchemyLedgerRepository:
             )).rowcount
         return bool(removed)
 
+    def list_human_categories(self, context: TenantContext) -> list[dict]:
+        """Every row categorised by hand, with the merchant it sits on.
+
+        Read before clearing, so a bulk revert can print what it removed. There
+        is no inverse route for doing forty-five at once, and the honest
+        substitute is a record the operator can act on.
+        """
+        enrichment, txn = schema.txn_enrichment.c, schema.txn.c
+        stmt = (
+            select(
+                txn.id, txn.posted_date, txn.amount_minor, txn.counterparty_norm,
+                enrichment.category,
+            )
+            .select_from(
+                schema.txn_enrichment.join(schema.txn, enrichment.txn_id == txn.id)
+            )
+            .where(
+                (enrichment.tenant_id == context.tenant_id)
+                & (enrichment.source == "human")
+            )
+            .order_by(txn.counterparty_norm, txn.posted_date)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def clear_human_categories(self, context: TenantContext) -> int:
+        """Drop every row-level correction, letting the rules decide again.
+
+        The bulk form of `clear_human_category`. A correction on one row says
+        "this merchant is right in general and wrong here"; a rule says what the
+        merchant is. Once the rules are the ones being maintained, the row-level
+        ones are older answers to a question already settled, and they win over
+        the rules by design — so they have to go for the rules to be visible.
+        """
+        enrichment = schema.txn_enrichment.c
+        with self._engine.begin() as conn:
+            return conn.execute(schema.txn_enrichment.delete().where(
+                (enrichment.tenant_id == context.tenant_id)
+                & (enrichment.source == "human")
+            )).rowcount
+
     def list_category_rules(self, context: TenantContext) -> list[dict]:
         """Rules with the category they resolve to, by id rather than by name.
 
@@ -834,6 +875,60 @@ class SqlAlchemyLedgerRepository:
         )
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def list_recurrence_dismissals(self, context: TenantContext) -> list[dict]:
+        """Series the operator has said are not subscriptions."""
+        dismissal = schema.recurrence_dismissal.c
+        stmt = (
+            select(
+                dismissal.merchant_norm, dismissal.amount_centre_minor,
+                dismissal.note, dismissal.dismissed_at,
+            )
+            .where(dismissal.tenant_id == context.tenant_id)
+            .order_by(dismissal.merchant_norm, dismissal.amount_centre_minor)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def dismiss_recurrence(
+        self, context: TenantContext, merchant_norm: str,
+        amount_centre_minor: int, note: str = "",
+    ) -> bool:
+        """Say a detected series is not a subscription. `False` if already said."""
+        dismissal = schema.recurrence_dismissal.c
+        with self._engine.begin() as conn:
+            already = conn.execute(
+                select(dismissal.id).where(
+                    (dismissal.tenant_id == context.tenant_id)
+                    & (dismissal.merchant_norm == merchant_norm)
+                    & (dismissal.amount_centre_minor == amount_centre_minor)
+                )
+            ).first()
+            if already:
+                return False
+            conn.execute(schema.recurrence_dismissal.insert().values(
+                tenant_id=context.tenant_id,
+                merchant_norm=merchant_norm,
+                amount_centre_minor=amount_centre_minor,
+                note=note,
+                dismissed_at=datetime.now(timezone.utc),
+            ))
+        return True
+
+    def restore_recurrence(
+        self, context: TenantContext, merchant_norm: str, amount_centre_minor: int,
+    ) -> bool:
+        """Take a dismissal back. `False` when there was nothing to take back."""
+        dismissal = schema.recurrence_dismissal.c
+        with self._engine.begin() as conn:
+            removed = conn.execute(
+                schema.recurrence_dismissal.delete().where(
+                    (dismissal.tenant_id == context.tenant_id)
+                    & (dismissal.merchant_norm == merchant_norm)
+                    & (dismissal.amount_centre_minor == amount_centre_minor)
+                )
+            ).rowcount
+        return bool(removed)
 
     def list_card_numbers(self, context: TenantContext) -> list[dict]:
         """Every card number on record, with the account it belongs to."""

@@ -465,6 +465,20 @@ def recurring(
         )
         for r in rows
     )
+    # What the operator has said is not a subscription. Applied after detection
+    # rather than before, because the pass is a pure function of the ledger and
+    # must keep being one — a dismissal is a fact about the *reading*, not about
+    # the rows, and the rows have to go on producing the same series so that
+    # taking the dismissal back restores exactly what was there.
+    dismissed = {
+        (d["merchant_norm"], d["amount_centre_minor"])
+        for d in handle.repository.list_recurrence_dismissals(handle.context)
+    }
+    series = [
+        s for s in series
+        if (s.merchant_norm, s.amount_centre_minor) not in dismissed
+    ]
+
     today = date.today()
     live = [s for s in series if not s.is_lapsed(today)]
 
@@ -502,7 +516,67 @@ def recurring(
         "due_soon": [_out(s) for s in live if s.is_due_within(today, due_within)],
         "overdue": [_out(s) for s in live if s.is_overdue(today)],
         "lapsed": [_out(s) for s in series if s.is_lapsed(today)],
+        "dismissed_count": len(dismissed),
     }
+
+
+@app.post(f"{PREFIX}/recurring/dismiss", tags=["dashboard"], status_code=201)
+def dismiss_recurring(
+    handle: Session,
+    merchant: str,
+    amount_centre_minor: int,
+    note: str = "",
+) -> dict:
+    """Say a detected series is not a subscription.
+
+    Recurrence is a good guess and still a guess: three payments of the same
+    amount a year apart are usually a premium and are sometimes three people
+    settling up after three holidays. The rules that find the real ones are the
+    same rules that occasionally find these, so the answer is not a stricter
+    detector — that goes back to missing insurance premiums the bank never
+    named — but a cheap way to say no.
+
+    Keyed on the name and amount the operator was shown rather than on
+    transaction ids, which a reparse replaces. The detection pass stays a pure
+    function of the ledger and keeps producing the series; this only removes it
+    from the reading, so `DELETE` restores exactly what was there.
+
+    Saying it twice is not an error — `dismissed` is `false`.
+    """
+    return {
+        "merchant": merchant,
+        "amount_centre_minor": amount_centre_minor,
+        "dismissed": handle.repository.dismiss_recurrence(
+            handle.context, merchant, amount_centre_minor, note,
+        ),
+    }
+
+
+@app.delete(f"{PREFIX}/recurring/dismiss", tags=["dashboard"])
+def restore_recurring(handle: Session, merchant: str, amount_centre_minor: int) -> dict:
+    """Put a dismissed series back. The inverse, in the words it was dismissed in.
+
+    Restoring nothing is not an error — `restored` is `false`, so a second
+    click does what the first one did.
+    """
+    return {
+        "merchant": merchant,
+        "amount_centre_minor": amount_centre_minor,
+        "restored": handle.repository.restore_recurrence(
+            handle.context, merchant, amount_centre_minor,
+        ),
+    }
+
+
+@app.get(f"{PREFIX}/recurring/dismissed", tags=["dashboard"])
+def dismissed_recurring(handle: Session) -> dict:
+    """Everything said not to be a subscription, so it can be found again.
+
+    Contract rule 2a: an undo nobody can reach is not an undo. Without this the
+    series would simply vanish from every screen with nothing to name it by.
+    """
+    rows = handle.repository.list_recurrence_dismissals(handle.context)
+    return {"total": len(rows), "dismissed": rows}
 
 
 # ------------------------------------------------------------------ documents ---
