@@ -25,9 +25,11 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated
 
+import dataclasses
 import os
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -43,6 +45,8 @@ from ..domain.categories import (
 )
 from ..domain.networth import Declared, change, net_worth
 from ..domain.recurrence import Occurrence, find_series
+from ..domain.transfers import Window
+from ..pipeline.transfers import preview, realign, save_window, window_for
 from ..storage.factory import build_repository
 from ..storage.sqlalchemy_repo import choose_bucket, rolling_window, trend_centre
 
@@ -479,6 +483,202 @@ def recurring(
     }
 
 
+# ------------------------------------------------------------------ documents ---
+#: The largest statement this will take. Bank PDFs are hundreds of kilobytes;
+#: a year of them bundled is a few megabytes. Well above anything real and far
+#: below what would let one request fill the disk.
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+
+#: Refused before anything is written. An extension is a claim; these are what
+#: the file actually is. A `.pdf` that is not a PDF has either gone wrong on
+#: the way here or is not a statement, and either way the parser is the wrong
+#: place to find out.
+_MAGIC = {
+    b"%PDF": ".pdf",
+    b"OFXH": ".ofx",
+    b"<OFX": ".ofx",
+    b"<?xm": ".xml",
+}
+
+
+def _accepted_name(name: str) -> str:
+    """A filename safe to write, keeping enough of the original to recognise.
+
+    Path separators and `..` are stripped rather than rejected: the operator
+    did not choose the name their bank generated, and refusing an upload over
+    a character they cannot see is a worse answer than saving it as something
+    sensible.
+    """
+    stem = Path(name or "").name.replace("\\", "_")
+    cleaned = "".join(c for c in stem if c.isalnum() or c in "-_. ").strip(". ")
+    return cleaned or "upload.pdf"
+
+
+def _looks_like_a_document(head: bytes, name: str) -> bool:
+    if any(head.startswith(magic) for magic in _MAGIC):
+        return True
+    # Text formats with no magic number of their own. Judged by extension,
+    # because that is genuinely all there is to go on for a CSV.
+    return Path(name).suffix.lower() in {".csv", ".qif", ".sta", ".mt940"}
+
+
+@app.post(f"{PREFIX}/documents", tags=["ledger"], status_code=201)
+async def upload_documents(
+    handle: Session,
+    files: Annotated[list[UploadFile], File(description="Statement files")],
+) -> dict:
+    """Take statements over HTTP and put them through the pipeline.
+
+    The alternative was `scp` and a shell, which is a fine answer for the
+    person who built this and a poor one for the person living with it.
+
+    Files land in the inbox rather than in `uploads/`. `uploads/` is the
+    operator's own folder and is mounted read-only for exactly that reason —
+    the pipeline copies out of it and never writes to it. Nothing is lost: the
+    original bytes go into the content-addressed store, which is where the
+    durable copy has always lived.
+
+    That also settles `FINSTONE_ALLOW_PROD`, which is not checked here and is
+    not being evaded. It guards *reading `uploads/prod`* — a folder of real
+    statements that automation must never walk on its own initiative. A file
+    handed over in a request is the deliberate act the flag exists to require,
+    and it is not in that folder.
+
+    **The transfer matcher runs afterwards.** A statement arriving can complete
+    a pair that has been waiting for it — a card payment whose other leg was
+    never imported — and leaving that until somebody remembers to re-run is
+    how the ledger ends up quietly overstating spending.
+
+    Every file is reported on its own. One unparseable statement in a batch of
+    twelve must not look like twelve failures, and a duplicate is a normal
+    outcome rather than an error: re-uploading what is already imported is what
+    somebody does when they are not sure whether they did.
+
+    Ingestion drains the whole inbox for this profile rather than only what
+    arrived here. The inbox is a queue, and a file left in it by a run that
+    failed halfway should not need a second mechanism to pick it up.
+    """
+    from ..pipeline.ingest import ingest_inbox
+    from ..pipeline.transfers import realign
+    from ..storage.factory import build_blob_store, build_notifier
+
+    config = handle.config
+    inbox = config.inbox_dir / handle.profile / "uploaded"
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    accepted, rejected = [], []
+    for upload in files:
+        name = _accepted_name(upload.filename or "")
+        body = await upload.read(MAX_UPLOAD_BYTES + 1)
+        if len(body) > MAX_UPLOAD_BYTES:
+            rejected.append({"filename": name, "reason": "larger than 32 MB"})
+            continue
+        if not body:
+            rejected.append({"filename": name, "reason": "empty"})
+            continue
+        if not _looks_like_a_document(body[:4], name):
+            rejected.append({
+                "filename": name,
+                "reason": "not a statement — expected a PDF, OFX, CSV or MT940",
+            })
+            continue
+        # Written under a name that cannot collide with a concurrent upload of
+        # the same statement. Duplicate *content* is caught by the digest a
+        # moment later, which is the check that matters.
+        target = inbox / name
+        if target.exists():
+            target = inbox / f"{Path(name).stem}-{uuid4().hex[:8]}{Path(name).suffix}"
+        target.write_bytes(body)
+        accepted.append({"filename": name, "path": target})
+
+    summary = None
+    if accepted:
+        summary = ingest_inbox(
+            config, handle.context, handle.repository,
+            build_blob_store(config), build_notifier(config),
+            profile=handle.profile,
+        )
+
+    # Matched back by path, so a batch reports per file rather than in total.
+    outcomes = {str(o.path): o for o in (summary.outcomes if summary else ())}
+    imported = []
+    for item in accepted:
+        outcome = outcomes.get(str(item["path"]))
+        imported.append({
+            "filename": item["filename"],
+            "status": outcome.status if outcome else "pending",
+            "sha256": outcome.sha256 if outcome else None,
+            "transactions": outcome.txns_inserted if outcome else 0,
+            # Why it was set aside, in the words the pipeline used. A
+            # quarantined statement is not a failure of this endpoint and the
+            # operator needs the reason, not a status code.
+            "reason": outcome.reason if outcome else None,
+        })
+
+    repaired = None
+    if summary and (summary.imported or summary.unverified):
+        outcome = realign(handle.repository, handle.context)
+        repaired = {
+            "added": len(outcome.added),
+            "removed": len(outcome.removed),
+            "linked": len(outcome.result.links),
+        }
+
+    return {
+        "accepted": len(accepted),
+        "rejected": rejected,
+        "documents": imported,
+        "imported": summary.imported if summary else 0,
+        "duplicates": summary.duplicates if summary else 0,
+        "quarantined": summary.quarantined if summary else 0,
+        "transactions": summary.txns_inserted if summary else 0,
+        # What re-pairing did, because an upload changes spending figures in
+        # two ways and only one of them is the new rows.
+        "transfers": repaired,
+    }
+
+
+@app.get(f"{PREFIX}/documents", tags=["ledger"])
+def documents(
+    handle: Session,
+    parse_status: str | None = None,
+    limit: Annotated[int, Query(le=1000)] = 200,
+) -> dict:
+    """What has been imported — the listing half of contract rule 2a.
+
+    An upload adds transactions to every figure on the dashboard. Without a way
+    to see what is in the ledger and take one back out, that is a one-way door.
+    """
+    rows = handle.repository.list_documents(handle.context, parse_status)
+    return {"total": len(rows), "documents": rows[:limit]}
+
+
+@app.delete(f"{PREFIX}/documents/{{sha256}}", tags=["ledger"])
+def delete_document(handle: Session, sha256: str) -> dict:
+    """Remove a document and everything it brought with it.
+
+    The inverse of an upload, and the reason an upload is safe to try. It takes
+    the transactions with it — that is the point — along with the paybacks,
+    hidden marks, categories and transfer links that pointed at them, because
+    leaving those behind would break the foreign keys and, worse, leave
+    decisions attached to rows that no longer exist.
+
+    **The original file is kept.** It is content-addressed and immutable, and
+    the whole design says the bytes a bank sent are the one thing never thrown
+    away. Re-uploading the same statement restores it.
+
+    `deleted: false` for a digest that is not here, rather than a 404 — the
+    same shape as unhiding twice.
+    """
+    removed = handle.repository.delete_document(handle.context, sha256)
+    repaired = None
+    if removed:
+        # The rows that anchored a pair are gone, so the pair must go too.
+        outcome = realign(handle.repository, handle.context)
+        repaired = {"linked": len(outcome.result.links), "removed": len(outcome.removed)}
+    return {"sha256": sha256, "deleted": bool(removed), "transfers": repaired}
+
+
 @app.get(f"{PREFIX}/review", tags=["categorisation"])
 def review(handle: Session, limit: Annotated[int, Query(le=500)] = 50) -> dict:
     """What still needs a person, ranked by what deciding it is worth."""
@@ -741,14 +941,100 @@ def delete_rule(handle: Session, rule_id: int) -> dict:
     }
 
 
+def _window_json(w: Window) -> dict:
+    return {
+        "min_days": w.min_days, "max_days": w.max_days,
+        "named_days": w.named_days, "card_days": w.card_days,
+    }
+
+
+def _realignment_json(outcome) -> dict:
+    return {
+        "window": _window_json(outcome.window),
+        "found": len(outcome.result.links),
+        "by_evidence": outcome.by_evidence,
+        "rows_excluded": len(outcome.result.linked_txn_ids),
+        "value_minor": outcome.value_minor,
+        # The diff, which is the actual decision. "206 links" says nothing
+        # about whether to apply; "9 new, 2 gone" is the whole question.
+        "added": len(outcome.added),
+        "removed": len(outcome.removed),
+        "unchanged": outcome.unchanged,
+        "manual": outcome.manual,
+        "ambiguous": [
+            {
+                "txn_id": a.txn_id,
+                "amount_minor": a.amount_minor,
+                "posted_date": a.posted_date,
+                "candidate_txn_ids": list(a.candidate_txn_ids),
+            }
+            for a in outcome.result.ambiguous
+        ],
+        "applied": outcome.applied,
+    }
+
+
 @app.get(f"{PREFIX}/transfers", tags=["ledger"])
 def transfers(handle: Session) -> dict:
-    """Movements between the household's own accounts.
+    """Movements between the household's own accounts, and the rule in force.
 
     Exposed because their absence from every spending figure is a claim the
-    client should be able to show its user rather than merely assert.
+    client should be able to show its user rather than merely assert — and
+    because a window nobody can read is a window nobody can fix.
     """
-    return {"linked": handle.repository.count_transfer_links(handle.context)}
+    return {
+        "linked": handle.repository.count_transfer_links(handle.context),
+        "manual": len(handle.repository.list_manual_transfers(handle.context)),
+        "window": _window_json(window_for(handle.repository, handle.context)),
+        "defaults": _window_json(Window()),
+    }
+
+
+@app.post(f"{PREFIX}/transfers/rematch", tags=["ledger"])
+def rematch_transfers(
+    handle: Session,
+    min_days: Annotated[int | None, Query(ge=0, le=365)] = None,
+    max_days: Annotated[int | None, Query(ge=0, le=365)] = None,
+    named_days: Annotated[int | None, Query(ge=0, le=365)] = None,
+    card_days: Annotated[int | None, Query(ge=0, le=365)] = None,
+    apply: bool = False,
+    save: bool = False,
+) -> dict:
+    """Pair the transfers again, and say what would change.
+
+    **Reports by default and writes only with `apply=true`**, because the pass
+    changes what the ledger *means* — a linked pair stops counting as spending —
+    and a client should be able to show that before it is true.
+
+    The window widens with the strength of the evidence, so there is one per
+    kind. `max_days` covers amount and date alone, which is the weakest claim
+    two rows can make; `named_days` covers one leg naming the other's account
+    number, which is near-proof; `card_days` covers a deposit account paying a
+    card, which is a transfer by construction whatever the dates say. Omitted
+    values keep whatever this tenant already chose.
+
+    `save=true` remembers the window. It is stored against the *ledger*, not the
+    machine, so it survives a backup and a move to another box: how far apart
+    two banks book a transfer is a fact about the banks.
+    """
+    window = window_for(handle.repository, handle.context)
+    overrides = {
+        field: value
+        for field, value in (
+            ("min_days", min_days), ("max_days", max_days),
+            ("named_days", named_days), ("card_days", card_days),
+        )
+        if value is not None
+    }
+    try:
+        window = dataclasses.replace(window, **overrides)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": str(exc)}) from exc
+
+    outcome = (realign if apply else preview)(handle.repository, handle.context, window)
+    if apply and save:
+        save_window(handle.repository, handle.context, window)
+    return {**_realignment_json(outcome), "saved": bool(apply and save)}
 
 
 @app.post(f"{PREFIX}/transfers/mark", tags=["ledger"], status_code=201)

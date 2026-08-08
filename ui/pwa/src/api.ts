@@ -195,6 +195,54 @@ export interface HiddenRow {
 }
 export interface Hidden { hidden: HiddenRow[]; count: number; total_minor: number }
 
+/** How far apart two legs of a transfer may be booked, per kind of evidence.
+ *  The window widens with the strength of the claim: amount-and-date alone is
+ *  the weakest thing two rows can say, so it gets the tightest bound. */
+export interface TransferWindow {
+  min_days: number; max_days: number; named_days: number; card_days: number;
+}
+export interface Transfers {
+  linked: number; manual: number;
+  window: TransferWindow; defaults: TransferWindow;
+}
+export interface Ambiguity {
+  txn_id: number; amount_minor: number; posted_date: string;
+  candidate_txn_ids: number[];
+}
+export interface Realignment {
+  window: TransferWindow;
+  found: number;
+  by_evidence: Record<string, number>;
+  rows_excluded: number;
+  value_minor: number;
+  /** The diff, which is the decision. "206 links" says nothing about whether
+   *  to apply; "9 new, 2 gone" is the whole question. */
+  added: number; removed: number; unchanged: number;
+  /** Your own marks. A re-run never touches them. */
+  manual: number;
+  ambiguous: Ambiguity[];
+  applied: boolean; saved: boolean;
+}
+
+export interface DocumentRow {
+  sha256: string; institution: string; doc_type: string; parse_status: string;
+  storage_path: string; source_relpath: string; source_profile: string;
+  layout_fingerprint: string | null;
+}
+export interface UploadedDocument {
+  filename: string; status: string; sha256: string | null;
+  transactions: number; reason: string | null;
+}
+export interface UploadResult {
+  accepted: number;
+  rejected: { filename: string; reason: string }[];
+  documents: UploadedDocument[];
+  imported: number; duplicates: number; quarantined: number; transactions: number;
+  /** Re-pairing runs after an import, because a statement arriving can complete
+   *  a pair that was waiting for it. Null when nothing was imported. */
+  transfers: { added: number; removed: number; linked: number } | null;
+}
+
 export interface GrowthPoint { on: string; total_minor: number; accounts_known: number }
 export interface Growth {
   currency: string; window_months: number; since: string;
@@ -239,7 +287,23 @@ export const api = {
     call<{ restored: boolean }>(`/hidden/${txn_id}`, {}, { method: "DELETE" }),
   recurring: () => call<Recurring>("/recurring"),
   review: (limit = 50) => call<Review>("/review", { limit }),
-  transfers: () => call<{ linked: number }>("/transfers"),
+  transfers: () => call<Transfers>("/transfers"),
+  /** Reports by default. `apply` is what makes it true; `save` is what makes
+   *  the window stick — it is stored against the ledger, not the machine, so it
+   *  survives a backup and a move to another box. */
+  rematchTransfers: (w: Partial<TransferWindow>, apply = false, save = false) =>
+    call<Realignment>("/transfers/rematch", { ...w, apply, save }, { method: "POST" }),
+
+  documents: (parse_status?: string) =>
+    call<{ total: number; documents: DocumentRow[] }>("/documents", { parse_status }),
+  /** Multipart, so it does not go through `call`'s query-string shape. */
+  upload: (files: File[]) => {
+    const body = new FormData();
+    files.forEach((f) => body.append("files", f, f.name));
+    return call<UploadResult>("/documents", {}, { method: "POST", body });
+  },
+  deleteDocument: (sha256: string) =>
+    call<{ deleted: boolean }>(`/documents/${sha256}`, {}, { method: "DELETE" }),
   growth: (months: number) => call<Growth>("/growth", { months }),
   addCategory: (name: string) =>
     call<{ created: boolean }>("/categories", { name }, { method: "POST" }),

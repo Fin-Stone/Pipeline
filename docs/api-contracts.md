@@ -51,6 +51,8 @@ nobody can reach is not an undo:
 | `POST /categories` | `DELETE /categories/{name}` | `GET /categories` |
 | `POST /review/decide` | `DELETE /review/decide?counterparty=` | `GET /rules` |
 | `POST /rules` | `DELETE /rules/{id}` | `GET /rules?origin=all` |
+| `POST /documents` | `DELETE /documents/{sha256}` | `GET /documents` |
+| `POST /transfers/rematch?apply=true` | run it again with the old window | `GET /transfers` |
 
 **A new endpoint that changes a figure must add a row to that table.** Marking a
 transfer had the inverse and not the listing for a while: the row vanished from
@@ -173,6 +175,69 @@ HTML with a `200` on it would parse the page it is running in as a ledger.
 
 Call before anything else. `api_version` is how a client decides it can speak
 to this server.
+
+### `POST /api/v1/documents`
+
+**`multipart/form-data`, repeatable field `files`.** The only endpoint in this
+API that does not take its input as query parameters, because there is no other
+way to carry a file. `201`.
+
+```json
+{ "accepted": 2, "rejected": [{ "filename": "notes.txt", "reason": "not a statement — expected a PDF, OFX, CSV or MT940" }],
+  "documents": [{ "filename": "june.pdf", "status": "imported",
+                  "sha256": "…", "transactions": 84, "reason": null }],
+  "imported": 1, "duplicates": 0, "quarantined": 1, "transactions": 84,
+  "transfers": { "added": 2, "removed": 0, "linked": 211 } }
+```
+
+- **Every file is reported on its own.** A batch of twelve with one unparseable
+  statement in it must not read as twelve failures.
+- **A duplicate is a normal outcome, not an error.** Re-uploading what is
+  already imported is what somebody does when they are not sure whether they
+  did. So is `quarantined`: a layout with no adapter yet is set aside with a
+  readable `reason` rather than guessed at.
+- **Refused before anything is written**: not a statement by its leading bytes
+  (an extension is a claim, the magic number is what it *is*), empty, or over
+  **32 MB**. Path separators in a filename are stripped, not rejected — the
+  operator did not choose the name their bank generated.
+- Files land in the **inbox**, not in `uploads/`. That folder is the operator's
+  own and is mounted read-only for exactly that reason. Nothing is lost: the
+  original bytes go to the content-addressed store, where the durable copy has
+  always lived.
+- Ingestion drains the whole inbox for that profile, not only what this request
+  carried — the inbox is a queue, and a file left there by a failed earlier run
+  should not need a second mechanism to pick it up.
+- `transfers` reports the re-pairing that runs afterwards, and is `null` when
+  nothing was imported. An upload changes spending figures in two ways and only
+  one of them is the new rows.
+- `FINSTONE_ALLOW_PROD` is **not** consulted here and is not being evaded. It
+  guards *reading `uploads/prod`* — a folder automation must never walk on its
+  own initiative. A file handed over in a request is the deliberate act that
+  flag exists to require.
+
+### `GET /api/v1/documents?parse_status=&limit=`
+
+`{ "total": 246, "documents": [...] }` — what is in the ledger. The listing half
+of rule 2a: an upload moves every figure on the dashboard, so there has to be
+somewhere to see what was added and take one back out.
+
+### `DELETE /api/v1/documents/{sha256}`
+
+`{ "sha256": "…", "deleted": true, "transfers": { "linked": 209, "removed": 2 } }`
+
+The inverse of an upload, and what makes uploading safe to try. It takes the
+document's transactions with it — that is the point — along with the paybacks,
+hidden marks, categories and transfer links that pointed at those rows. Leaving
+those would break foreign keys and, worse, leave decisions attached to rows that
+no longer exist.
+
+**The original file is kept.** It is content-addressed and immutable, and the
+design's oldest promise is that the bytes a bank sent are never thrown away.
+Re-uploading the same statement restores it — though the decisions do not come
+back, and a client should say so before deleting rather than after.
+
+A digest that is not here is `deleted: false`, not `404` — the same shape as
+unhiding twice.
 
 ### `GET /api/v1/accounts`
 
@@ -488,9 +553,66 @@ Deleting something already gone is `deleted: false` with `was: null`, not `404`
 
 ### `GET /api/v1/transfers`
 
-`{ "linked": 206 }` — how many movements between the household's own accounts
-have been paired. Exposed so a client can *show* that spending figures exclude
-them rather than merely assert it.
+How many movements between the household's own accounts have been paired, and
+the rule that paired them. Exposed so a client can *show* that spending figures
+exclude them rather than merely assert it — and because a rule nobody can read
+is a rule nobody can fix.
+
+```json
+{ "linked": 209, "manual": 3,
+  "window": { "min_days": 0, "max_days": 4, "named_days": 30, "card_days": 21 },
+  "defaults": { "min_days": 0, "max_days": 4, "named_days": 30, "card_days": 21 } }
+```
+
+`defaults` is sent alongside so a client can show which numbers the operator
+changed without hardcoding the defaults and drifting from the server.
+
+### `POST /api/v1/transfers/rematch?min_days=&max_days=&named_days=&card_days=&apply=&save=`
+
+Pairs the transfers again and says **what would change**.
+
+```json
+{ "window": { "min_days": 0, "max_days": 4, "named_days": 30, "card_days": 21 },
+  "found": 210, "rows_excluded": 420, "value_minor": 36165752,
+  "by_evidence": { "pays a card": 85, "amount and date": 81,
+                   "names the other account": 44 },
+  "added": 24, "removed": 20, "unchanged": 186, "manual": 3,
+  "ambiguous": [{ "txn_id": 4102, "amount_minor": -50000,
+                  "posted_date": "2026-03-04", "candidate_txn_ids": [4110, 4119] }],
+  "applied": false, "saved": false }
+```
+
+- **Reports by default. `apply=true` writes.** The pass changes what the ledger
+  *means* — a linked pair stops counting as spending — and a client should be
+  able to show that before it is true.
+- **`added` and `removed` are the point, and are never netted.** "210 links"
+  says nothing about whether to apply it; `removed` is what the operator gives
+  up, and a single net number would hide it.
+- **`manual` marks are never touched.** They are the operator's own claim and
+  are not regenerable, so a re-run leaves them alone.
+- **A window per kind of evidence**, because the window has to widen with the
+  strength of the claim. `max_days` is amount and date alone — the weakest
+  thing two rows can say, so the tightest bound. `named_days` is one leg naming
+  the other's account number, which is near-proof. `card_days` is a deposit
+  account paying a card, which is a transfer by construction: the purchases the
+  card made are already spending, so counting the payment doubles the bill.
+  Omitted values keep whatever the tenant already chose.
+- `min_days` is the smallest gap allowed, on every kind. A value beyond every
+  window is `422` rather than a matcher that silently pairs nothing.
+- **`save=true` requires `apply=true`.** A window remembered from a preview
+  would leave the stored rule and the ledger disagreeing about what was
+  decided. A value equal to the default is *not* stored — storing it would pin
+  the install to today's default forever.
+
+**The window is stored against the ledger, not the machine.** How far apart two
+banks book a transfer is a fact about the banks: it belongs in a backup, and it
+must survive a move to another box. `.env` would lose it to the one operation
+whose whole purpose is to preserve what a person decided.
+
+**This also runs by itself after every import**, and after a document is
+deleted. A statement arriving can complete a pair that was waiting for it — a
+card payment whose other leg had not been imported yet — and leaving that until
+somebody remembers to re-run is how a ledger quietly overstates spending.
 
 ### `POST /api/v1/transfers/mark?txn_id=&counterpart_id=`
 

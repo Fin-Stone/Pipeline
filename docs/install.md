@@ -117,25 +117,35 @@ The dashboard will be empty. That is next.
 
 ## Step 6 — Put statements in
 
+**Open the Import tab and drop them in.** Several at once is fine, each is
+reported separately, and sending one you already have is harmless — the ledger
+recognises it by content and says so.
+
+That tab also lists everything imported, with a way to remove one. Removing a
+document takes its transactions with it; the original file is kept, so uploading
+it again brings it back.
+
+<details>
+<summary>Or from the command line, if the files are already on the box</summary>
+
 Copy PDFs into `~/finstone/statements/` — over `scp`, Samba, Syncthing, whatever
 you already use. Subfolders are fine; the pipeline walks the tree.
 
 ```bash
 cp ~/Downloads/*.pdf ~/finstone/statements/
-```
-
-## Step 7 — Ingest them
-
-```bash
 docker compose run --rm -e FINSTONE_ALLOW_PROD=1 app \
     finstone run --profile prod
 ```
 
-`FINSTONE_ALLOW_PROD=1` is required and is deliberately not in any config file.
-Processing real financial data is an explicit act each time, not a setting
-somebody turns on once and forgets.
+`FINSTONE_ALLOW_PROD=1` is required on this path and is deliberately not in any
+config file: walking a folder of real statements on its own initiative is
+something automation must never do. Handing a file over in the browser is
+already the deliberate act that flag exists to require, which is why the Import
+tab does not need it.
 
-Then see where it went:
+</details>
+
+## Step 7 — Check where it went
 
 ```bash
 docker compose run --rm app finstone status --profile prod
@@ -178,6 +188,32 @@ docker compose run --rm app finstone categorise --profile prod --apply
 
 Decisions are recorded when you make them and applied in one pass, so working
 through a queue costs one write rather than one per click.
+
+## Transfers between your own accounts
+
+Money moving between accounts you own is not spending, and counting it would
+overstate every month by the size of every credit-card payment. The matcher
+pairs those two legs and **runs itself after every import** — which matters
+because a card payment cannot be paired until *both* statements are in: the
+payment on the card and the withdrawal that funded it.
+
+So a statement you add today can complete a pair that has been waiting months
+for it. The Import tab says when that happens.
+
+The **Excluded** tab shows what has been paired and lets you change the rule.
+There are three windows rather than one, because how far apart the two legs may
+be booked should depend on how certain the pair is:
+
+| Evidence | Default | Why |
+|---|---|---|
+| A deposit pays a card | 21 days | A transfer by construction. Issuers post on a statement cycle |
+| One leg names the other's account | 30 days | Near-proof. Some banks write the far account number into the row |
+| Amount and date alone | 4 days | The weakest claim two rows can make. Widen it and coincidences pair |
+
+Change them, press **See what would change**, and you get the diff — new pairs,
+pairs you would lose, and anything refused as ambiguous — before anything is
+written. A window you apply is remembered against the ledger, so it survives a
+backup and a move to another box.
 
 ## Step 9 — Back it up
 

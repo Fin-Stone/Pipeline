@@ -275,17 +275,67 @@ class SqlAlchemyLedgerRepository:
         The account reference comes along because it is evidence: DBS writes
         the far account into the row, so one leg naming the other's number is
         what turns a deduction into a reading.
+
+        So does the account *kind*. Money leaving a deposit and landing on a
+        card is a payment, and a payment is a transfer whatever the dates say —
+        the purchases the card made are already counted as spending.
         """
         txn, account = schema.txn.c, schema.account.c
         stmt = (
             select(
                 txn.id, txn.account_id, txn.posted_date, txn.amount_minor,
-                txn.description_raw, account.account_ref_masked,
+                txn.description_raw, account.account_ref_masked, account.kind,
             )
             .select_from(schema.txn.join(schema.account, txn.account_id == account.id))
             .where(txn.tenant_id == context.tenant_id)
             .order_by(txn.posted_date, txn.id)
         )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def get_settings(self, context: TenantContext) -> dict[str, str]:
+        """Every choice this tenant has made. Absent means "use the default"."""
+        setting = schema.tenant_setting.c
+        stmt = select(setting.key, setting.value).where(
+            setting.tenant_id == context.tenant_id
+        )
+        with self._engine.connect() as conn:
+            return {row.key: row.value for row in conn.execute(stmt)}
+
+    def set_settings(self, context: TenantContext, values: dict[str, str]) -> int:
+        """Store choices, replacing any already made. `None` removes one.
+
+        Removing rather than storing a default is deliberate: an absent setting
+        means "whatever the code thinks best today", and a stored copy of
+        today's default would freeze this install at it forever.
+        """
+        setting = schema.tenant_setting.c
+        now = datetime.now(timezone.utc)
+        with self._engine.begin() as conn:
+            for key, value in values.items():
+                conn.execute(schema.tenant_setting.delete().where(
+                    (setting.tenant_id == context.tenant_id) & (setting.key == key)
+                ))
+                if value is not None:
+                    conn.execute(schema.tenant_setting.insert(), [{
+                        "tenant_id": context.tenant_id,
+                        "key": key,
+                        "value": str(value),
+                        "updated_at": now,
+                    }])
+        return len(values)
+
+    def list_transfer_links(self, context: TenantContext) -> list[dict]:
+        """Every link, manual and automatic, as pairs of ids.
+
+        Used to say what a re-run would *change* rather than only what it would
+        find. "206 links" tells an operator nothing about whether to apply it;
+        "9 new, 2 gone" is the whole decision.
+        """
+        link = schema.transfer_link.c
+        stmt = select(
+            link.out_txn_id, link.in_txn_id, link.amount_minor, link.origin,
+        ).where(link.tenant_id == context.tenant_id)
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
 

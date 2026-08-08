@@ -15,7 +15,10 @@ postgres = ["psycopg[binary]>=3.1"]
 # three dependencies. A headless box that only parses statements should not
 # carry a web server, and Rule 3 counts every added dependency as a tax on
 # every future install.
-api = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
+# python-multipart is what lets statements be uploaded through the dashboard.
+# FastAPI needs it present to parse a multipart body at all, and without it the
+# upload route fails at import rather than at request time.
+api = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "python-multipart>=0.0.9"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
 
 [project.scripts]

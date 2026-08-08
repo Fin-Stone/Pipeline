@@ -401,8 +401,32 @@ txn_series_link = Table(
 
 #: Every table carrying tenant-owned rows. Used by the isolation tests, which
 #: assert that nothing gains a tenant-scoped row without being listed here.
+#: Choices the operator made about how their ledger is read.
+#:
+#: Not configuration in the environment sense. `DATABASE_URL` belongs to the
+#: machine and travels with the install; how many days apart two legs of a
+#: transfer may be booked belongs to the *household* and travels with the
+#: ledger — through a backup, onto a new box, across a change of engine. A
+#: value in `.env` would be lost by exactly the operation that is supposed to
+#: preserve everything a person decided.
+#:
+#: Values are text and parsed by whoever reads them. A typed column per setting
+#: would mean a migration for every new one, which is the tax this table exists
+#: to avoid.
+tenant_setting = Table(
+    "tenant_setting",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("key", String(64), nullable=False),
+    Column("value", Text, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("tenant_id", "key", name="uq_tenant_setting"),
+)
+
 TENANT_SCOPED_TABLES = (
     source_document,
+    tenant_setting,
     account,
     txn,
     transfer_link,

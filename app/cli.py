@@ -7,6 +7,7 @@ small.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import sys
@@ -79,6 +80,7 @@ def cmd_ingest(args) -> int:
             config, context, repository, build_blob_store(config), build_notifier(config),
             profile=args.profile,
         )
+        _realign_after_import(repository, context, summary)
     finally:
         repository.close()
     _print_summary(summary, config, args.profile)
@@ -101,10 +103,40 @@ def cmd_run(args) -> int:
             config, context, repository, build_blob_store(config), build_notifier(config),
             profile=args.profile,
         )
+        realigned = _realign_after_import(repository, context, summary)
     finally:
         repository.close()
     _print_summary(summary, config, args.profile)
+    if realigned is not None:
+        print(
+            f"transfers re-paired: {len(realigned.added)} new, "
+            f"{len(realigned.removed)} no longer found, "
+            f"{len(realigned.result.links)} total"
+        )
     return 0
+
+
+def _realign_after_import(repository, context, summary):
+    """Re-pair transfers, because a new document can complete an old pair.
+
+    A card payment leaves a savings account and lands on a card. Until *both*
+    statements are in the ledger there is only one leg and nothing to pair it
+    with — on this corpus that accounts for 44 of the 57 unmatched card
+    payments. The moment the second document arrives the pair is obvious, and
+    it stays unmade until somebody remembers to re-run the matcher.
+
+    So the matcher runs here instead of being remembered. It is a pure function
+    of the ledger, so running it more often cannot produce a different answer —
+    only an earlier one.
+
+    Skipped when nothing was imported: a re-run over an unchanged ledger is
+    work with a guaranteed outcome.
+    """
+    from .pipeline.transfers import realign
+
+    if not summary.imported and not summary.unverified:
+        return None
+    return realign(repository, context)
 
 
 def _print_summary(summary, config=None, profile=PROFILE_DUMMY) -> None:
@@ -275,53 +307,66 @@ def cmd_transfers(args) -> int:
     what the ledger *means* — a linked pair stops counting as spending — and
     that is worth reading before it is true.
     """
-    from .domain.transfers import DEFAULT_WINDOW_DAYS, Leg, find_transfers
     from .pipeline.diagnostics import _money
+    from .pipeline.transfers import preview, realign, save_window, window_for
 
     config = load_config()
     repository = build_repository(config)
     try:
         check_schema(repository)
         context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
-        rows = repository.list_transfer_legs(context)
-        result = find_transfers(
-            [
-                Leg(
-                    txn_id=row["id"],
-                    account_id=row["account_id"],
-                    account_ref=row["account_ref_masked"],
-                    posted_date=row["posted_date"],
-                    amount_minor=row["amount_minor"],
-                    description=row["description_raw"],
-                )
-                for row in rows
-            ],
-            window_days=args.window if args.window is not None else DEFAULT_WINDOW_DAYS,
-        )
 
-        excluded = sum(link.amount_minor for link in result.links)
+        chosen = window_for(repository, context)
+        overrides = {
+            field: value
+            for field, value in (
+                ("min_days", args.min_days), ("max_days", args.window),
+                ("named_days", args.named_window), ("card_days", args.card_window),
+            )
+            if value is not None
+        }
+        if overrides:
+            chosen = dataclasses.replace(chosen, **overrides)
+
+        run = realign if args.apply else preview
+        outcome = run(repository, context, chosen)
+        if args.save and overrides:
+            save_window(repository, context, chosen)
+
+        w = outcome.window
         print(f"profile              {args.profile}")
-        print(f"transactions         {len(rows)}")
-        print(f"transfers found      {len(result.links)}")
-        print(f"  by named account   {sum(1 for l in result.links if 'names' in l.evidence)}")
-        print(f"  by amount and date {sum(1 for l in result.links if 'names' not in l.evidence)}")
-        print(f"rows no longer spend {len(result.linked_txn_ids)}")
-        print(f"value moved, not spent{_money(excluded)}")
+        print(f"window, days apart   {w.min_days}-{w.max_days} on amount and date")
+        print(f"                     {w.min_days}-{w.named_days} when one names the other's account")
+        print(f"                     {w.min_days}-{w.card_days} when a deposit pays a card")
+        print(f"transfers found      {len(outcome.result.links)}")
+        for evidence, count in sorted(outcome.by_evidence.items(), key=lambda kv: -kv[1]):
+            print(f"  {evidence:<25}{count}")
+        print(f"rows no longer spend {len(outcome.result.linked_txn_ids)}")
+        print(f"value moved, not spent{_money(outcome.value_minor)}")
 
-        if result.ambiguous:
-            print(f"\nrefused as ambiguous {len(result.ambiguous)}")
+        print(f"\nagainst what is recorded")
+        print(f"  new                {len(outcome.added)}")
+        print(f"  no longer found    {len(outcome.removed)}")
+        print(f"  unchanged          {outcome.unchanged}")
+        print(f"  your own marks     {outcome.manual}   (never touched by a re-run)")
+
+        if outcome.result.ambiguous:
+            print(f"\nrefused as ambiguous {len(outcome.result.ambiguous)}")
             print("  Each of these fits more than one counterpart equally well. A wrong")
             print("  link removes real spending from the total, so none is guessed at.")
-            for item in result.ambiguous[:10]:
+            for item in outcome.result.ambiguous[:10]:
                 print(f"    txn {item.txn_id}  {item.posted_date}  {_money(item.amount_minor).strip()}"
                       f"  could pair with {', '.join(str(i) for i in item.candidate_txn_ids)}")
 
         if not args.apply:
-            print("\n  finstone transfers --apply   record these links")
+            print("\n  finstone transfers --apply         record these links")
+            print("  finstone transfers --apply --save  and remember this window")
             return 0
 
-        written = repository.replace_transfer_links(context, result.links)
-        print(f"\n{written} link(s) recorded, replacing whatever was there before.")
+        print(f"\n{len(outcome.result.links)} link(s) recorded, replacing what was there before.")
+        if args.save and overrides:
+            print("  Window saved. It travels with the ledger, through a backup and onto")
+            print("  the next box — it is a fact about your banks, not about this machine.")
     finally:
         repository.close()
     return 0
@@ -1298,9 +1343,27 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("transfers", help="pair movements between your own accounts")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.add_argument("--apply", action="store_true", help="record the links, not just report them")
+    # The window widens with the strength of the evidence, so there is one per
+    # kind rather than one for all three. See app/domain/transfers.py.
     p.add_argument(
-        "--window", type=int, default=None,
-        help="days the two legs may be booked apart (default 4)",
+        "--window", type=int, default=None, metavar="DAYS",
+        help="days apart when pairing on amount and date alone (default 4)",
+    )
+    p.add_argument(
+        "--named-window", type=int, default=None, metavar="DAYS",
+        help="days apart when one leg names the other's account (default 30)",
+    )
+    p.add_argument(
+        "--card-window", type=int, default=None, metavar="DAYS",
+        help="days apart when a deposit account pays a card (default 21)",
+    )
+    p.add_argument(
+        "--min-days", type=int, default=None, metavar="DAYS",
+        help="smallest gap allowed between the two legs (default 0)",
+    )
+    p.add_argument(
+        "--save", action="store_true",
+        help="remember this window. It travels with the ledger, not the machine.",
     )
     p.set_defaults(func=cmd_transfers)
 

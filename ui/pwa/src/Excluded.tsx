@@ -21,6 +21,7 @@ import UndoIcon from "@mui/icons-material/Undo";
 import {
   ApiError, Hidden as HiddenData, MarkedTransfers, Payback, api,
 } from "./api";
+import TransferRules from "./TransferRules";
 import { magnitude, money } from "./money";
 
 function Section({ title, why, count, total, children }: {
@@ -150,6 +151,16 @@ export default function Excluded() {
       {hidden.count + marked.count + paybacks.length === 0 && (
         <Chip label="Every transaction in range is being counted" variant="outlined" />
       )}
+
+      {/* The automatic pass, and the rule it follows. It belongs on this page
+          because it is by far the largest thing taken out of the figures — and
+          because a rule nobody can read is a rule nobody can fix. */}
+      <Divider sx={{ pt: 2 }}>
+        <Typography variant="overline" color="text.secondary">
+          Paired automatically
+        </Typography>
+      </Divider>
+      <TransferRules />
     </Stack>
   );
 }

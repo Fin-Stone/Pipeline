@@ -567,6 +567,164 @@ class TestUndeciding:
         assert names.index("NEWER") < names.index("OLDER")
 
 
+class TestUploading:
+    """Statements over HTTP, because the alternative was `scp` and a shell —
+    a fine answer for the person who built this and a poor one for the person
+    living with it."""
+
+    def _post(self, client, *files):
+        return client.post(
+            f"{PREFIX}/documents",
+            params={"profile": "dummy"},
+            files=[("files", (name, body, kind)) for name, body, kind in files],
+        )
+
+    def test_a_file_that_is_not_a_statement_is_refused_before_anything_is_written(self, client):
+        """An extension is a claim; the magic bytes are what it is. The parser
+        is the wrong place to find out."""
+        response = self._post(client, ("notes.pdf", b"just some text", "application/pdf"))
+        assert response.status_code == 201
+        body = response.json()
+        assert body["accepted"] == 0
+        assert body["rejected"][0]["filename"] == "notes.pdf"
+        assert "not a statement" in body["rejected"][0]["reason"]
+
+    def test_an_empty_file_is_refused(self, client):
+        body = self._post(client, ("empty.pdf", b"", "application/pdf")).json()
+        assert body["rejected"][0]["reason"] == "empty"
+
+    def test_a_pdf_is_accepted_even_when_nothing_can_parse_it(self, client):
+        """Quarantine is a normal outcome, not a failure of this endpoint. A
+        layout with no adapter yet is set aside with a reason and the run
+        continues, which is the whole ingestion design."""
+        body = self._post(client, ("statement.pdf", b"%PDF-1.4 nonsense", "application/pdf")).json()
+        assert body["accepted"] == 1
+        assert body["rejected"] == []
+        assert len(body["documents"]) == 1
+
+    def test_every_file_is_reported_on_its_own(self, client):
+        """A batch of three with one bad file in it must not read as three
+        failures."""
+        body = self._post(
+            client,
+            ("a.pdf", b"%PDF-1.4 aaa", "application/pdf"),
+            ("b.txt", b"not a statement", "text/plain"),
+            ("c.pdf", b"%PDF-1.4 ccc", "application/pdf"),
+        ).json()
+        assert body["accepted"] == 2
+        assert [r["filename"] for r in body["rejected"]] == ["b.txt"]
+
+    def test_a_path_in_the_filename_cannot_escape_the_inbox(self, client):
+        """The operator did not choose the name their bank generated, so the
+        separators are stripped rather than the upload refused."""
+        body = self._post(
+            client, ("../../etc/passwd.pdf", b"%PDF-1.4 x", "application/pdf")
+        ).json()
+        assert body["accepted"] == 1
+        assert "/" not in body["documents"][0]["filename"]
+        assert ".." not in body["documents"][0]["filename"]
+
+    def test_uploading_the_same_bytes_twice_is_not_an_error(self, client):
+        """Re-uploading what is already imported is what somebody does when
+        they are not sure whether they did."""
+        pdf = ("same.pdf", b"%PDF-1.4 identical", "application/pdf")
+        first = self._post(client, pdf).json()
+        second = self._post(client, pdf).json()
+        assert first["accepted"] == second["accepted"] == 1
+        assert second["rejected"] == []
+
+    def test_what_is_in_the_ledger_can_be_listed(self, client):
+        body = client.get(f"{PREFIX}/documents", params={"profile": "dummy"}).json()
+        assert {"total", "documents"} <= set(body)
+
+    def test_removing_a_document_that_is_not_there_is_not_an_error(self, client):
+        """The same shape as unhiding twice."""
+        body = client.delete(
+            f"{PREFIX}/documents/{'f' * 64}", params={"profile": "dummy"}
+        ).json()
+        assert body == {"sha256": "f" * 64, "deleted": False, "transfers": None}
+
+
+class TestRematchingTransfers:
+    def test_it_reports_and_does_not_write_by_default(self, client):
+        """The pass changes what the ledger *means* — a linked pair stops
+        counting as spending — so a client can show that before it is true."""
+        body = client.post(
+            f"{PREFIX}/transfers/rematch", params={"profile": "dummy"}
+        ).json()
+        assert body["applied"] is False
+        assert {"added", "removed", "unchanged", "found", "manual"} <= set(body)
+
+    def test_the_response_carries_the_diff_not_only_the_total(self, client):
+        """"206 links" says nothing about whether to apply it."""
+        body = client.post(
+            f"{PREFIX}/transfers/rematch", params={"profile": "dummy"}
+        ).json()
+        assert isinstance(body["added"], int)
+        assert isinstance(body["removed"], int)
+
+    def test_each_kind_of_evidence_has_its_own_window(self, client):
+        body = client.post(
+            f"{PREFIX}/transfers/rematch",
+            params={"profile": "dummy", "max_days": 2, "card_days": 45},
+        ).json()
+        assert body["window"] == {
+            "min_days": 0, "max_days": 2, "named_days": 30, "card_days": 45,
+        }
+
+    def test_an_impossible_window_is_refused_with_the_reason(self, client):
+        """Silently pairing nothing would look like a working matcher with an
+        empty ledger."""
+        response = client.post(
+            f"{PREFIX}/transfers/rematch",
+            params={"profile": "dummy", "min_days": 200},
+        )
+        assert response.status_code == 422
+        assert "nothing could ever pair" in response.json()["detail"]["error"]
+
+    def test_a_window_out_of_range_is_refused(self, client):
+        response = client.post(
+            f"{PREFIX}/transfers/rematch", params={"profile": "dummy", "max_days": 4000},
+        )
+        assert response.status_code == 422
+
+    def test_the_window_in_force_is_readable(self, client):
+        """A rule nobody can read is a rule nobody can fix."""
+        body = client.get(f"{PREFIX}/transfers", params={"profile": "dummy"}).json()
+        assert body["window"] == body["defaults"]
+        assert {"linked", "manual"} <= set(body)
+
+    def test_a_saved_window_is_what_the_next_run_uses(self, client):
+        client.post(
+            f"{PREFIX}/transfers/rematch",
+            params={"profile": "dummy", "card_days": 45, "apply": True, "save": True},
+        )
+        after = client.get(f"{PREFIX}/transfers", params={"profile": "dummy"}).json()
+        assert after["window"]["card_days"] == 45
+        assert after["defaults"]["card_days"] == 21  # unchanged, and still shown
+
+    def test_saving_needs_applying(self, client):
+        """A window remembered from a preview would mean the ledger and the
+        stored rule disagreed about what had been decided."""
+        body = client.post(
+            f"{PREFIX}/transfers/rematch",
+            params={"profile": "dummy", "card_days": 45, "save": True},
+        ).json()
+        assert body["saved"] is False
+        after = client.get(f"{PREFIX}/transfers", params={"profile": "dummy"}).json()
+        assert after["window"]["card_days"] == 21
+
+    def test_a_window_equal_to_the_default_is_not_stored(self, client):
+        """Storing it would pin this install to today's default forever, and a
+        later improvement to that default would reach nobody."""
+        client.post(
+            f"{PREFIX}/transfers/rematch",
+            params={"profile": "dummy", "card_days": 21, "apply": True, "save": True},
+        )
+        body = client.get(f"{PREFIX}/transfers", params={"profile": "dummy"}).json()
+        assert body["window"] == body["defaults"]
+
+
 class TestServingTheClient:
     """One image carries both, which is what makes one container enough.
 

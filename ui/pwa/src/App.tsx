@@ -16,6 +16,7 @@ import {
   Stack, Tab, Tabs, TextField, Toolbar, Typography,
 } from "@mui/material";
 import Dashboard from "./Dashboard";
+import Import from "./Import";
 import NetWorthTab from "./NetWorthTab";
 import Recurring from "./Recurring";
 import Review from "./Review";
@@ -140,6 +141,7 @@ export default function App() {
               Three different actions exclude money and every one of them has to
               be undoable from somewhere that outlives the click. */}
           <Tab label="Excluded" />
+          <Tab label="Import" />
         </Tabs>
       </AppBar>
       <Container maxWidth="lg" sx={{ py: 2 }}>
@@ -152,6 +154,7 @@ export default function App() {
         {tab === 3 && <Recurring />}
         {tab === 4 && <Review />}
         {tab === 5 && <Excluded />}
+        {tab === 6 && <Import />}
       </Container>
     </Box>
   );
