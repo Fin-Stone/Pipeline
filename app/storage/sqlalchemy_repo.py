@@ -22,6 +22,7 @@ from sqlalchemy import BigInteger, cast, create_engine, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
+from ..domain.models import CARD
 from ..domain.tenancy import MemberIdentity, TenantContext
 from ..ports.repository import (
     AccountRecord,
@@ -279,8 +280,13 @@ class SqlAlchemyLedgerRepository:
         So does the account *kind*. Money leaving a deposit and landing on a
         card is a payment, and a payment is a transfer whatever the dates say —
         the purchases the card made are already counted as spending.
+
+        And so do the card numbers the account has been known by. A card is
+        keyed by its product because numbers change on reissue, but the deposit
+        statement paying the bill names the number, so the numbers are what
+        join the two.
         """
-        txn, account = schema.txn.c, schema.account.c
+        txn, account, card = schema.txn.c, schema.account.c, schema.account_card_number.c
         stmt = (
             select(
                 txn.id, txn.account_id, txn.posted_date, txn.amount_minor,
@@ -290,8 +296,21 @@ class SqlAlchemyLedgerRepository:
             .where(txn.tenant_id == context.tenant_id)
             .order_by(txn.posted_date, txn.id)
         )
+        # Grouped in Python rather than aggregated in SQL: string aggregation is
+        # spelled differently on the two engines, and a handful of card numbers
+        # is not worth a dialect branch. Rule 1.
+        numbers: dict[int, list[str]] = {}
         with self._engine.connect() as conn:
-            return [dict(row._mapping) for row in conn.execute(stmt)]
+            for row in conn.execute(
+                select(card.account_id, card.card_number_masked)
+                .where(card.tenant_id == context.tenant_id)
+                .order_by(card.account_id, card.first_seen, card.card_number_masked)
+            ):
+                numbers.setdefault(row.account_id, []).append(row.card_number_masked)
+            return [
+                dict(row._mapping, card_numbers=tuple(numbers.get(row.account_id, ())))
+                for row in conn.execute(stmt)
+            ]
 
     def get_settings(self, context: TenantContext) -> dict[str, str]:
         """Every choice this tenant has made. Absent means "use the default"."""
@@ -596,14 +615,37 @@ class SqlAlchemyLedgerRepository:
             & txn.id.notin_(put_away)
             & txn.id.notin_(settled)
         )
+        # Money arriving on a credit card is never income, and this is where
+        # that is enforced rather than in each of the three figures.
+        #
+        # Card balances are stored negated, so a positive row on a card means
+        # the debt went down — never that the household got richer. There are
+        # only three ways that happens and none of them is earnings: paying the
+        # bill from one's own account, a merchant refunding a purchase, and
+        # cashback or points. The first is a transfer; the other two reverse
+        # spending that is already counted. Left in, an unmatched bill payment
+        # reads as a month's salary — one card payment of $2,000.00 did exactly
+        # that here, because the statement it was paid from had not been
+        # imported yet and nothing could pair it.
+        #
+        # Excluded from the total rather than subtracted from spending. A
+        # refund belongs against the charge it reverses, and `payback_link` is
+        # how a person says which charge that is; guessing here would move
+        # money out of a category on the strength of a date.
+        cards = select(schema.account.c.id).where(
+            (schema.account.c.tenant_id == context.tenant_id)
+            & (schema.account.c.kind == CARD)
+        )
         # Direction is a parameter, not a constant, because the household wants
         # to know what it earned as well as what it spent — and the net of the
-        # two, which is the only one of the three that is robust to a refund
-        # being counted as income rather than as negative spending.
+        # two. `net` carries the same exclusion, so the trend and the tiles
+        # cannot disagree about what counts as income.
         if direction == "out":
             where = where & (txn.amount_minor < 0)
         elif direction == "in":
-            where = where & (txn.amount_minor > 0)
+            where = where & (txn.amount_minor > 0) & txn.account_id.notin_(cards)
+        elif direction == "net":
+            where = where & ((txn.amount_minor < 0) | txn.account_id.notin_(cards))
         if exclude_txn_ids:
             where = where & txn.id.notin_(list(exclude_txn_ids))
         return where
@@ -792,6 +834,68 @@ class SqlAlchemyLedgerRepository:
         )
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def list_card_numbers(self, context: TenantContext) -> list[dict]:
+        """Every card number on record, with the account it belongs to."""
+        card, account = schema.account_card_number.c, schema.account.c
+        stmt = (
+            select(
+                card.account_id, account.institution, account.account_ref_masked,
+                card.card_number_masked, card.first_seen, card.last_seen,
+            )
+            .select_from(
+                schema.account_card_number.join(
+                    schema.account, card.account_id == account.id
+                )
+            )
+            .where(card.tenant_id == context.tenant_id)
+            .order_by(account.institution, account.account_ref_masked, card.first_seen)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def record_card_numbers(self, context: TenantContext, records, seen_on) -> int:
+        """Record card numbers for accounts that already exist. Returns how many are new.
+
+        Separate from `insert_document` so that a ledger built before the
+        numbers were collected can gain them **without a reparse**. A reparse
+        assigns new transaction ids, which silently discards every human
+        categorisation, hidden row and manual transfer mark attached to the old
+        ones — far too much to pay for a field that changes no figure on its
+        own.
+
+        Accounts are looked up, never created. A statement whose account is not
+        in the ledger is not something this should invent one for.
+        """
+        wanted = [record for record in records if record.card_numbers]
+        if not wanted:
+            return 0
+
+        card = schema.account_card_number.c
+        with self._engine.begin() as conn:
+            before = conn.execute(
+                select(func.count()).select_from(schema.account_card_number)
+                .where(card.tenant_id == context.tenant_id)
+            ).scalar_one()
+
+            account_ids: dict[tuple, int] = {}
+            for record in wanted:
+                found = conn.execute(
+                    select(schema.account.c.id)
+                    .where(_account_where(context.tenant_id, record))
+                ).scalar_one_or_none()
+                if found is not None:
+                    account_ids[_account_key(record)] = found
+
+            self._record_card_numbers(
+                conn, context.tenant_id, account_ids,
+                [r for r in wanted if _account_key(r) in account_ids], seen_on,
+            )
+            after = conn.execute(
+                select(func.count()).select_from(schema.account_card_number)
+                .where(card.tenant_id == context.tenant_id)
+            ).scalar_one()
+        return after - before
 
     def list_spending(
         self,
@@ -1571,6 +1675,17 @@ class SqlAlchemyLedgerRepository:
                     )
                 )
 
+            # After the accounts exist and before the transactions, so a card
+            # number is on record the moment its statement is. `period_end`
+            # dates it: the number is what the card carried at the close of
+            # this statement, whatever it carries now.
+            self._record_card_numbers(
+                conn, tenant, account_ids,
+                [record.account_key for record in balances]
+                + [record.account_key for record in txns],
+                document.period_end or document.statement_date or fetched_at.date(),
+            )
+
             inserted, skipped = self._insert_txns(conn, tenant, document_id, account_ids, txns)
 
         return InsertResult(
@@ -1581,13 +1696,7 @@ class SqlAlchemyLedgerRepository:
         )
 
     def _upsert_account(self, conn, tenant_id: int, record: AccountRecord) -> int:
-        where = (
-            (schema.account.c.tenant_id == tenant_id)
-            & (schema.account.c.institution == record.institution)
-            & (schema.account.c.account_ref_masked == record.account_ref_masked)
-            & (schema.account.c.sub_account_label == (record.sub_account_label or ""))
-            & (schema.account.c.currency == record.currency)
-        )
+        where = _account_where(tenant_id, record)
         found = conn.execute(select(schema.account.c.id).where(where)).scalar_one_or_none()
         if found is not None:
             return found
@@ -1605,6 +1714,68 @@ class SqlAlchemyLedgerRepository:
                 kind=record.kind,
             )
         ).inserted_primary_key[0]
+
+    def _record_card_numbers(self, conn, tenant_id: int, account_ids: dict, records, seen_on) -> None:
+        """Remember every card number these accounts were named by.
+
+        Accumulating, never replacing. A card is reissued and the number
+        changes while the account continues, and a payment made to the old
+        number still settled this card — so the set only ever grows, and
+        `first_seen`/`last_seen` record when each was current.
+
+        Read back by the transfer matcher, which is the only reason any of this
+        is kept: a deposit statement records paying the bill against the number,
+        so without it nothing joins the payment to the card it paid.
+
+        Widened rather than upserted, because the two engines spell an upsert
+        differently and the volume here is a handful of rows per statement —
+        Rule 1's seam is worth more than the round trip.
+        """
+        wanted: dict[tuple[int, str], None] = {}
+        for record in records:
+            for number in record.card_numbers:
+                wanted.setdefault((account_ids[_account_key(record)], number), None)
+        if not wanted:
+            return
+
+        card = schema.account_card_number.c
+        known = {
+            (row.account_id, row.card_number_masked): row
+            for row in conn.execute(
+                select(card.account_id, card.card_number_masked, card.first_seen, card.last_seen)
+                .where(
+                    (card.tenant_id == tenant_id)
+                    & card.account_id.in_({account_id for account_id, _ in wanted})
+                )
+            )
+        }
+
+        fresh = []
+        for account_id, number in wanted:
+            row = known.get((account_id, number))
+            if row is None:
+                fresh.append({
+                    "tenant_id": tenant_id, "account_id": account_id,
+                    "card_number_masked": number,
+                    "first_seen": seen_on, "last_seen": seen_on,
+                })
+            elif seen_on < row.first_seen or seen_on > row.last_seen:
+                # Statements arrive in whatever order the operator uploads
+                # them, so the span widens from both ends.
+                conn.execute(
+                    schema.account_card_number.update()
+                    .where(
+                        (card.tenant_id == tenant_id)
+                        & (card.account_id == account_id)
+                        & (card.card_number_masked == number)
+                    )
+                    .values(
+                        first_seen=min(seen_on, row.first_seen),
+                        last_seen=max(seen_on, row.last_seen),
+                    )
+                )
+        if fresh:
+            conn.execute(schema.account_card_number.insert(), fresh)
 
     def _insert_txns(self, conn, tenant_id: int, document_id: int, account_ids: dict, txns: list[TxnRecord]) -> tuple[int, int]:
         if not txns:
@@ -1798,6 +1969,17 @@ def _rolling(points: list[dict], window: int) -> list[dict]:
             "rolling_of": len(span),
         })
     return result
+
+
+def _account_where(tenant_id: int, record: AccountRecord):
+    """Locate an account by the identity it is upserted on."""
+    return (
+        (schema.account.c.tenant_id == tenant_id)
+        & (schema.account.c.institution == record.institution)
+        & (schema.account.c.account_ref_masked == record.account_ref_masked)
+        & (schema.account.c.sub_account_label == (record.sub_account_label or ""))
+        & (schema.account.c.currency == record.currency)
+    )
 
 
 def _account_key(record: AccountRecord) -> tuple:

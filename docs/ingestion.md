@@ -673,6 +673,33 @@ Note for later adapters: at least one issuer's card statement covers several car
 document, with a "grand total for all card accounts" line. The account model already handles
 that — one `ParsedAccount` per card — but an adapter must not assume a single account.
 
+### The numbers a card has been known by
+
+Keying a card on its product is right, and it leaves a hole. **The deposit statement paying
+the bill records the card *number*, not the product**: DBS writes `Advice Bill Payment CCC -
+<sixteen digits>`, OCBC writes the number after `BILL PAYMENT INB`. Nothing in the ledger
+joined those digits to the card they settled, so the payment either went unmatched — money
+leaving the household for nowhere — or was paired on amount alone, which cannot tell two
+cards apart when both are paid in the same month.
+
+So card adapters also report `ParsedAccount.card_numbers`, and `account_card_number` keeps
+them beside the account. **A set that grows, never a field that is overwritten**, because
+the entire point is that a card has been several numbers over its life and a payment to any
+of them settled this account. Only the last four are stored, masked: it is everything the
+matching needs, and a full card number has no business in a household ledger.
+
+[`app/parsers/cards.py`](../app/parsers/cards.py) reads all three shapes the corpus
+contains — grouped (`4111 1111 1111 4321`), solid, and already masked by the bank
+(`************8765`, `****2468`) — because which one a bank chose is not a fact any adapter
+should have to hold an opinion about. On a statement covering several cards the number is
+attributed to the section it sits in, or each card would be given the other's.
+
+Trust prints no card number anywhere, and contributes none. Nothing regresses: a payment to
+a Trust card is still a deposit account paying a card, which is a transfer by construction.
+
+Numbers arrive as statements are imported. A ledger imported before this existed gets them
+from `finstone reparse`.
+
 ---
 
 ## 7. Data model
@@ -769,7 +796,15 @@ already runs under a tenant. Turning multi-tenancy on later changes how that con
 | `finstone fingerprint <path>` | Print a document's fingerprint and the adapter it routes to |
 | `finstone adapters` | List registered layouts |
 | `finstone reparse --quarantined \| --sha256 <hash>` | Replay from the immutable store after an adapter fix |
+| `finstone cards [--backfill]` | The card numbers each card account has been known by |
 | `finstone status` | Document, account and transaction counts; quarantine depth; unverified count |
+
+`cards --backfill` re-reads the stored card statements and records **only** the numbers they
+name. It exists so that a ledger built before those were collected does not have to be
+reparsed to gain them: a reparse assigns new transaction ids, and every categorisation,
+hidden row and manual transfer mark hanging off the old ones goes with them. It locates
+originals by digest rather than by the path recorded at import, so a ledger moved onto
+another box — or into a container — still finds them.
 
 ---
 

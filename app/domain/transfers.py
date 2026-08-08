@@ -28,6 +28,13 @@ on their own cycle, so it gets its own window too. Using one window for all
 three would mean either missing the card payments or guessing at the
 coincidences.
 
+**The closest pairs are settled first**, across the whole ledger, before any
+looser fit is considered. Taking each outflow in turn and giving it the nearest
+counterpart still free looks like the same thing and is not: it lets whichever
+row comes first take a counterpart that a later row answers exactly, and the
+displaced row then takes somebody else's. That cascade is what left several
+plainly matching transfers unpaired here — see `_settle`.
+
 Where two candidates fit equally well the pair is **refused, not guessed**. Two
 identical transfers on one day are indistinguishable, and a wrong link is worse
 than a missing one: it silently removes real spending from the total, which is
@@ -45,6 +52,7 @@ moment the evidence does.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -115,6 +123,10 @@ class Leg:
     #: `deposit` or `card`. Money leaving a deposit and landing on a card is a
     #: payment, and that is evidence rather than a coincidence — see `find_transfers`.
     account_kind: str = DEPOSIT
+    #: Every card number this account has been known by, masked to its last
+    #: four. Empty for a deposit account. What lets `Advice Bill Payment CCC -
+    #: <digits>` be recognised as settling *this* card rather than some other.
+    card_numbers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +179,42 @@ def _names_the_other(leg: Leg, other: Leg) -> bool:
     return bool(reference) and reference in _digits(leg.description)
 
 
+#: A card number as it turns up inside a description. Three shapes, because
+#: three banks in this corpus write it three ways: a solid run of digits, four
+#: groups with a separator, and the bank's own masking with only the tail left.
+#: Twelve digits at minimum in the unmasked forms, so an account number or a
+#: reference cannot pass for a card.
+_CARD_RUNS = (
+    re.compile(r"(?<!\d)\d{12,19}(?!\d)"),
+    re.compile(r"(?<![\d-])(?:\d{4}[ -]){3}\d{4}(?![\d-])"),
+    re.compile(r"[Xx*]{4,}[ -]?\d{4}(?!\d)"),
+)
+
+
+def _card_tails(text: str) -> set[str]:
+    """The last four of every card-shaped reference in a description."""
+    return {
+        re.sub(r"\D", "", found)[-4:]
+        for pattern in _CARD_RUNS
+        for found in pattern.findall(text or "")
+    }
+
+
+def _names_a_card(leg: Leg, other: Leg) -> bool:
+    """This row naming a card number the other account has been known by.
+
+    The reason `account_card_number` exists. A card is keyed by its product,
+    because the number changes on reissue — but the deposit statement paying
+    the bill records the *number*, so without the numbers an account has
+    carried, nothing joins the payment to the card. Any of them counts: a
+    payment to the number the card had three years ago still settled this card.
+    """
+    if not other.card_numbers:
+        return False
+    tails = {number[-4:] for number in other.card_numbers}
+    return bool(tails & _card_tails(leg.description))
+
+
 def _pays_a_card(out_leg: Leg, in_leg: Leg) -> bool:
     """Money leaving a deposit account and landing on a card.
 
@@ -178,7 +226,22 @@ def _pays_a_card(out_leg: Leg, in_leg: Leg) -> bool:
     return out_leg.account_kind == DEPOSIT and in_leg.account_kind == CARD
 
 
-#: The passes, strongest evidence first, and how far each may reach.
+def _either_names(out_leg: Leg, in_leg: Leg) -> bool:
+    """Either row naming the other's account. Either direction proves the pair."""
+    return _names_the_other(out_leg, in_leg) or _names_the_other(in_leg, out_leg)
+
+
+def _either_names_a_card(out_leg: Leg, in_leg: Leg) -> bool:
+    return _names_a_card(out_leg, in_leg) or _names_a_card(in_leg, out_leg)
+
+
+def _anything(out_leg: Leg, in_leg: Leg) -> bool:
+    """The last pass asks for no evidence beyond the amount and the dates."""
+    return True
+
+
+#: The passes, strongest evidence first: what to call it, how far it may reach,
+#: and what has to be true of the pair.
 #:
 #: Order is what makes this safe. A pair where one row names the other's
 #: account is settled before anything has to guess, so the certain cases claim
@@ -186,9 +249,10 @@ def _pays_a_card(out_leg: Leg, in_leg: Leg) -> bool:
 #: unclaimed rows. Reversing it would let a coincidence take the counterpart
 #: that a near-proof was about to claim.
 _PASSES = (
-    ("names the other account", "named_days"),
-    ("pays a card", "card_days"),
-    ("amount and date", "max_days"),
+    ("names the other account", "named_days", _either_names),
+    ("names the card it pays", "named_days", _either_names_a_card),
+    ("pays a card", "card_days", _pays_a_card),
+    ("amount and date", "max_days", _anything),
 )
 
 
@@ -209,74 +273,125 @@ def find_transfers(
 
     legs = list(legs)
     outflows = [leg for leg in legs if leg.amount_minor < 0]
-    inflows = [leg for leg in legs if leg.amount_minor > 0]
 
     by_amount: dict[int, list[Leg]] = {}
-    for leg in inflows:
-        by_amount.setdefault(leg.amount_minor, []).append(leg)
+    for leg in legs:
+        if leg.amount_minor > 0:
+            by_amount.setdefault(leg.amount_minor, []).append(leg)
 
     links: list[Link] = []
-    ambiguous: list[Ambiguity] = []
     claimed: set[int] = set()
+    for evidence, window_attr, fits in _PASSES:
+        links.extend(_settle(
+            outflows, by_amount, claimed, window,
+            reach=getattr(window, window_attr), evidence=evidence, fits=fits,
+        ))
 
-    for evidence, window_attr in _PASSES:
-        reach = getattr(window, window_attr)
-        # Ordered by date so the outcome does not depend on the order rows came
-        # out of the database.
-        for leg in sorted(outflows, key=lambda x: (x.posted_date, x.txn_id)):
-            if leg.txn_id in claimed:
-                continue
+    return Result(tuple(links), _unsettled(outflows, by_amount, claimed, window))
 
-            candidates = [
-                other for other in by_amount.get(-leg.amount_minor, [])
-                if other.txn_id not in claimed
-                and other.account_id != leg.account_id
-                and window.min_days
-                <= abs((other.posted_date - leg.posted_date).days)
-                <= reach
+
+def _candidates(leg: Leg, by_amount, claimed, window: Window, reach: int, fits):
+    """Every free inflow this outflow could answer, with how far apart they sit."""
+    for other in by_amount.get(-leg.amount_minor, []):
+        if other.txn_id in claimed or other.account_id == leg.account_id:
+            continue
+        gap = abs((other.posted_date - leg.posted_date).days)
+        if window.min_days <= gap <= reach and fits(leg, other):
+            yield gap, other
+
+
+def _settle(outflows, by_amount, claimed, window, *, reach, evidence, fits) -> list[Link]:
+    """Pair up one pass's worth of candidates, **closest first**.
+
+    Closest first, not earliest first, and this is the whole of it. Walking the
+    outflows in date order and giving each its nearest free counterpart looks
+    equivalent and is not: it lets whichever row happens to come first take a
+    counterpart that a later row answers exactly, and the displaced row then
+    takes somebody else's, and so on down the ledger. On this corpus one
+    transfer booked on the 18th claimed the inflow of the 21st; the outflow of
+    the 21st — same amount, same day, naming the same account — was pushed onto
+    an inflow 30 days later, and the row *that* one answered was left with
+    nothing at all. Four rows misread from one greedy choice.
+
+    Distance is the evidence, so it decides the order. A pair booked the same
+    day is settled before anything a week apart is considered, and no row can
+    be displaced by a worse-fitting claim on it.
+
+    Only a genuine tie is still a judgement call, and the two sides of one are
+    not the same question. An outflow that fits two inflows equally well is
+    **refused**: nothing distinguishes them, and guessing is what this module
+    exists not to do. Two outflows fitting one inflow is decided by date and
+    then by id — arbitrary, but the arbitrariness costs nothing, because the
+    two are the same amount on the same day and the totals come out identical
+    whichever is taken. Refusing there would leave both counted as spending and
+    the inflow counted as income, which is the error worth avoiding.
+
+    Settling one contest can leave another uncontested, so each distance is
+    worked to a standstill before the next is opened.
+    """
+    pairs = [
+        (gap, leg, other)
+        for leg in outflows if leg.txn_id not in claimed
+        for gap, other in _candidates(leg, by_amount, claimed, window, reach, fits)
+    ]
+
+    made: list[Link] = []
+    for gap in sorted({gap for gap, _, _ in pairs}):
+        while True:
+            free = [
+                (out_leg, in_leg) for pair_gap, out_leg, in_leg in pairs
+                if pair_gap == gap
+                and out_leg.txn_id not in claimed and in_leg.txn_id not in claimed
             ]
-            if evidence == "names the other account":
-                candidates = [
-                    other for other in candidates
-                    if _names_the_other(leg, other) or _names_the_other(other, leg)
-                ]
-            elif evidence == "pays a card":
-                candidates = [other for other in candidates if _pays_a_card(leg, other)]
-            if not candidates:
-                continue
+            fits_two = Counter(out_leg.txn_id for out_leg, _ in free)
+            settled = False
+            for out_leg, in_leg in sorted(
+                free, key=lambda p: (p[0].posted_date, p[0].txn_id, p[1].txn_id),
+            ):
+                if fits_two[out_leg.txn_id] > 1:
+                    continue
+                if out_leg.txn_id in claimed or in_leg.txn_id in claimed:
+                    continue
+                claimed.update({out_leg.txn_id, in_leg.txn_id})
+                made.append(Link(
+                    out_txn_id=out_leg.txn_id,
+                    in_txn_id=in_leg.txn_id,
+                    amount_minor=-out_leg.amount_minor,
+                    days_apart=gap,
+                    evidence=evidence,
+                ))
+                settled = True
+            if not settled:
+                break
+    return made
 
-            best = _closest(candidates, leg.posted_date)
-            if len(best) > 1:
-                # Reported only from the last pass. An ambiguity in an earlier
-                # one is not final — a weaker pass with a different window may
-                # still settle it, and reporting it here would ask the operator
-                # to adjudicate something the next pass is about to answer.
-                if evidence == _PASSES[-1][0]:
-                    ambiguous.append(Ambiguity(
-                        txn_id=leg.txn_id,
-                        amount_minor=leg.amount_minor,
-                        posted_date=leg.posted_date,
-                        candidate_txn_ids=tuple(sorted(c.txn_id for c in best)),
-                    ))
-                continue
 
-            other = best[0]
-            claimed.update({leg.txn_id, other.txn_id})
-            links.append(Link(
-                out_txn_id=leg.txn_id,
-                in_txn_id=other.txn_id,
-                amount_minor=-leg.amount_minor,
-                days_apart=abs((other.posted_date - leg.posted_date).days),
-                evidence=evidence,
+def _unsettled(outflows, by_amount, claimed, window: Window) -> tuple[Ambiguity, ...]:
+    """Outflows left over that fit more than one counterpart equally well.
+
+    Read off the end rather than as each pass runs: an ambiguity in an early
+    pass is not final, because a later one may settle the leg that was in the
+    way. Only what survives every pass is worth asking a person about.
+    """
+    found = []
+    for leg in sorted(outflows, key=lambda x: (x.posted_date, x.txn_id)):
+        if leg.txn_id in claimed:
+            continue
+        gaps = list(_candidates(
+            leg, by_amount, claimed, window, window.max_days, _anything,
+        ))
+        if not gaps:
+            continue
+        nearest = min(gap for gap, _ in gaps)
+        tied = [other for gap, other in gaps if gap == nearest]
+        if len(tied) > 1:
+            found.append(Ambiguity(
+                txn_id=leg.txn_id,
+                amount_minor=leg.amount_minor,
+                posted_date=leg.posted_date,
+                candidate_txn_ids=tuple(sorted(other.txn_id for other in tied)),
             ))
-
-    return Result(tuple(links), tuple(ambiguous))
-
-
-def _closest(candidates: list[Leg], to: date) -> list[Leg]:
-    """The candidates booked nearest the other leg, all of them if tied."""
-    nearest = min(abs((c.posted_date - to).days) for c in candidates)
-    return [c for c in candidates if abs((c.posted_date - to).days) == nearest]
+    return tuple(found)
 
 
 def window_around(day: date, days: int = DEFAULT_WINDOW_DAYS) -> tuple[date, date]:

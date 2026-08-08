@@ -32,7 +32,7 @@ from ...domain.dates import DateParseError, parse_full_date, resolve_near_period
 from ...domain.models import CARD, DOC_TYPE_CARD, ParsedAccount, ParsedDocument, ParsedTxn
 from ...domain.money import AmountParseError, parse_amount
 from ...ports.parser import ParseError
-from .. import pdfio
+from .. import cards, pdfio
 from ..fingerprint import LayoutSignature
 
 INSTITUTION = "HSBC"
@@ -140,6 +140,11 @@ class HsbcCardAdapter:
                     txns=tuple(txns),
                     opening_balance_minor=opening,
                     closing_balance_minor=closing,
+                    # The same number the reference is built from. Recorded
+                    # separately all the same: the reference is this account's
+                    # identity and will stay put across a reissue, while the
+                    # numbers accumulate. See app/parsers/cards.py.
+                    card_numbers=cards.find_all(document.lines()),
                 ),
             ),
         )

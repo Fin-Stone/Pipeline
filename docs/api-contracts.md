@@ -130,6 +130,20 @@ Whatever `direction` is passed, transfers between the household's own accounts
 and persistently hidden rows are excluded first. `net` means net of the outside
 world, not net of every row in the ledger.
 
+**Money arriving on a credit card is never income**, under any `direction`.
+Card balances are stored negated, so a positive row on a card means the debt
+went down — never that the household got richer. There are three ways that
+happens and none of them is earnings: the bill being paid from one of the
+household's own accounts, a merchant refunding a purchase, and cashback or
+points. The first is a transfer; the other two reverse spending that is already
+counted. Left in, an unmatched bill payment reads as a month's salary.
+
+Such a row is **excluded from income, not subtracted from spending.** A refund
+belongs against the charge it reverses, and `POST /paybacks` is how a person
+says which charge that is; inferring it from a date would move money out of a
+category on a guess. A card credit that has not been paired or attributed
+therefore appears in no total, and `out + in` still equals `net`.
+
 **`exclude_txn_id` is what makes session-level hiding real.** A client that
 merely dropped rows from a list would leave the totals, averages and trend
 describing a different set of transactions from the one on screen. The server
@@ -574,8 +588,8 @@ Pairs the transfers again and says **what would change**.
 ```json
 { "window": { "min_days": 0, "max_days": 4, "named_days": 30, "card_days": 21 },
   "found": 210, "rows_excluded": 420, "value_minor": 36165752,
-  "by_evidence": { "pays a card": 85, "amount and date": 81,
-                   "names the other account": 44 },
+  "by_evidence": { "pays a card": 85, "amount and date": 83,
+                   "names the other account": 42, "names the card it pays": 2 },
   "added": 24, "removed": 20, "unchanged": 186, "manual": 3,
   "ambiguous": [{ "txn_id": 4102, "amount_minor": -50000,
                   "posted_date": "2026-03-04", "candidate_txn_ids": [4110, 4119] }],
@@ -593,10 +607,24 @@ Pairs the transfers again and says **what would change**.
 - **A window per kind of evidence**, because the window has to widen with the
   strength of the claim. `max_days` is amount and date alone — the weakest
   thing two rows can say, so the tightest bound. `named_days` is one leg naming
-  the other's account number, which is near-proof. `card_days` is a deposit
-  account paying a card, which is a transfer by construction: the purchases the
-  card made are already spending, so counting the payment doubles the bill.
-  Omitted values keep whatever the tenant already chose.
+  the other's account number, which is near-proof, and covers `names the card
+  it pays` as well. `card_days` is a deposit account paying a card, which is a
+  transfer by construction: the purchases the card made are already spending,
+  so counting the payment doubles the bill. Omitted values keep whatever the
+  tenant already chose.
+- **`names the card it pays` is a payment quoting a card number.** A card
+  account is keyed by its product, never its number, because numbers change on
+  reissue — so the numbers an account has been known by are kept beside it, and
+  a payment to *any* of them settles that card. It is distinct from `pays a
+  card`, which is structural and cannot tell two cards apart when both are paid
+  in the same month. Numbers arrive from card statements as they are imported;
+  a ledger imported before this existed gets them on the next `finstone
+  reparse`.
+- **Pairs are settled closest first**, across the whole ledger, before any
+  looser fit is considered — never one row at a time in date order. The latter
+  lets whichever row comes first take a counterpart that a later row answers
+  exactly, and the displaced row then takes somebody else's. `days_apart`
+  on a link is therefore the best available fit, not merely an admissible one.
 - `min_days` is the smallest gap allowed, on every kind. A value beyond every
   window is `422` rather than a matcher that silently pairs nothing.
 - **`save=true` requires `apply=true`.** A window remembered from a preview

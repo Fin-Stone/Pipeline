@@ -372,6 +372,52 @@ def cmd_transfers(args) -> int:
     return 0
 
 
+def cmd_cards(args) -> int:
+    """The card numbers each card account has been known by.
+
+    Reports by default. `--backfill` re-reads the stored card statements and
+    records what they name, which is how a ledger built before these were
+    collected gains them — a reparse would do it too and would throw away every
+    categorisation and manual mark in the process.
+    """
+    from .pipeline.ingest import backfill_card_numbers
+
+    config = load_config()
+    repository = build_repository(config)
+    try:
+        check_schema(repository)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
+
+        if args.backfill:
+            outcome = backfill_card_numbers(
+                config, context, repository, build_blob_store(config),
+            )
+            print(f"card statements      {outcome.documents}")
+            print(f"  re-read            {outcome.read}")
+            print(f"  could not re-read  {outcome.unreadable}")
+            print(f"numbers recorded     {outcome.recorded} new")
+            print("\nNothing else was touched: no transaction, category or mark changed.\n")
+
+        rows = repository.list_card_numbers(context)
+        if not rows:
+            print("No card numbers on record.")
+            print("  finstone cards --backfill   read them from the statements already stored")
+            return 0
+
+        print(f"{'institution':<12}{'account':<24}{'number':<22}{'first seen':<12}last seen")
+        for row in rows:
+            print(f"{row['institution']:<12}{row['account_ref_masked']:<24}"
+                  f"{row['card_number_masked']:<22}{str(row['first_seen']):<12}{row['last_seen']}")
+
+        accounts = {row["account_id"] for row in rows}
+        print(f"\n{len(rows)} number(s) across {len(accounts)} card account(s).")
+        print("A payment to any of them is recognised as settling that card, which is")
+        print("the point: the number changes on reissue and the account does not.")
+    finally:
+        repository.close()
+    return 0
+
+
 def cmd_rules(args) -> int:
     """Turn several models' replies into rules, where they agreed.
 
@@ -1366,6 +1412,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="remember this window. It travels with the ledger, not the machine.",
     )
     p.set_defaults(func=cmd_transfers)
+
+    p = sub.add_parser("cards", help="the card numbers each card account has been known by")
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
+    p.add_argument(
+        "--backfill", action="store_true",
+        help="read them from the statements already in the store. Changes nothing else.",
+    )
+    p.set_defaults(func=cmd_cards)
 
     p = sub.add_parser("learned", help="vendor strings proven to belong to an adapter")
     p.set_defaults(func=cmd_learned)

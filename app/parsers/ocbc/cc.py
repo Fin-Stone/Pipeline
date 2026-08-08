@@ -27,7 +27,7 @@ from ...domain.dates import DateParseError, parse_numeric_date, resolve_near_per
 from ...domain.models import CARD, DOC_TYPE_CARD, ParsedAccount, ParsedDocument, ParsedTxn
 from ...domain.money import AmountParseError, parse_amount
 from ...ports.parser import ParseError
-from .. import pdfio, tables
+from .. import cards, pdfio, tables
 from ..fingerprint import LayoutSignature
 
 INSTITUTION = "OCBC"
@@ -178,7 +178,7 @@ class OcbcCardAdapter:
             product = self._product(line, lines[index + 1:index + 10])
             if product is not None:
                 current = sections.setdefault(
-                    product, {"opening": None, "closing": None, "rows": []}
+                    product, {"opening": None, "closing": None, "rows": [], "numbers": {}}
                 )
                 continue
             if current is None:
@@ -188,6 +188,15 @@ class OcbcCardAdapter:
             # Not a row, and carrying exactly the two things a description must
             # never hold — left in, it wrapped onto the first transaction.
             if _CARD_NUMBER.search(text) and not _AMOUNT_IN_CELL.search(text):
+                # Kept on the way past, and attributed to the section it sits
+                # in: a statement covering a main card and a supplementary one
+                # prints both numbers, and reading them off the whole document
+                # would give each card the other's. Deposit statements record
+                # a bill payment against the number, so this is the only thing
+                # that says which card was paid.
+                number = cards.find(text)
+                if number is not None:
+                    current["numbers"].setdefault(number, None)
                 continue
 
             if _OPENING.match(text):
@@ -271,6 +280,7 @@ class OcbcCardAdapter:
             txns=tuple(txns),
             opening_balance_minor=section["opening"],
             closing_balance_minor=section["closing"],
+            card_numbers=tuple(section["numbers"]),
         )
 
     def _txn(self, row, spec, period_start, period_end) -> ParsedTxn | None:

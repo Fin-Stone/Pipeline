@@ -126,6 +126,65 @@ class TestEvidence:
         assert (result.links[0].out_txn_id, result.links[0].in_txn_id) == (1, 3)
 
 
+class TestTheClosestPairWins:
+    """Contention is settled by distance, not by which row came first.
+
+    Giving each outflow in turn its nearest *still free* counterpart is the
+    obvious way to write this and is wrong: an early row takes a counterpart
+    that a later row answers exactly, the displaced row takes somebody else's,
+    and the error walks down the ledger. Every case here passes under the
+    obvious version too except for what it does to the rows it displaces.
+    """
+
+    def test_an_exact_pair_is_not_taken_by_a_looser_one(self):
+        """The real shape from the ledger: two transfers of the same amount
+        between the same two accounts, a month apart. The outflow of the 18th
+        is three days from the inflow of the 21st and took it; the outflow of
+        the 21st was pushed onto an inflow 30 days later, and the outflow that
+        one answered was left unpaired. Four rows misread, from one greedy
+        choice."""
+        result = find_transfers([
+            _leg(1, SAVINGS, 18, -80000, "to 555", account_ref="111"),
+            _leg(2, SAVINGS, 21, -80000, "to 555", account_ref="111"),
+            _leg(3, OTHER, 21, +80000, "from 111", account_ref="555"),
+        ])
+        pairs = {(link.out_txn_id, link.in_txn_id) for link in result.links}
+        assert pairs == {(2, 3)}, "the same-day pair should win over the three-day one"
+
+    def test_displacement_does_not_cascade(self):
+        """Both pairs are exact, and neither may be broken to serve the other."""
+        result = find_transfers([
+            _leg(1, SAVINGS, 3, -50000), _leg(2, OTHER, 3, +50000),
+            _leg(3, SAVINGS, 5, -50000), _leg(4, OTHER, 5, +50000),
+        ])
+        pairs = {(link.out_txn_id, link.in_txn_id) for link in result.links}
+        assert pairs == {(1, 2), (3, 4)}
+        assert all(link.days_apart == 0 for link in result.links)
+
+    def test_the_order_rows_arrive_in_changes_nothing(self):
+        legs = [
+            _leg(1, SAVINGS, 18, -80000), _leg(2, SAVINGS, 21, -80000),
+            _leg(3, OTHER, 21, +80000), _leg(4, OTHER, 24, +80000),
+        ]
+        first = find_transfers(legs)
+        second = find_transfers(list(reversed(legs)))
+        assert {(l.out_txn_id, l.in_txn_id) for l in first.links} \
+            == {(l.out_txn_id, l.in_txn_id) for l in second.links}
+
+    def test_a_near_proof_still_outranks_a_closer_coincidence(self):
+        """Distance orders the pairs *within* a pass, never across them. A row
+        naming the other account is settled first even when an unrelated row of
+        the same amount sits closer in time."""
+        result = find_transfers([
+            _leg(1, SAVINGS, 10, -20000, "Funds Transfer 987-654", account_ref="123-456"),
+            _leg(2, OTHER, 10, +20000),
+            _leg(3, 4, 12, +20000, account_ref="987-654"),
+        ])
+        pairs = {(link.out_txn_id, link.in_txn_id) for link in result.links}
+        assert pairs == {(1, 3)}
+        assert result.links[0].evidence == "names the other account"
+
+
 class TestRefusals:
     def test_two_equally_good_counterparts_are_refused(self):
         """Two identical transfers on one day cannot be told apart, and a

@@ -22,13 +22,13 @@ Three properties that are easy to get wrong and matter a lot:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import DOCUMENT_EXTENSIONS, Config
 from ..domain.dedupe import assign_seq, dedupe_key, sha256_file, statement_key
-from ..domain.models import IngestOutcome, ParsedDocument
+from ..domain.models import DOC_TYPE_CARD, IngestOutcome, ParsedDocument
 from ..domain.normalise import clean_raw, normalise_counterparty, normalise_description
 from ..parsers import fingerprint as fingerprinting
 from ..parsers import pdfio
@@ -331,6 +331,79 @@ def ingest_file(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class CardNumberBackfill:
+    documents: int = 0
+    read: int = 0
+    unreadable: int = 0
+    recorded: int = 0
+
+
+def backfill_card_numbers(
+    config: Config, context, repository, blob_store, registry: AdapterRegistry | None = None,
+) -> CardNumberBackfill:
+    """Recover the card numbers already sitting in the stored statements.
+
+    A ledger imported before the numbers were collected has none of them, and
+    the obvious way to get them — `reparse` — is the wrong one: a reparse
+    assigns new transaction ids, which silently discards every categorisation,
+    hidden row and manual transfer mark attached to the old ones. Years of a
+    person's decisions, to gain a field that changes no figure by itself.
+
+    So this re-reads the originals and writes **only** the card numbers.
+    Nothing is deleted, no transaction is touched, and running it twice does
+    nothing the first run did not. This is the other half of why originals are
+    content-addressed and immutable.
+    """
+    registry = registry or build_default_registry(config.learned_rules_path)
+    outcome = CardNumberBackfill()
+
+    for target in repository.list_documents(context, parse_status=STATUS_IMPORTED):
+        if target["doc_type"] != DOC_TYPE_CARD:
+            continue
+        outcome = replace(outcome, documents=outcome.documents + 1)
+
+        # Located by digest rather than by the path recorded at import. The
+        # store is content-addressed precisely so that the digest is enough,
+        # and `storage_path` is where the file was on whichever machine did the
+        # importing — a ledger moved onto the box that now serves it, or into a
+        # container, carries paths that resolve to nothing. The digest still
+        # does. Falls back to the recorded path for an install whose store
+        # lives somewhere this cannot derive.
+        stored = Path(blob_store.path_for(target["sha256"]))
+        if not stored.exists():
+            stored = Path(target["storage_path"])
+        if not stored.exists():
+            log.warning("original missing from the store for %s", target["sha256"])
+            outcome = replace(outcome, unreadable=outcome.unreadable + 1)
+            continue
+        try:
+            document = pdfio.load(
+                stored, password=config.pdf_password_for(target["institution"])
+            )
+            adapter = registry.resolve(document)
+            parsed = adapter.parse(
+                stored, password=config.pdf_password_for(adapter.institution)
+            )
+        except Exception as exc:
+            # A statement this cannot re-read is one whose numbers stay
+            # unknown, which is where they already were. Not a reason to fail
+            # the pass and leave the rest unrecovered.
+            log.warning("cannot re-read %s: %s", target["sha256"][:12], exc)
+            outcome = replace(outcome, unreadable=outcome.unreadable + 1)
+            continue
+
+        records, _ = _to_records(parsed)
+        added = repository.record_card_numbers(
+            context,
+            [record.account_key for record in records],
+            parsed.period_end or parsed.statement_date,
+        )
+        outcome = replace(outcome, read=outcome.read + 1, recorded=outcome.recorded + added)
+
+    return outcome
+
+
 def reparse(
     config: Config, context, repository, blob_store, notifier,
     registry: AdapterRegistry | None = None,
@@ -507,6 +580,7 @@ def _to_records(parsed: ParsedDocument) -> tuple[list[BalanceRecord], list[TxnRe
             currency=account.currency,
             kind=account.kind,
             sub_account_label=account.sub_account_label,
+            card_numbers=account.card_numbers,
         )
         balances.append(BalanceRecord(
             account_key=key,

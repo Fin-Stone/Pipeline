@@ -32,7 +32,7 @@ from ...domain.dates import DateParseError, parse_full_date, resolve_near_period
 from ...domain.models import CARD, DOC_TYPE_CARD, ParsedAccount, ParsedDocument, ParsedTxn
 from ...domain.money import AmountParseError, parse_amount
 from ...ports.parser import ParseError
-from .. import pdfio, tables
+from .. import cards, pdfio, tables
 from ..fingerprint import LayoutSignature
 
 INSTITUTION = "MariBank"
@@ -121,6 +121,9 @@ class MariBankCardAdapter:
             txns=tuple(txns),
             opening_balance_minor=opening,
             closing_balance_minor=closing,
+            # MariBank prints only the tail, behind a run of asterisks. That is
+            # all the matching needs — see app/parsers/cards.py.
+            card_numbers=cards.find_all(document.lines()),
         )
 
         return ParsedDocument(

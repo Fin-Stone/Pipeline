@@ -424,10 +424,42 @@ tenant_setting = Table(
     UniqueConstraint("tenant_id", "key", name="uq_tenant_setting"),
 )
 
+#: The card numbers an account has been known by.
+#:
+#: Beside the account rather than on it, and a set rather than a column,
+#: because the whole point is that there are several. A card is reissued and
+#: the number changes while the account continues — so `account.account_ref_masked`
+#: stays the product, which is stable, and the numbers accumulate here.
+#:
+#: What it is for: a deposit statement records paying the bill against the
+#: *number*, and without this nothing connects those digits to the card they
+#: settled. A payment to the number the card carried three years ago is still a
+#: payment to this card.
+#:
+#: Only the last four are kept. It is all the matching needs, and a full card
+#: number is not something a household ledger should be holding.
+account_card_number = Table(
+    "account_card_number",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("account_id", Integer, ForeignKey("account.id"), nullable=False),
+    Column("card_number_masked", String(32), nullable=False),
+    # When this number was first and last seen on a statement. Not used for
+    # matching — a payment to an old number is still a payment to this card —
+    # but it is what lets an operator see that a reissue happened and when.
+    Column("first_seen", Date, nullable=False),
+    Column("last_seen", Date, nullable=False),
+    UniqueConstraint(
+        "tenant_id", "account_id", "card_number_masked", name="uq_account_card_number",
+    ),
+)
+
 TENANT_SCOPED_TABLES = (
     source_document,
     tenant_setting,
     account,
+    account_card_number,
     txn,
     transfer_link,
     payback_link,

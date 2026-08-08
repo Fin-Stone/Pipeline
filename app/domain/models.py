@@ -91,6 +91,14 @@ class ParsedAccount:
     #: while leaving the net movement — and so the closing balance — correct.
     declared_out_minor: int | None = None
     declared_in_minor: int | None = None
+    #: The card numbers this statement names, masked to their last four. Not
+    #: part of the account's identity — see `account_ref_masked` above — but
+    #: kept, because a deposit statement records paying the bill against the
+    #: number and nothing else can connect that payment to the card. Several,
+    #: because a card is reissued and the old number still settled this
+    #: account. Empty for a deposit account, and for a card whose statement
+    #: prints no number at all.
+    card_numbers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in ACCOUNT_KINDS:

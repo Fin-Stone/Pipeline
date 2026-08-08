@@ -80,6 +80,7 @@ def _legs(repository, context) -> list[Leg]:
             amount_minor=row["amount_minor"],
             description=row["description_raw"],
             account_kind=row.get("kind") or DEPOSIT,
+            card_numbers=tuple(row.get("card_numbers") or ()),
         )
         for row in repository.list_transfer_legs(context)
     ]

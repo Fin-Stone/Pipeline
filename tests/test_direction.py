@@ -13,7 +13,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from app.domain.models import DEPOSIT
+from app.domain.models import CARD, DEPOSIT
 from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
 from app.storage.sqlalchemy_repo import _bucket, _rolling, rolling_window
 
@@ -110,6 +110,88 @@ class TestDirection:
         assert _total(repository, context, "in") == 0
         assert _total(repository, context, "net") == -100_00
         assert _total(repository, context, "out") == -100_00
+
+
+class TestMoneyArrivingOnACard:
+    """A credit on a credit card is never income.
+
+    Card balances are stored negated, so a positive row on a card means the
+    debt went down — never that the household got richer. There are three ways
+    that happens and none of them is earnings: the bill being paid from one's
+    own account, a merchant refunding a purchase, and cashback. The first is a
+    transfer; the other two reverse spending that is already counted.
+
+    On the real ledger this mattered: an unmatched card payment of $2,000.00
+    was sitting in income, because the statement it was paid from had not been
+    imported and nothing could pair it.
+    """
+
+    def _seed_card(self, repository, context, amounts):
+        account = AccountRecord(
+            institution="Test", account_ref_masked="Test Credit Card",
+            sub_account_label="", currency="SGD", kind=CARD,
+        )
+        document = DocumentRecord(
+            sha256="c" * 64, institution="Test", doc_type="cc",
+            period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+            storage_path="x", parse_status="imported",
+            source_profile="dummy", source_relpath="c.pdf",
+            fetched_at=datetime.now(timezone.utc),
+        )
+        repository.insert_document(context, document, [], [
+            TxnRecord(
+                account_key=account, posted_date=date(2026, 6, 4), amount_minor=amount,
+                currency="SGD", description_raw="t", description_norm="t",
+                counterparty_norm="", dedupe_key=f"c{i}", seq=i,
+            )
+            for i, amount in enumerate(amounts)
+        ])
+
+    def test_an_unmatched_bill_payment_is_not_income(self, repository, context):
+        """The counterpart is on a statement nobody has uploaded yet. That is a
+        missing document, not a month's salary."""
+        self._seed_card(repository, context, [-500_00, 2431_40])
+
+        assert _total(repository, context, "in") == 0
+        assert _total(repository, context, "out") == -500_00
+
+    def test_a_refund_is_not_income_either(self, repository, context):
+        """A merchant giving money back reverses a purchase already counted."""
+        self._seed_card(repository, context, [2161_70])
+        assert _total(repository, context, "in") == 0
+
+    def test_the_charge_it_reverses_is_left_alone(self, repository, context):
+        """Excluded from income, not subtracted from spending. Which charge a
+        refund reverses is a judgement, and `payback_link` is how a person
+        makes it — guessing here would move money out of a category on the
+        strength of a date."""
+        self._seed_card(repository, context, [-2161_70, 2161_70])
+        assert _total(repository, context, "out") == -2161_70
+
+    def test_net_agrees_with_the_two_sides(self, repository, context):
+        """The exclusion has to reach `net` as well, or the chart and the tiles
+        describe different sets of rows on the same screen."""
+        self._seed_card(repository, context, [-500_00, 300_00])
+
+        out = _total(repository, context, "out")
+        income = _total(repository, context, "in")
+        assert _total(repository, context, "net") == out + income == -500_00
+
+    def test_the_trend_agrees_too(self, repository, context):
+        self._seed_card(repository, context, [-500_00, 300_00])
+        points = repository.spending_trend(context, bucket="month")
+
+        assert [(p["out_minor"], p["in_minor"], p["net_minor"]) for p in points] \
+            == [(-500_00, 0, -500_00)]
+
+    def test_money_arriving_in_a_deposit_account_is_still_income(self, repository, context):
+        """The rule is about cards, and nothing else may drift into it."""
+        _seed(repository, context, [800_00])
+        assert _total(repository, context, "in") == 800_00
+
+    def test_a_card_purchase_is_still_spending(self, repository, context):
+        self._seed_card(repository, context, [-42_50])
+        assert _total(repository, context, "out") == -42_50
 
 
 class TestTrendCarriesBothSides:

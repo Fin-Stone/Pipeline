@@ -37,6 +37,11 @@ class AccountRecord:
     currency: str
     kind: str
     sub_account_label: str | None = None
+    #: Card numbers this statement names for the account, masked to their last
+    #: four. Deliberately *not* part of the account's identity — a reissue
+    #: changes the number and must not fork the history — so `_account_key`
+    #: ignores it and the numbers accumulate beside the account instead.
+    card_numbers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
