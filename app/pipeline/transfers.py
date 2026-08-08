@@ -117,12 +117,38 @@ class Realignment:
         return counts
 
 
+def _spoken_for(stored) -> set[int]:
+    """Transactions the operator has already claimed by hand.
+
+    These are withheld from the matcher entirely, rather than merely having
+    their links left in place. "A re-run never touches a manual mark" has to
+    mean the *rows* are out of scope: a transaction belongs to at most one
+    movement, so a matcher free to pair a marked row produces a second claim on
+    it, and the unique constraint that enforces "at most one" rejects the whole
+    batch. The dashboard then fails with a database error naming a table the
+    operator has never heard of — which is what happened.
+
+    Withheld and not merely skipped afterwards, because the counterpart matters
+    too: dropping the offending link at the end would leave whichever row it
+    displaced unpaired for no reason it could explain.
+    """
+    return {
+        txn_id
+        for link in stored if link["origin"] != "auto"
+        for txn_id in (link["out_txn_id"], link["in_txn_id"])
+        if txn_id is not None
+    }
+
+
 def preview(repository, context, window: Window | None = None) -> Realignment:
     """Run the matcher and diff it against what is stored. Writes nothing."""
     window = window or window_for(repository, context)
-    result = find_transfers(_legs(repository, context), window=window)
-
     stored = repository.list_transfer_links(context)
+
+    spoken_for = _spoken_for(stored)
+    legs = [leg for leg in _legs(repository, context) if leg.txn_id not in spoken_for]
+    result = find_transfers(legs, window=window)
+
     # Only automatic links are comparable. A manual mark is the operator's
     # claim, is not regenerable, and a re-run leaves it alone — counting one as
     # "removed" would offer to undo something this pass will not touch.

@@ -46,6 +46,42 @@ def _seed_two_txns(repository, context):
     return SHA
 
 
+def _seed_a_pairable_movement(repository, context):
+    """Two accounts, one movement between them — a pair the matcher will make.
+
+    Distinct from `_seed_two_txns`, which puts both rows on a single account
+    and so is deliberately unpairable.
+    """
+    from datetime import datetime, timezone
+
+    from app.domain.models import DEPOSIT
+    from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+    accounts = [
+        AccountRecord(
+            institution="Test", account_ref_masked=ref, sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        for ref in ("savings", "current")
+    ]
+    document = DocumentRecord(
+        sha256="e" * 64, institution="Test", doc_type="acc",
+        period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+        storage_path="x", parse_status="imported",
+        source_profile="dummy", source_relpath="pair.pdf",
+        fetched_at=datetime.now(timezone.utc),
+    )
+    txns = [
+        TxnRecord(
+            account_key=account, posted_date=date(2026, 6, 3), amount_minor=amount,
+            currency="SGD", description_raw="t", description_norm="t",
+            counterparty_norm="", dedupe_key=f"pair{amount}", seq=0,
+        )
+        for account, amount in zip(accounts, (-10000, 10000), strict=True)
+    ]
+    repository.insert_document(context, document, [], txns)
+
+
 def _leg(txn_id, account_id, day, amount, description="", account_ref=""):
     return Leg(
         txn_id=txn_id, account_id=account_id, account_ref=account_ref,
@@ -268,6 +304,44 @@ class TestRefusals:
 
         assert repository.delete_document(context, sha) is True
         assert repository.count_transfer_links(context) == 0
+
+    def test_a_marked_row_is_withheld_from_the_matcher(self, repository, context):
+        """A re-run must not pair a row the operator has already claimed.
+
+        A transaction belongs to at most one movement and the schema enforces
+        it on both legs. Leaving a marked row in scope let the matcher make a
+        second claim on it; the unique constraint then rejected the entire
+        batch, so every upload afterwards died with a database error naming a
+        table the operator has never heard of.
+        """
+        from app.pipeline.transfers import realign
+
+        _seed_a_pairable_movement(repository, context)
+        rows = sorted(r["id"] for r in repository.list_transfer_legs(context))
+        assert repository.mark_transfer(context, rows[0], rows[1]) is True
+
+        outcome = realign(repository, context)
+
+        assert outcome.applied
+        assert outcome.manual == 1
+        assert not outcome.result.links, "the marked pair is not the matcher's to make"
+        assert repository.count_transfer_links(context) == 1
+
+    def test_a_one_sided_mark_withholds_only_its_own_row(self, repository, context):
+        """Marking the outflow alone leaves the inflow unclaimed, and the
+        matcher must not pair the marked row with it behind the operator."""
+        from app.pipeline.transfers import realign
+
+        _seed_a_pairable_movement(repository, context)
+        rows = sorted(r["id"] for r in repository.list_transfer_legs(context))
+        assert repository.mark_transfer(context, rows[0]) is True
+
+        outcome = realign(repository, context)
+
+        assert not any(
+            rows[0] in (link.out_txn_id, link.in_txn_id) for link in outcome.result.links
+        )
+        assert repository.count_transfer_links(context) == 1
 
     def test_the_outcome_does_not_depend_on_row_order(self):
         """Rows arrive in whatever order the database returns them, and the
