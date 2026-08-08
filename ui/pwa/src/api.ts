@@ -112,6 +112,12 @@ export interface Series {
   period_label: string; occurrences: number; total_paid_minor: number;
   first_seen: string; last_seen: string; expected_next: string; confidence: number;
   price_changes: { on: string; from_minor: number; to_minor: number }[];
+  /** What this series is filed under, and whether a person put it there.
+   *  `null` means nothing has decided yet. Changed with `decide`, which is the
+   *  same route the review queue uses — a series is a merchant, and a
+   *  merchant's category is one decision wherever it is made. */
+  category: string | null;
+  decided_by: "operator" | "imported" | null;
 }
 export interface Recurring {
   currency: string; monthly_commitment_minor: number;

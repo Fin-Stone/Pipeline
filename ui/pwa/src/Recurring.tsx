@@ -7,17 +7,35 @@
  * cancelled subscription and a skipped payment want opposite reactions — one
  * should go quiet, the other should be raised.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  Alert, Card, CardContent, Chip, Divider, LinearProgress, List, ListItem,
-  ListItemText, Stack, Tooltip, Typography,
+  Alert, Card, CardContent, Chip, Divider, FormControl, LinearProgress, List,
+  ListItem, ListItemText, MenuItem, Select, Stack, Tooltip, Typography,
 } from "@mui/material";
 import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
-import { ApiError, Recurring as RecurringData, Series, api } from "./api";
+import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
+import { ApiError, Category, Recurring as RecurringData, Series, api } from "./api";
 import { magnitude } from "./money";
 
-function SeriesRow({ s, note }: { s: Series; note?: string }) {
-  const rise = s.price_changes.at(-1);
+/**
+ * One series, with the category it falls under editable in place.
+ *
+ * A series is a merchant, and a merchant's category is a decision — the same
+ * decision the review queue makes. So this calls the same route rather than
+ * inventing a second way to set one thing, which is how two places come to
+ * disagree. Correcting it here reaches every row of the series and every other
+ * transaction from that merchant at once.
+ */
+function SeriesRow({ s, note, categories, onCategorise }: {
+  s: Series;
+  note?: string;
+  categories: Category[];
+  onCategorise: (merchant: string, category: string) => Promise<void>;
+}) {
+  const change = s.price_changes.at(-1);
+  const cheaper = change ? change.to_minor < change.from_minor : false;
+  const [saving, setSaving] = useState(false);
+
   return (
     <ListItem divider disableGutters
       secondaryAction={
@@ -36,14 +54,39 @@ function SeriesRow({ s, note }: { s: Series; note?: string }) {
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
             <Typography component="span">{s.merchant}</Typography>
             <Chip size="small" variant="outlined" label={s.period_label} />
-            {rise && (
-              // A price rise is a fact about a subscription, not a new one, so
-              // it is shown on the series rather than as a second entry.
-              <Tooltip title={`Changed on ${rise.on}`}>
-                <Chip size="small" color="warning" icon={<ArrowUpwardIcon />}
-                  label={`${magnitude(rise.from_minor)} → ${magnitude(rise.to_minor)}`} />
+            {change && (
+              // A price change is a fact about a subscription, not a new one,
+              // so it is shown on the series rather than as a second entry.
+              // A cut is as worth seeing as a rise: it is the evidence that a
+              // plan change actually took effect.
+              <Tooltip title={`Changed on ${change.on}`}>
+                <Chip size="small" color={cheaper ? "success" : "warning"}
+                  icon={cheaper ? <ArrowDownwardIcon /> : <ArrowUpwardIcon />}
+                  label={`${magnitude(change.from_minor)} → ${magnitude(change.to_minor)}`} />
               </Tooltip>
             )}
+            <FormControl size="small" variant="standard" sx={{ minWidth: 130 }}>
+              <Select
+                value={s.category ?? ""}
+                displayEmpty
+                disabled={saving}
+                onChange={async (e) => {
+                  setSaving(true);
+                  try {
+                    await onCategorise(s.merchant, e.target.value as string);
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+                renderValue={(v) =>
+                  v ? String(v) : <em style={{ opacity: 0.6 }}>Uncategorised</em>
+                }
+              >
+                {categories.map((c) => (
+                  <MenuItem key={c.name} value={c.name}>{c.name}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
           </Stack>
         }
         secondary={
@@ -57,12 +100,24 @@ function SeriesRow({ s, note }: { s: Series; note?: string }) {
 
 export default function Recurring() {
   const [data, setData] = useState<RecurringData | null>(null);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    api.recurring().then(setData)
+  const load = useCallback(() => {
+    Promise.all([api.recurring(), api.categories()])
+      .then(([r, c]) => { setData(r); setCategories(c.categories); })
       .catch((e) => setError(String(e instanceof ApiError ? e.detail : e)));
   }, []);
+
+  useEffect(load, [load]);
+
+  // Reloaded rather than patched in place: a decision changes what every
+  // figure on this page says, and a row that updated while the monthly
+  // commitment above it did not would be a page disagreeing with itself.
+  const categorise = useCallback(async (merchant: string, category: string) => {
+    await api.decide(merchant, category);
+    load();
+  }, [load]);
 
   if (error) return <Alert severity="error">{error}</Alert>;
   if (!data) return <LinearProgress />;
@@ -94,7 +149,12 @@ export default function Recurring() {
         <Card variant="outlined">
           <CardContent>
             <Typography variant="h6">Due soon</Typography>
-            <List dense>{data.due_soon.map((s) => <SeriesRow key={s.merchant} s={s} />)}</List>
+            <List dense>
+              {data.due_soon.map((s) => (
+                <SeriesRow key={s.merchant} s={s}
+                  categories={categories} onCategorise={categorise} />
+              ))}
+            </List>
           </CardContent>
         </Card>
       )}
@@ -105,7 +165,8 @@ export default function Recurring() {
             <Typography variant="h6">Overdue</Typography>
             <List dense>
               {data.overdue.map((s) => (
-                <SeriesRow key={s.merchant} s={s} note={`expected ${s.expected_next}`} />
+                <SeriesRow key={s.merchant} s={s} note={`expected ${s.expected_next}`}
+                  categories={categories} onCategorise={categorise} />
               ))}
             </List>
           </CardContent>
@@ -121,7 +182,10 @@ export default function Recurring() {
           </Typography>
           <Divider sx={{ my: 1 }} />
           <List dense>
-            {data.series.map((s) => <SeriesRow key={s.merchant + s.amount_centre_minor} s={s} />)}
+            {data.series.map((s) => (
+              <SeriesRow key={s.merchant + s.amount_centre_minor} s={s}
+                categories={categories} onCategorise={categorise} />
+            ))}
           </List>
           {data.series.length === 0 && (
             <Typography color="text.secondary">Nothing detected yet.</Typography>
@@ -138,7 +202,8 @@ export default function Recurring() {
             </Typography>
             <List dense>
               {data.lapsed.map((s) => (
-                <SeriesRow key={s.merchant} s={s} note={`last seen ${s.last_seen}`} />
+                <SeriesRow key={s.merchant} s={s} note={`last seen ${s.last_seen}`}
+                  categories={categories} onCategorise={categorise} />
               ))}
             </List>
           </CardContent>

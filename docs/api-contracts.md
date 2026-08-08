@@ -435,7 +435,19 @@ Behind the recurring-payments page, §5.1(C).
 Each series carries `amount_centre_minor` (what it costs **now**),
 `monthly_equivalent_minor` (normalised so a yearly and a monthly commitment
 compare), `occurrences`, `total_paid_minor`, `first_seen`, `last_seen`,
-`expected_next`, `confidence`, and `price_changes`.
+`expected_next`, `confidence`, `price_changes`, and `category` with
+`decided_by`.
+
+**`category` is `null` when nothing has decided yet**, which is a case a client
+should offer to settle rather than hide. `decided_by` is `operator` or
+`imported`, so a person can see whether the filing was theirs.
+
+**Correcting it is `POST /review/decide` with the same merchant name.** There is
+no separate route to categorise a series, deliberately: a series *is* a
+merchant, a merchant's category is one decision, and two ways to set one thing
+is how they come to disagree. Correcting a subscription filed wrongly therefore
+also fixes every other transaction from that merchant, and takes effect
+immediately.
 
 **`lapsed` is separate from `overdue` deliberately.** A cancelled subscription
 and a skipped payment want opposite reactions: one should go quiet, the other
@@ -464,20 +476,33 @@ between a chore and an obvious call.
 Settles one counterparty for good. `201` on success.
 
 ```json
-{ "counterparty": "...", "category": "Furnishing", "created": true, "applied": false }
+{ "counterparty": "...", "category": "Furnishing", "created": true, "applied": 412 }
 ```
 
 - Stored as a **rule**, so it covers past and future rows together.
 - Weighted above anything imported or seeded: deciding by hand ends the
   argument rather than adding a vote to it.
 - Deciding the same thing twice is **not an error** — `created` is `false`.
+- **Deciding it differently replaces the earlier decision**, and `replaced` says
+  what it overrode so a client can offer to put it back. A decision is a
+  statement about a merchant, and changing one's mind replaces it rather than
+  casting a second vote: two operator rules on one name carry equal weight and
+  equal specificity, so they tie, the merchant becomes *contested*, and it falls
+  back to uncategorised. Correcting a wrong category used to make it worse than
+  leaving it, silently.
 - `422` with `{"error": "unknown category", "known": [...]}` for a category the
   tenant does not have.
 
-**`applied` is always `false`.** Writing decisions through the ledger is a
-separate pass so a run of decisions costs one write rather than one each. Until
-then `/summary` will not reflect them. A client working through a queue should
-decide freely and apply once at the end.
+**`applied` is the number of rows the rules now account for**, and the pass runs
+before this returns. A decision is true everywhere the moment it is made:
+`/summary`, `/transactions`, `/trend` and the category filter all move with it.
+
+It used to be `false` always, with applying deferred to a separate pass so a run
+of decisions cost one write rather than one each. That saved real work on a
+batch import and cost the operator the truth on every other day: the review
+queue reads *rules* and the spending list reads the ledger, so a merchant left
+the queue and stayed uncategorised on the expenses page — and got categorised
+again by hand. A person clicking a button is owed the consequence of it.
 
 ### `DELETE /api/v1/review/decide?counterparty=`
 
@@ -488,7 +513,7 @@ that needs it.
 
 ```json
 { "counterparty": "SOME SHOP", "removed": 1,
-  "was": [{ "pattern": "^SOME SHOP$", "category": "Grocery" }], "applied": false }
+  "was": [{ "pattern": "^SOME SHOP$", "category": "Grocery" }], "applied": 409 }
 ```
 
 - Matches the name **case-insensitively**.
@@ -497,9 +522,9 @@ that needs it.
   one of those really is the thing in the way.
 - Removing nothing is **not an error**; `removed` is `0`, so a second click does
   what the first one did.
-- `applied` is `false` for the same reason deciding's is. Neither direction
-  writes through the ledger, so a queue can be worked and reworked for one pass
-  at the end.
+- `applied` is a row count, symmetric with deciding: taking a decision back has
+  to reach the ledger too, or the rows it categorised keep wearing a category no
+  rule stands behind any more.
 
 ### `GET /api/v1/rules?origin=&q=&limit=`
 
@@ -835,7 +860,6 @@ Named so that their absence is a decision rather than an oversight.
 
 | Missing | Why it matters |
 |---|---|
-| Applying decisions | `/review/decide` records; nothing writes it through. CLI does this today. |
 | Surviving a reparse | `reparse` deletes and rewrites a document's rows with new ids, so hidden rows, hand-set categories, manual transfer marks and paybacks are **silently discarded**. Re-matching them by `dedupe_key` — which is stable across a reparse and exists for exactly this — is the fix and is not built. |
 | Splitting one payback across two charges | A link consumes the whole inflow. The schema carries an amount so this can be added without a migration; the unallocated remainder would then have to keep counting as income. |
 | Renaming or merging a category | `POST` adds; neither rename nor merge exists, and both must rewrite the enrichments that named the old one. |

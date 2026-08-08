@@ -323,20 +323,133 @@ class TestDeciding:
         assert response.status_code == 422
         assert "Grocery" in response.json()["detail"]["known"]
 
-    def test_deciding_is_recorded_but_not_applied(self, client):
-        """Applying is a separate pass, so a run of decisions costs one write
-        rather than one each."""
+    def test_deciding_is_recorded_and_applied(self, client):
+        """`applied` is the number of rows the rules now account for.
+
+        It used to be `False` always: applying was a separate pass, which saved
+        a write per click and left the spending list disagreeing with the
+        review queue until somebody remembered to run it.
+        """
         body = client.post(
             f"{PREFIX}/review/decide",
             params={"profile": "dummy", "counterparty": "SOME SHOP", "category": "Grocery"},
         ).json()
-        assert body["created"] is True and body["applied"] is False
+        assert body["created"] is True and isinstance(body["applied"], int)
 
     def test_deciding_twice_is_not_an_error(self, client):
         params = {"profile": "dummy", "counterparty": "TWICE", "category": "Dining"}
         client.post(f"{PREFIX}/review/decide", params=params)
         again = client.post(f"{PREFIX}/review/decide", params=params).json()
         assert again["created"] is False
+
+
+class TestADecisionReachesTheLedger:
+    """Deciding in Review has to change the expenses list.
+
+    It did not. The decision was stored as a rule and the rule was never
+    applied, so the review queue — which reads rules — showed the merchant
+    settled while the spending list — which reads `txn_enrichment` — still
+    showed it uncategorised. The operator decided a merchant, watched it leave
+    the queue, then met the same merchant uncategorised on the other page and
+    did it again by hand, over and over.
+    """
+
+    def _seed(self, repository, counterparty):
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256="a" * 64, institution="Test", doc_type="acc",
+                period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath="a.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [],
+            [
+                TxnRecord(
+                    account_key=account, posted_date=date(2026, 6, day),
+                    amount_minor=-1000 * day, currency="SGD",
+                    description_raw=counterparty, description_norm=counterparty,
+                    counterparty_norm=counterparty, dedupe_key=f"seed{day}", seq=day,
+                )
+                for day in (3, 10, 17)
+            ],
+        )
+
+    def _categories(self, client):
+        return {
+            row["id"]: row.get("category")
+            for row in client.get(
+                f"{PREFIX}/transactions", params={"profile": "dummy", "limit": 100},
+            ).json()["transactions"]
+        }
+
+    def test_deciding_categorises_every_matching_row(self, client, repository):
+        self._seed(repository, "REPEATED SHOP")
+        assert set(self._categories(client).values()) == {None}
+
+        body = client.post(
+            f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "REPEATED SHOP",
+                    "category": "Grocery"},
+        ).json()
+
+        assert body["applied"] >= 3, "the decision has to reach the ledger, not just the rules"
+        assert set(self._categories(client).values()) == {"Grocery"}
+
+    def test_the_expenses_list_can_be_filtered_by_it_at_once(self, client, repository):
+        """The category filter reads the same column, so a decision that never
+        landed made the filter return nothing and look broken."""
+        self._seed(repository, "FILTERABLE SHOP")
+        client.post(
+            f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "FILTERABLE SHOP",
+                    "category": "Grocery"},
+        )
+        rows = client.get(
+            f"{PREFIX}/transactions",
+            params={"profile": "dummy", "category": "Grocery"},
+        ).json()["transactions"]
+        assert len(rows) == 3
+
+    def test_taking_the_decision_back_uncategorises_them_again(self, client, repository):
+        """Or the rows keep wearing a category no rule stands behind."""
+        self._seed(repository, "REGRETTED SHOP")
+        client.post(
+            f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "REGRETTED SHOP",
+                    "category": "Grocery"},
+        )
+        assert set(self._categories(client).values()) == {"Grocery"}
+
+        client.request(
+            "DELETE", f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "REGRETTED SHOP"},
+        )
+        assert set(self._categories(client).values()) == {None}
+
+    def test_the_summary_moves_with_it(self, client, repository):
+        """Every figure on screen reads the same column, so none of them may
+        lag a decision."""
+        self._seed(repository, "TOTALLED SHOP")
+        client.post(
+            f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "TOTALLED SHOP",
+                    "category": "Grocery"},
+        )
+        body = client.get(f"{PREFIX}/summary", params={"profile": "dummy"}).json()
+        grocery = [r for r in body["by_category"] if r["category"] == "Grocery"]
+        assert grocery and grocery[0]["total_minor"] == -(3000 + 10000 + 17000)
 
 
 class TestUndeciding:
@@ -409,15 +522,22 @@ class TestUndeciding:
         again = self._decide(client, "REDECIDED", "Dining").json()
         assert again["created"] is True
 
-    def test_undeciding_does_not_apply_either(self, client):
-        """Symmetric with deciding: neither writes through the ledger, so a
-        queue can be worked and reworked for one pass at the end."""
+    def test_undeciding_reaches_the_ledger_too(self, client):
+        """Symmetric with deciding, and both now write through.
+
+        They used to write through neither, so a queue could be worked and
+        reworked for one pass at the end. That saved a write per click and cost
+        the operator the truth: the spending list went on showing what the
+        rules no longer said, and the same merchant had to be categorised by
+        hand a second time. `applied` is a row count, so `0` is a real answer
+        for a ledger with nothing matching.
+        """
         self._decide(client, "SYMMETRIC")
         undone = client.request(
             "DELETE", f"{PREFIX}/review/decide",
             params={"profile": "dummy", "counterparty": "SYMMETRIC"},
         ).json()
-        assert undone["applied"] is False
+        assert isinstance(undone["applied"], int)
 
     def test_an_imported_rule_is_not_offered_as_a_decision(self, client):
         """It was nobody's decision. Undoing one would promise something the
@@ -477,7 +597,7 @@ class TestUndeciding:
 
     def test_deleting_a_rule_that_is_gone_is_not_an_error(self, client):
         body = client.delete(f"{PREFIX}/rules/999999", params={"profile": "dummy"}).json()
-        assert body == {"rule_id": 999999, "deleted": False, "was": None, "applied": False}
+        assert body == {"rule_id": 999999, "deleted": False, "was": None, "applied": 0}
 
     def test_a_pattern_that_is_not_an_expression_is_refused(self, client):
         """Rather than stored to throw on the next categorisation pass."""
@@ -818,3 +938,83 @@ class TestShape:
         body = client.get(f"{PREFIX}/recurring", params={"profile": "dummy"}).json()
         assert {"series", "due_soon", "overdue", "lapsed"} <= set(body)
         assert isinstance(body["monthly_commitment_minor"], int)
+
+
+class TestRecategorisingASubscription:
+    """A subscription filed wrongly has to be correctable where it is noticed.
+
+    Through the same route the review queue uses, not a second one: a series
+    *is* a merchant, a merchant's category is one decision, and two ways to set
+    one thing is how they come to disagree.
+    """
+
+    def _seed_a_series(self, repository, counterparty="MONTHLY THING"):
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256="b" * 64, institution="Test", doc_type="acc",
+                period_start=date(2026, 1, 1), period_end=date(2026, 6, 30),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath="s.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [],
+            [
+                TxnRecord(
+                    account_key=account, posted_date=date(2026, month, 5),
+                    amount_minor=-2999, currency="SGD",
+                    description_raw=counterparty, description_norm=counterparty,
+                    counterparty_norm=counterparty, dedupe_key=f"sub{month}", seq=month,
+                )
+                for month in (3, 4, 5, 6)
+            ],
+        )
+
+    def _series(self, client, merchant):
+        body = client.get(f"{PREFIX}/recurring", params={"profile": "dummy"}).json()
+        everything = body["series"] + body["lapsed"] + body["overdue"] + body["due_soon"]
+        return next((s for s in everything if s["merchant"] == merchant), None)
+
+    def test_a_series_says_what_it_is_filed_under(self, client, repository):
+        self._seed_a_series(repository)
+        found = self._series(client, "MONTHLY THING")
+        assert found is not None, "four monthly payments should be a series"
+        assert found["category"] is None and found["decided_by"] is None
+
+    def test_correcting_it_reaches_the_ledger_and_the_page(self, client, repository):
+        self._seed_a_series(repository)
+        client.post(
+            f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": "MONTHLY THING",
+                    "category": "Bills and utilities"},
+        )
+        found = self._series(client, "MONTHLY THING")
+        assert found["category"] == "Bills and utilities"
+        assert found["decided_by"] == "operator"
+
+        rows = client.get(
+            f"{PREFIX}/transactions",
+            params={"profile": "dummy", "category": "Bills and utilities"},
+        ).json()["transactions"]
+        assert len(rows) == 4, "the correction covers the whole series, not one row"
+
+    def test_it_can_be_corrected_twice(self, client, repository):
+        """A wrong category is exactly the thing a person fixes more than once."""
+        self._seed_a_series(repository)
+        for category in ("Bills and utilities", "Insurance", "Recreation"):
+            client.post(
+                f"{PREFIX}/review/decide",
+                params={"profile": "dummy", "counterparty": "MONTHLY THING",
+                        "category": category},
+            )
+            assert self._series(client, "MONTHLY THING")["category"] == category

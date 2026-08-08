@@ -39,6 +39,7 @@ from ..domain.categories import (
     DEFAULT_CATEGORIES,
     Rule,
     RuleSet,
+    categorise,
     operator_rule,
     review_queue,
     rule_origin,
@@ -441,8 +442,20 @@ def recurring(
 
     Lapsed series are reported separately rather than as overdue: a cancelled
     subscription and a skipped payment want opposite reactions.
+
+    **Each series carries the category it currently falls under**, so a
+    subscription filed wrongly can be corrected where it is noticed. A series
+    is a merchant, and a merchant's category is a decision — so the correction
+    is `POST /review/decide` with the same merchant name, and it lands on every
+    row of that series and everywhere else the merchant appears. There is no
+    separate way to categorise a series, deliberately: two places to set one
+    thing is how they come to disagree.
     """
     rows = handle.repository.list_recurrence_candidates(handle.context)
+    rules = RuleSet(
+        Rule(pattern=r["pattern"], category=r["category"], weight=r["weight"], note=r["note"])
+        for r in handle.repository.list_category_rules(handle.context)
+    )
     series = find_series(
         Occurrence(
             txn_id=r["id"],
@@ -456,8 +469,17 @@ def recurring(
     live = [s for s in series if not s.is_lapsed(today)]
 
     def _out(s):
+        decision = categorise(s.merchant_norm, rules)
         return {
             "merchant": s.merchant_norm,
+            # What this series is filed under, and whether a person put it
+            # there. `null` means nothing has decided yet, which is the case a
+            # client should offer to settle rather than hide.
+            "category": decision.category if decision.rule is not None else None,
+            "decided_by": (
+                rule_origin(decision.rule.weight, decision.rule.note)
+                if decision.rule is not None else None
+            ),
             "amount_centre_minor": s.amount_centre_minor,
             "monthly_equivalent_minor": s.monthly_equivalent_minor,
             "period_label": s.period_label,
@@ -704,6 +726,36 @@ def review(handle: Session, limit: Annotated[int, Query(le=500)] = 50) -> dict:
     }
 
 
+def _apply_rules(handle: Session) -> int:
+    """Run the rule pass over the ledger. Returns how many rows now carry a category.
+
+    Called by every route that changes the rules, because a rule that has not
+    been applied is invisible: the review queue reads *rules*, the spending
+    list reads `txn_enrichment`, and until this runs the two describe different
+    ledgers. The operator decides a merchant, watches it leave the queue, then
+    finds the same merchant uncategorised on the expenses page and does it
+    again by hand — which is the exact complaint that found this.
+
+    It was deliberately deferred once, so a run of decisions cost one write
+    rather than one each. That is a real saving on a batch import and the wrong
+    trade for a person clicking a button: they are owed the consequence of what
+    they just did, and a household ledger is a few thousand rows.
+    """
+    targets = handle.repository.list_categorisation_targets(handle.context)
+    rules = RuleSet(
+        Rule(pattern=r["pattern"], category=r["category"], weight=r["weight"], note=r["note"])
+        for r in handle.repository.list_category_rules(handle.context)
+    )
+    decided = []
+    for target in targets:
+        decision = categorise(target["counterparty_norm"] or "", rules)
+        if decision.rule is not None:
+            # Rules are exact by construction, so the confidence recorded is
+            # about the rule having fired rather than about the world.
+            decided.append((target["id"], decision.category, 1.0))
+    return handle.repository.replace_rule_enrichments(handle.context, decided)["written"]
+
+
 @app.post(f"{PREFIX}/review/decide", tags=["categorisation"], status_code=201)
 def decide(handle: Session, counterparty: str, category: str) -> dict:
     """Settle one counterparty, for good.
@@ -711,6 +763,9 @@ def decide(handle: Session, counterparty: str, category: str) -> dict:
     Stored as a rule rather than a row edit, so it covers the past and the
     future together, and weighted above anything imported: deciding by hand
     ends the argument rather than adding a vote to it.
+
+    **And applied straight away**, so the decision is true everywhere the
+    moment it is made — see `_apply_rules`.
     """
     handle.repository.seed_categories(handle.context, DEFAULT_CATEGORIES)
     known = {c["name"].lower(): c["name"] for c in handle.repository.list_categories(handle.context)}
@@ -720,6 +775,18 @@ def decide(handle: Session, counterparty: str, category: str) -> dict:
             status_code=422,
             detail={"error": "unknown category", "known": sorted(known.values())},
         )
+    # Any previous decision about this name goes first. A decision is a
+    # statement about a merchant, and a person changing their mind is replacing
+    # it — not casting a second vote. Left in place, the old rule and the new
+    # one carry the same weight and the same specificity, so they tie, the row
+    # is *contested*, and the merchant falls back to uncategorised. Correcting
+    # a wrong category therefore made it worse than leaving it, and did so
+    # silently.
+    replaced = _decisions_for(handle, counterparty)
+    for rule in replaced:
+        if rule["category"] != chosen:
+            handle.repository.delete_category_rule(handle.context, rule["id"])
+
     added = handle.repository.add_category_rules(
         handle.context, [operator_rule(counterparty, chosen)]
     )
@@ -727,9 +794,15 @@ def decide(handle: Session, counterparty: str, category: str) -> dict:
         "counterparty": counterparty,
         "category": chosen,
         "created": bool(added),
-        # The ledger is not rewritten here: applying is a separate, explicit
-        # pass so a run of decisions costs one write rather than one each.
-        "applied": False,
+        # What this decision overrode, so a client can say "was Dining" and put
+        # it back. Empty when nothing was there or the category is unchanged.
+        "replaced": [
+            {"pattern": r["pattern"], "category": r["category"]}
+            for r in replaced if r["category"] != chosen
+        ],
+        # How many rows the rules now account for. A client can show the
+        # decision taking effect rather than promising that it will.
+        "applied": _apply_rules(handle),
     }
 
 
@@ -787,9 +860,10 @@ def undecide(handle: Session, counterparty: str) -> dict:
         "removed": len(doomed),
         # What it used to say, so the client can put it back verbatim.
         "was": [{"pattern": r["pattern"], "category": r["category"]} for r in doomed],
-        # Symmetric with deciding: neither writes through the ledger, so a
-        # queue can be worked and reworked for one pass at the end.
-        "applied": False,
+        # Symmetric with deciding: taking a decision back has to reach the
+        # ledger too, or the rows it categorised keep wearing a category no
+        # rule stands behind any more.
+        "applied": _apply_rules(handle),
     }
 
 
@@ -907,7 +981,7 @@ def add_rule(
         "pattern": pattern,
         "category": chosen,
         "created": bool(added),
-        "applied": False,
+        "applied": _apply_rules(handle),
     }
 
 
@@ -928,7 +1002,7 @@ def delete_rule(handle: Session, rule_id: int) -> dict:
         None,
     )
     if found is None:
-        return {"rule_id": rule_id, "deleted": False, "was": None, "applied": False}
+        return {"rule_id": rule_id, "deleted": False, "was": None, "applied": 0}
     handle.repository.delete_category_rule(handle.context, rule_id)
     return {
         "rule_id": rule_id,
@@ -937,7 +1011,7 @@ def delete_rule(handle: Session, rule_id: int) -> dict:
             "pattern": found["pattern"], "category": found["category"],
             "weight": found["weight"], "note": found["note"],
         },
-        "applied": False,
+        "applied": _apply_rules(handle),
     }
 
 
