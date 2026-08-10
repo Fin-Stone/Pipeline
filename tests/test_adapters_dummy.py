@@ -24,16 +24,21 @@ from app.parsers.trust.cc import PRODUCT, TrustCardAdapter
 
 pytestmark = pytest.mark.requires_dummy
 
-TRUST_ACC_2025 = "Trust Bank/acc/2025 July Statement_1000000000000000001.pdf"
-TRUST_ACC_2024 = "Trust Bank/acc/2024 June Statement_1000000000000000002.pdf"
-TRUST_CC_2023 = "Trust Bank/cc/2023 June Statement_1000000000000000003.pdf"
+#: Samples are named by pattern, never in full. Trust puts a nineteen-digit
+#: document id in every filename and OCBC puts the card's last four in its own,
+#: and both belong to the operator's statements rather than to this repository.
+#: What a test needs is the right document, not its reference number.
+TRUST_ACC_2025 = "Trust Bank/acc/2025 July Statement_*.pdf"
+TRUST_ACC_2024 = "Trust Bank/acc/2024 June Statement_*.pdf"
+TRUST_CC_2023 = "Trust Bank/cc/2023 June Statement_*.pdf"
 
 
-def _require(dummy_root, relpath):
-    path = dummy_root / relpath
-    if not path.exists():
-        pytest.skip(f"{relpath} not present")
-    return path
+def _require(dummy_root, pattern):
+    """The sample matching `pattern`, or a skip saying which is missing."""
+    matches = sorted(dummy_root.glob(pattern))
+    if not matches:
+        pytest.skip(f"no sample matching {pattern}")
+    return matches[0]
 
 
 class TestTrustSavings:
@@ -263,7 +268,7 @@ class TestDbsSavings:
         )
 
 
-OCBC_CC = "OCBC Bank/cc/OCBC+REWARDS+CARD-0000-Jan-26.pdf"
+OCBC_CC = "OCBC Bank/cc/OCBC+REWARDS+CARD-*-Jan-26.pdf"
 
 
 class TestOcbcCard:

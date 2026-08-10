@@ -111,7 +111,7 @@ class TestRedactionCoversEveryReportPath:
     pasted failure report.
     """
 
-    SENSITIVE = "2026 July Statement_1000000000000000004.pdf"
+    SENSITIVE = "2026 July Statement_1234567890123456789.pdf"
 
     def test_parse_failure_masks_the_filename(self):
         report = diagnostics.parse_failure_report(
