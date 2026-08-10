@@ -294,7 +294,7 @@ class TestTheSampleLine:
         """The text after `TO:` is whatever the payer typed, and on this corpus
         that is sometimes a first name. Nothing tells a payee's name from a
         shop's reliably, so these are refused wholesale rather than filtered."""
-        assert redact_description("FAST PAYMENT PAYNOW TRANSFER 123456 TO: ALEX") == ""
+        assert redact_description("FAST PAYMENT PAYNOW TRANSFER 123456 TO: A N OTHER") == ""
         assert redact_description("ADVICE FUNDS TRANSFER FROM: A N OTHER") == ""
 
     def test_a_line_that_only_repeats_the_name_is_not_sent(self):
