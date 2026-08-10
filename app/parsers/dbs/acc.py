@@ -62,7 +62,7 @@ DATE_COL, DESC_COL, WITHDRAWAL_COL, DEPOSIT_COL, BALANCE_COL = (
 )
 
 #: The last amount-shaped token in a cell. DBS prefixes balances with their
-#: currency ("SGD 50,000.00") and its totals row reads "in SGD: 4,000.00", so a
+#: currency ("SGD 12,345.67") and its totals row reads "in SGD: 1,234.56", so a
 #: money cell is not always the amount by itself.
 #:
 #: The trailing minus is part of the amount and must be captured with it. DBS

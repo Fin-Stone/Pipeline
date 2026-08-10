@@ -51,25 +51,29 @@ class TestTrustSavings:
         # under test. The number itself is the operator's and stays out of here.
         assert len({a.account_ref_masked for a in parsed.accounts}) == 1
 
+        # Balances by the relation between them, never by value: these are the
+        # operator's, for the same reason the account number above is.
         main = pockets["Main Account"]
-        assert main.opening_balance_minor == 10000000
-        assert main.closing_balance_minor == 10000000
         assert main.opening_balance_minor + sum(t.amount_minor for t in main.txns) == main.closing_balance_minor
 
     def test_credits_are_positive_and_debits_negative(self, dummy_root):
         parsed = TrustAccountAdapter().parse(_require(dummy_root, TRUST_ACC_2025))
         main = next(a for a in parsed.accounts if a.sub_account_label == "Main Account")
         amounts = {t.description_raw: t.amount_minor for t in main.txns}
-        assert amounts["FPG"] == 78317                    # "+783.17"
-        assert amounts["Credit card payment"] == -117903  # "1,000.00"
-        assert amounts["Interest"] == 15345               # "+153.45"
+        # Trust writes "+783.17" for a credit and "2,345.67" bare for a debit.
+        # The sign is what the adapter decides; the magnitudes are the
+        # operator's and say nothing about whether it decided right.
+        assert amounts["FPG"] > 0
+        assert amounts["Credit card payment"] < 0
+        assert amounts["Interest"] > 0
 
     def test_single_pocket_statement_also_parses(self, dummy_root):
         parsed = TrustAccountAdapter().parse(_require(dummy_root, TRUST_ACC_2024))
         assert len(parsed.accounts) == 1
         account = parsed.accounts[0]
-        assert account.closing_balance_minor == 400000
-        assert account.opening_balance_minor + sum(t.amount_minor for t in account.txns) == 400000
+        assert account.opening_balance_minor + sum(
+            t.amount_minor for t in account.txns
+        ) == account.closing_balance_minor
 
     def test_both_years_route_to_the_same_adapter(self, dummy_root):
         """Layout identity must survive a change in pocket count (1 vs 3)."""
@@ -158,8 +162,6 @@ class TestDbsSavings:
         # Asserted by shape rather than by value: the account number belongs to
         # the operator's document, and a test is not the place to publish one.
         assert re.fullmatch(r"\d{3}-\d{6}-\d", account.account_ref_masked)
-        assert account.opening_balance_minor == 5000000
-        assert account.closing_balance_minor == 5000000
         assert account.opening_balance_minor + sum(
             t.amount_minor for t in account.txns
         ) == account.closing_balance_minor
@@ -171,8 +173,8 @@ class TestDbsSavings:
 
         account = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC)).accounts[0]
         amounts = {t.description_raw.split()[0]: t.amount_minor for t in account.txns}
-        assert account.txns[0].amount_minor == -54180        # Withdrawal column
-        assert any(t.amount_minor == 4700 for t in account.txns)   # Deposit column
+        assert account.txns[0].amount_minor < 0                    # Withdrawal column
+        assert any(t.amount_minor > 0 for t in account.txns)        # Deposit column
         assert "Interest" in amounts
 
     def test_period_is_inferred_from_the_as_at_date(self, dummy_root):
@@ -282,7 +284,8 @@ class TestOcbcCard:
         account = parsed.accounts[0]
         # Owed, so negated: a card reconciles on the deposit formula.
         assert account.opening_balance_minor == 0
-        assert account.closing_balance_minor == -161150
+        # Owed, so negative once negated.
+        assert account.closing_balance_minor < 0
         assert account.opening_balance_minor + sum(
             t.amount_minor for t in account.txns
         ) == account.closing_balance_minor
@@ -446,8 +449,13 @@ class TestMariBankSavings:
 
     def test_the_statement_s_own_totals_agree(self, dummy_root):
         account = self._account(dummy_root, MARI_ACC_FULL)
-        assert account.declared_out_minor == 603064
-        assert account.declared_in_minor == 1000000
+        # Against the rows rather than against a remembered figure: what this
+        # checks is that the statement's own totals match what was parsed out
+        # of it, which is the check, and it needs no balance of anybody's.
+        out = -sum(t.amount_minor for t in account.txns if t.amount_minor < 0)
+        into = sum(t.amount_minor for t in account.txns if t.amount_minor > 0)
+        assert account.declared_out_minor == out
+        assert account.declared_in_minor == into
 
     def test_a_fund_purchase_is_read_as_an_expense(self, dummy_root):
         """Investments are cash flows here: the debit is already in the savings
@@ -491,8 +499,6 @@ class TestOcbcSavings:
 
     def test_reconciles(self, dummy_root):
         account = self._account(dummy_root)
-        assert account.opening_balance_minor == 442240
-        assert account.closing_balance_minor == 622438
         assert account.opening_balance_minor + sum(
             t.amount_minor for t in account.txns
         ) == account.closing_balance_minor

@@ -201,6 +201,12 @@ class TestReadingAnHsbcStatement:
         )
 
     def test_thousands_are_read_through_the_apostrophe(self, parsed):
-        """HSBC writes 4'000.00, not 4,285.70. Read as `4.00` the statement
-        would still parse and be wrong by four thousand dollars."""
-        assert parsed.accounts[0].opening_balance_minor == -428570
+        """HSBC writes 1'234.56, not 1,234.56. Drop the separator and the same
+        figure parses as `4.00` — still a number, still a valid parse, wrong by
+        four thousand dollars.
+
+        Asserted as a magnitude rather than the balance itself: the sample is
+        somebody's real statement, and the claim here is only that the digits
+        before the separator survived.
+        """
+        assert abs(parsed.accounts[0].opening_balance_minor) > 100_000

@@ -10,8 +10,8 @@ Three things this layout does that the others do not:
 - **Two columns.** The transaction table sits on the left of the page and an
   account summary on the right, both carrying money. A line of text crosses
   both, so every read here is bounded by x — the summary's "Credit Limit
-  5'000.00" is otherwise as much a transaction as anything in the table.
-- **An apostrophe for thousands.** `4'000.00`, not `4,285.70`. Swiss notation,
+  9'000.00" is otherwise as much a transaction as anything in the table.
+- **An apostrophe for thousands.** `1'234.56`, not `1,234.56`. Swiss notation,
   and stripped before parsing rather than taught to the money parser, because
   it is a property of this issuer's rendering and not of money.
 - **Two date columns.** Posting date and transaction date, neither carrying a
@@ -322,7 +322,7 @@ class HsbcCardAdapter:
 def _to_minor(text: str, line) -> int:
     """An amount, with this issuer's apostrophes taken out.
 
-    HSBC writes 4'000.00. The apostrophe is a rendering convention of this
+    HSBC writes 1'234.56. The apostrophe is a rendering convention of this
     statement, not a fact about money, so it is removed here rather than taught
     to the money parser where it would loosen what every other adapter accepts.
     """

@@ -665,7 +665,7 @@ class SqlAlchemyLedgerRepository:
         # bill from one's own account, a merchant refunding a purchase, and
         # cashback or points. The first is a transfer; the other two reverse
         # spending that is already counted. Left in, an unmatched bill payment
-        # reads as a month's salary — one card payment of $2,000.00 did exactly
+        # reads as a month's salary — one card payment of $1,234.56 did exactly
         # that here, because the statement it was paid from had not been
         # imported yet and nothing could pair it.
         #

@@ -16,9 +16,9 @@ from app.domain.normalise import normalise_counterparty, normalise_description
 
 class TestMoney:
     @pytest.mark.parametrize("text,minor,currency", [
-        ("S$100,000.00", 10000000, "SGD"),
+        ("S$12,345.67", 1234567, "SGD"),
         ("+783.17", 78317, None),
-        ("1,000.00", 117903, None),
+        ("2,345.67", 234567, None),
         ("25.63 USD", 2563, "USD"),
         ("0.00", 0, None),
         ("(45.00)", -4500, None),
@@ -33,9 +33,9 @@ class TestMoney:
         assert parse_amount(text) == (minor, currency)
 
     def test_round_trips_exactly(self):
-        minor, _ = parse_amount("100,000.00")
-        assert isinstance(minor, int) and minor == 10000000
-        assert from_minor(minor, "SGD") == Decimal("103230.31")
+        minor, _ = parse_amount("12,345.67")
+        assert isinstance(minor, int) and minor == 1234567
+        assert from_minor(minor, "SGD") == Decimal("12345.67")
 
     def test_summing_stays_exact_where_float_would_drift(self):
         # 0.1 + 0.2 != 0.3 in binary floating point. In minor units it is
@@ -61,7 +61,7 @@ class TestMoney:
         # Trust marks credits with "+" and leaves debits bare, so whether a
         # sign was written is information the magnitude cannot carry.
         assert is_signed("+783.17") is True
-        assert is_signed("1,000.00") is False
+        assert is_signed("2,345.67") is False
 
 
 class TestDates:

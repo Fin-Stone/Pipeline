@@ -48,19 +48,19 @@ class TestColumnAssignment:
         # the deposit column.
         row = _line([
             ("01/12/2021", 45.4, 90.4), ("Advice", 113.1, 140.1),
-            ("541.80", 367.4, 394.9), ("53,398.18", 507.7, 547.8),
+            ("321.90", 367.4, 394.9), ("12,345.67", 507.7, 547.8),
         ])
         cells = spec.cells(row)
         assert cells["date"] == "01/12/2021"
-        assert cells["withdrawal"] == "541.80"
+        assert cells["withdrawal"] == "321.90"
         assert cells["deposit"] == ""
-        assert cells["balance"] == "53,398.18"
+        assert cells["balance"] == "12,345.67"
 
     def test_a_deposit_lands_in_the_deposit_column(self):
         spec = _dbs_spec()
         row = _line([
             ("04/12/2021", 45.4, 90.4), ("Receipt", 211.2, 241.7),
-            ("47.00", 451.5, 474.0), ("53,080.18", 507.7, 547.8),
+            ("47.00", 451.5, 474.0), ("12,204.86", 507.7, 547.8),
         ])
         cells = spec.cells(row)
         assert cells["deposit"] == "47.00" and cells["withdrawal"] == ""
@@ -83,7 +83,7 @@ class TestColumnAssignment:
         spec = _dbs_spec()
         row = _line([
             (".oN", 11.0, 20.0), ("05/12/2021", 45.4, 90.4),
-            ("140.81", 367.4, 394.9), ("52,949.57", 507.7, 547.8),
+            ("210.40", 367.4, 394.9), ("12,064.05", 507.7, 547.8),
         ])
         assert spec.cells(row)["date"] == "05/12/2021"
 
@@ -97,7 +97,7 @@ class TestRowDetection:
 
     def test_a_line_with_money_is_a_row(self):
         spec = _dbs_spec()
-        lines = [_line([("01/12/2021", 45.4, 90.4), ("541.80", 367.4, 394.9)], top=252.0)]
+        lines = [_line([("01/12/2021", 45.4, 90.4), ("321.90", 367.4, 394.9)], top=252.0)]
         assert len(tables.assemble_rows(lines, spec)) == 1
 
 
@@ -108,11 +108,11 @@ class TestDescriptionWrapping:
         spec = _dbs_spec(continuation_gap=None)
         lines = [
             _line([("01/12/2021", 45.4, 90.4), ("Advice", 113.1, 140.1),
-                   ("541.80", 367.4, 394.9)], top=252.0),
+                   ("321.90", 367.4, 394.9)], top=252.0),
             _line([("L00000000000000000N01", 113.1, 200.0)], top=262.5),
             _line([("OTHER", 113.1, 140.0)], top=294.0),
             _line([("05/12/2021", 45.4, 90.4), ("Debit", 113.1, 140.1),
-                   ("140.81", 367.4, 394.9)], top=300.0),
+                   ("210.40", 367.4, 394.9)], top=300.0),
         ]
         rows = tables.assemble_rows(lines, spec)
         assert len(rows) == 2
@@ -160,10 +160,10 @@ class TestMoneyCells:
     def test_reports_only_columns_with_values(self):
         spec = _dbs_spec()
         row = tables.assemble_rows(
-            [_line([("01/12/2021", 45.4, 90.4), ("541.80", 367.4, 394.9)], top=252.0)], spec
+            [_line([("01/12/2021", 45.4, 90.4), ("321.90", 367.4, 394.9)], top=252.0)], spec
         )[0]
         cells = tables.money_cells(row, spec)
-        assert [(c.name, text) for c, text in cells] == [("withdrawal", "541.80")]
+        assert [(c.name, text) for c, text in cells] == [("withdrawal", "321.90")]
 
     def test_the_column_carries_the_direction(self):
         spec = _dbs_spec()
@@ -214,7 +214,7 @@ class TestMoneyPattern:
 
     def test_a_real_amount_still_makes_a_row(self):
         spec = _dbs_spec(money_pattern=self.PATTERN)
-        line = _line([("01/12/2021", 45.4, 90.4), ("541.80", 367.4, 394.9)], top=252.0)
+        line = _line([("01/12/2021", 45.4, 90.4), ("321.90", 367.4, 394.9)], top=252.0)
         assert len(tables.assemble_rows([line], spec)) == 1
 
     def test_money_cells_ignores_non_amounts(self):
@@ -326,7 +326,7 @@ class TestReversals:
         spec = _dbs_spec(money_pattern=_AMOUNT_IN_CELL)
         row = _line([
             ("04/12/2021", 45.4, 90.4), ("Transfer", 211.2, 241.7),
-            (withdrawal, 367.9, 385.9), ("53,398.18", 507.7, 547.8),
+            (withdrawal, 367.9, 385.9), ("12,345.67", 507.7, 547.8),
         ])
         return spec, tables.assemble_rows([row], spec)[0]
 

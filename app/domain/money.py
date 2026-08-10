@@ -63,9 +63,9 @@ def parse_amount(text: str, *, default_currency: str | None = None) -> tuple[int
     Understands a leading or trailing sign, a currency symbol or ISO code,
     thousands separators, and accounting parentheses for negatives:
 
-        "S$100,000.00" -> (10000000, "SGD")
+        "S$12,345.67"  -> (1234567, "SGD")
         "+783.17"      -> (78317, None)
-        "1,000.00"     -> (117903, None)
+        "2,345.67"     -> (234567, None)
         "25.63 USD"    -> (2563, "USD")
         "(45.00)"      -> (-4500, None)
         "100.00-"      -> (-10000, None)

@@ -338,10 +338,10 @@ For a reconciliation failure it prints the arithmetic rather than a verdict, bec
 difference between expected and stated is usually exactly one transaction:
 
 ```
-  opening balance                       100,000.00
+  opening balance                       12,345.67
   + sum of 3 parsed transactions           -242.41
-  = expected closing                    100,000.00
-  statement says closing                100,000.00
+  = expected closing                    12,103.26
+  statement says closing                12,223.26
                                     --------------
   difference                               -120.00
 
@@ -442,7 +442,7 @@ That collapses deposit and card statements into a single check:
 opening_balance_minor + Σ(amount_minor) == closing_balance_minor
 ```
 
-A savings statement reconciles as `100,000.00 + (−242.41) = 100,000.00`; a card statement
+A savings statement reconciles as `12,345.67 + (−242.41) = 12,103.26`; a card statement
 reconciles as `−4.24 + (−2.35) = −6.59`, which is the statement's own
 `4.24 + 561.35 − 559.00 = 6.59` with the sign flipped. Adapters normalise into this
 convention at their boundary, so nothing downstream needs to know which formula the

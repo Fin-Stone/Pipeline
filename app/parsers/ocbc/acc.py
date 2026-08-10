@@ -4,12 +4,12 @@ An ordinary two-column deposit table, and the tidiest layout in the corpus: it
 prints its period, both balances *and* its own totals, so three independent
 checks are available on one document.
 
-    BALANCE B/F                        4,000.00
-    10 JUN  10 JUN  BONUS INTEREST         0.69   4,423.09
+    BALANCE B/F                        1,240.55
+    10 JUN  10 JUN  BONUS INTEREST         0.69   1,241.24
                     360 CC SPEND BONUS
     ...
-    BALANCE C/F                        6,000.00
-    Total Withdrawals/Deposits    0.00 1,000.00
+    BALANCE C/F                        3,740.55
+    Total Withdrawals/Deposits    0.00 2,500.00
 
 Two details worth naming. A cheque number sits between the description and the
 amounts, and it is text rather than money — it is left of the money columns, so

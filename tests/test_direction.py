@@ -121,7 +121,7 @@ class TestMoneyArrivingOnACard:
     own account, a merchant refunding a purchase, and cashback. The first is a
     transfer; the other two reverse spending that is already counted.
 
-    On the real ledger this mattered: an unmatched card payment of $2,000.00
+    On the real ledger this mattered: an unmatched card payment of $1,234.56
     was sitting in income, because the statement it was paid from had not been
     imported and nothing could pair it.
     """
