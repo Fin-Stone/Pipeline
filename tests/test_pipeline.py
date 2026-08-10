@@ -366,6 +366,50 @@ class TestReparse:
             reparse(config, context, repository, blob_store, notifier,
                     AdapterRegistry(), sha256="f" * 64)
 
+    def test_finds_the_original_when_the_recorded_path_is_another_machine_s(
+        self, config, repository, context, blob_store, notifier, registry_for
+    ):
+        """`storage_path` says where the file was on the machine that imported
+        it. Move the ledger onto the server that now serves it — or into a
+        container, which is the same move — and every one of those paths
+        resolves to nothing, while the store sits right there holding the
+        files. On the real ledger this made 235 of 242 documents unreparsable:
+        the digests were fine, the paths were Windows paths, and the container
+        looked for `C:/...` under Linux.
+
+        Not destructive, because the missing-original branch refuses the
+        document instead of deleting its rows. Just a parser fix that could
+        not be applied to a single year of history.
+        """
+        from sqlalchemy import update
+        from app.storage import schema
+
+        path = _statement_pdf(
+            config.inbox_dir / "dummy" / "a.pdf",
+            [("03 Jun", "Salary", "+2,000.00")],
+            opening="1,000.00", closing="3,000.00",
+        )
+        registry = registry_for(path)
+        _run(config, context, repository, blob_store, notifier, registry)
+        before = repository.counts(context)
+        digest = repository.list_documents(context)[0]["sha256"]
+
+        with repository._engine.begin() as conn:
+            conn.execute(
+                update(schema.source_document)
+                .where(schema.source_document.c.sha256 == digest)
+                .values(storage_path=f"C:/Somewhere/Else/data/store/{digest[:2]}/{digest[2:4]}/{digest}")
+            )
+
+        summary = reparse(config, context, repository, blob_store, notifier, registry)
+
+        assert summary.imported == 1
+        assert summary.quarantined == 0
+        assert repository.counts(context) == before
+        # And the reparse leaves behind a path this install can actually use,
+        # so the ledger heals rather than needing the fix again next time.
+        assert Path(repository.list_documents(context)[0]["storage_path"]).exists()
+
     def test_provenance_survives_a_reparse(
         self, config, repository, context, blob_store, notifier
     ):

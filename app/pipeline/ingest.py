@@ -429,7 +429,18 @@ def reparse(
 
     outcomes = []
     for target in targets:
-        stored = Path(target["storage_path"])
+        # By digest first, exactly as `backfill_card_numbers` does and for the
+        # same reason: `storage_path` records where the file sat on whichever
+        # machine imported it, and a ledger since moved onto a server or into a
+        # container carries paths that resolve to nothing. The whole point of a
+        # content-addressed store is that the digest is enough. Getting this
+        # wrong does not corrupt anything — the check below refuses the
+        # document rather than deleting its rows — but it turns the one command
+        # that applies a parser fix to years of history into a no-op that
+        # reports every document as lost.
+        stored = Path(blob_store.path_for(target["sha256"]))
+        if not stored.exists():
+            stored = Path(target["storage_path"])
         if not stored.exists():
             log.error("original missing from the store for %s", target["sha256"])
             outcomes.append(IngestOutcome(

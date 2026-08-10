@@ -85,6 +85,17 @@ _REFERENCE = re.compile(r"\b[A-Z]*\d{4,}[A-Z0-9]*\b")
 #: Separators left stranded once the words around them are gone.
 _STRANDED = re.compile(r"(?:^|(?<= ))[/&.*'-]+(?= |$)")
 
+#: DBS prints a reference and a purpose after a PayNow payee, and prints "NA"
+#: when the payer left the reference blank: `TO: OLD CHANG GROUP PTE LTD NA
+#: OTHER`. `OTHER` is a mechanism word and already goes; `NA` is not a word
+#: about the payment at all, and left on it makes one merchant into two
+#: depending on whether the payee's name reached the end of the line.
+#:
+#: Trailing only, and never mid-name. A bank really can be called `CITIBANK NA`,
+#: and there the worst this does is shorten a name it still keeps distinct —
+#: whereas a global strip would edit the middle of merchants nobody has seen yet.
+_TRAILING_BLANK_REFERENCE = re.compile(r"\s+NA\s*$")
+
 
 def normalise_counterparty(raw: str) -> str:
     """Best-effort merchant identity, with the bank's decoration stripped.
@@ -114,6 +125,7 @@ def normalise_counterparty(raw: str) -> str:
         previous = text
         text = _TRAILING_COUNTRY.sub("", text).strip()
         text = _CARD_TAIL.sub("", text).strip()
+        text = _TRAILING_BLANK_REFERENCE.sub("", text).strip()
 
     # Everything stripped means the row was mechanism and reference only — a
     # transfer with no named party. Falling back keeps it distinguishable

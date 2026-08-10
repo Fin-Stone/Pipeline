@@ -101,6 +101,22 @@ class TestNormalise:
     def test_leaves_merchant_text_intact(self):
         assert normalise_counterparty("FairPrice App") == "FAIRPRICE APP"
 
+    def test_drops_the_blank_reference_dbs_prints_after_a_paynow_payee(self):
+        """DBS prints a reference and a purpose after the payee, writing `NA`
+        where the payer left the reference empty. Whether those land on the
+        payee's line or wrap onto the next is a fact about the name's length,
+        so keeping `NA` made one merchant into two."""
+        assert normalise_counterparty(
+            "Advice FAST Payment / Receipt PAYNOW TRANSFER 1234567 TO: OLD CHANG GROUP PTE LTD NA OTHER"
+        ) == normalise_counterparty(
+            "Advice FAST Payment / Receipt PAYNOW TRANSFER 1234567 TO: OLD CHANG GROUP PTE LTD"
+        ) == "OLD CHANG GROUP PTE LTD"
+
+    def test_keeps_na_inside_a_name(self):
+        """Trailing only. `NA` is a word merchants use, and editing the middle
+        of a name is how one merchant becomes another."""
+        assert normalise_counterparty("NA SIONG SEAFOOD") == "NA SIONG SEAFOOD"
+
 
 class TestDedupe:
     def _txn(self, day, amount, description):
