@@ -78,6 +78,17 @@ function SeriesRow({ s, note, categories, onCategorise, onDismiss }: {
                   label={`${magnitude(change.from_minor)} → ${magnitude(change.to_minor)}`} />
               </Tooltip>
             )}
+            {s.grouped_by === "amount" ? (
+              // No dropdown, because there is nothing to decide *about*: these
+              // rows were gathered by amount precisely because the bank printed
+              // no payee, and the name shown is this server's label. A rule
+              // written against it would match no transaction while the chip
+              // read back as settled — which is worse than saying so.
+              <Tooltip title="The bank printed no payee on these rows, so there is no merchant to file. Categorise the transactions themselves on the spending page.">
+                <Chip size="small" variant="outlined" color="default"
+                  label="no payee to file" />
+              </Tooltip>
+            ) : (
             <FormControl size="small" variant="standard" sx={{ minWidth: 130 }}>
               <Select
                 value={s.category ?? ""}
@@ -100,6 +111,7 @@ function SeriesRow({ s, note, categories, onCategorise, onDismiss }: {
                 ))}
               </Select>
             </FormControl>
+            )}
           </Stack>
         }
         secondary={

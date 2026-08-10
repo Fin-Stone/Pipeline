@@ -443,6 +443,15 @@ compare), `occurrences`, `total_paid_minor`, `first_seen`, `last_seen`,
 should offer to settle rather than hide. `decided_by` is `operator` or
 `imported`, so a person can see whether the filing was theirs.
 
+**`grouped_by` says whether there is anything to decide.** `merchant` is the
+normal case. `amount` means the rows were gathered by amount because the bank
+printed no payee, and `merchant` is then a label this server invented rather
+than a counterparty any row holds — so `category` and `decided_by` are always
+`null` and **a client must not offer to decide it.** A rule written against an
+invented label matches no transaction, while the series would read the rule back
+and show itself as filed: settled on screen, untouched in the ledger. Those rows
+are categorised individually with `POST /transactions/{id}/category`.
+
 **Correcting it is `POST /review/decide` with the same merchant name.** There is
 no separate route to categorise a series, deliberately: a series *is* a
 merchant, a merchant's category is one decision, and two ways to set one thing

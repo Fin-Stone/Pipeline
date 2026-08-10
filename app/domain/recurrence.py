@@ -123,26 +123,72 @@ RAILS = frozenset({
     "INTERBANK GIRO", "STANDING INSTRUCTION", "DIRECT DEBIT",
 })
 
+#: Mechanisms, as the *raw* statement line opens. A **collection** is money a
+#: biller pulled — a direct debit — and that is a fact about the row whatever
+#: the bank printed after it.
+#:
+#: Needed because the payee code is not stable and normalisation cannot know
+#: that. One monthly premium arrived eighteen times as
+#: `GIRO Payments / Collections via GIRO PACS BNC-P/N…` and, on five of those
+#: months, as `GIRO Payments / Collections via GIRO ACME LIFE PACS BNC-P/N…` —
+#: the identical debit, printed two ways. Normalisation preserves the
+#: difference, so one payee became two merchants and each fell below the three
+#: occurrences a series needs. The mechanism is the same on all eighteen.
+#:
+#: Collections only, deliberately. `FAST Payment / Receipt` is money the
+#: household *pushed* — a transfer, a card payment — and grouping those by
+#: amount would gather unrelated round numbers into invented commitments.
+RAIL_MECHANISMS = (
+    "giro payments / collections via giro",
+    "giro payments/collections via giro",
+    "payments / collections via giro",
+    "advice fast collection",
+    "fast collection",
+    "interbank giro",
+)
+
 #: How a series found by amount alone is labelled. Deliberately not a merchant
 #: name: nothing here knows one, and inventing one would be the module telling
 #: the operator something the statement never said.
 UNNAMED = "Unnamed direct debit"
 
 
-def is_rail(merchant_norm: str) -> bool:
-    """Whether a name is the payment mechanism with no payee attached.
+def is_rail(merchant_norm: str, description: str = "") -> bool:
+    """Whether this row travelled on a rail rather than naming a payee.
 
-    Reference tokens are dropped before the comparison, because the same rail
-    arrives both bare and with the bank's own reference stuck to the end —
-    `GIRO PAYMENTS / COLLECTIONS VIA GIRO` and the same followed by `H123456789`
-    are one mechanism and neither names anybody.
+    Two ways to be one, and the second is the one that matters.
 
-    Dropping only tokens that carry a digit is what keeps this narrow. `FAST
-    PRU- INSURANCE PREMIUM` does name a payee, survives the strip intact, and
-    is grouped by merchant like anything else.
+    From the **name**: reference tokens are dropped first, because the same
+    rail arrives both bare and with the bank's reference stuck to the end —
+    `GIRO PAYMENTS / COLLECTIONS VIA GIRO` and the same followed by a reference
+    are one mechanism and neither names anybody. Dropping only tokens carrying
+    a digit keeps it narrow: `FAST PRU- INSURANCE PREMIUM` does name a payee
+    and survives intact.
+
+    From the **raw line**: a GIRO collection is a direct debit whatever code
+    follows it. That has to be read from the raw text because normalisation has
+    already removed the mechanism words, leaving only a biller code that the
+    bank does not print consistently — which is how eighteen instances of one
+    premium became two merchants and neither was a series.
+    """
+    return is_rail_name(merchant_norm) or _is_collection(description)
+
+
+def is_rail_name(merchant_norm: str) -> bool:
+    """Whether the counterparty *is* the mechanism, naming nobody at all.
+
+    A name like this is never a useful grouping key — it lumps every direct
+    debit in the ledger together whatever was being paid — so rows carrying one
+    skip the merchant pass and go straight to the amount fallback.
     """
     words = [w for w in (merchant_norm or "").upper().split() if not any(c.isdigit() for c in w)]
     return bool(words) and " ".join(words) in RAILS
+
+
+def _is_collection(description: str) -> bool:
+    """Whether the raw line opens with a biller pulling money."""
+    opening = " ".join((description or "").lower().split())
+    return any(opening.startswith(mechanism) for mechanism in RAIL_MECHANISMS)
 
 
 #: Periods a person would name, with what each tolerates. Month-end drift is
@@ -171,6 +217,10 @@ class Occurrence:
     posted_date: date
     amount_minor: int
     merchant_norm: str
+    #: The statement line as printed. Carried because the *mechanism* survives
+    #: only here — see `is_rail`. Optional, so every existing caller and test
+    #: keeps working; a row without it is judged on its name alone.
+    description: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,73 +303,63 @@ def _tolerance(period_days: int) -> int:
     return 0
 
 
-def _group(occurrences) -> dict[tuple[str, int | None], list[Occurrence]]:
-    """Sort rows into the thing they might each be a payment of.
+def _by_merchant(rows) -> dict[tuple[str, int | None], list[Occurrence]]:
+    """The ordinary key: who the row was with."""
+    grouped: dict[tuple[str, int | None], list[Occurrence]] = {}
+    for occurrence in rows:
+        grouped.setdefault((occurrence.merchant_norm, None), []).append(occurrence)
+    return grouped
 
-    By merchant, except where the bank named no merchant. A direct debit that
-    reads only `GIRO PAYMENTS / COLLECTIONS VIA GIRO` is grouped by its
-    **exact amount** instead — which is a weaker key and the only one there is.
 
-    That was worth doing because of what it was missing: seven insurance
-    premiums, every one of them landing within days of the same date each year,
-    none of them detected, because the same policy appeared under two or three
-    different names and each fragment fell below the three occurrences a series
-    needs. The amount is the stable identifier on a direct debit; the name is
-    not.
+def _by_exact_amount(rows) -> dict[tuple[str, int | None], list[Occurrence]]:
+    """The fallback key, for rows whose name settled nothing.
 
     Exact, not within a tolerance. A tolerance on a key nobody named would let
     two unrelated debits of similar size become one commitment.
 
-    **An unnamed amount pulls in its named siblings.** The same policy arrives
-    named on one statement and bare on the next — four annual premiums of
-    826.00, two filed under the insurer and two under the rail, so neither half
-    reached the three occurrences a series needs and the whole thing stayed
-    invisible. Grouping on the amount reunites them, and the group is then
-    labelled with the name the bank did print, on the statements where it
-    printed one.
+    Labelled with whatever name the bank did print on the statements where it
+    printed one — the same policy arrives named on one and bare on the next.
     """
-    rows = [
-        o for o in occurrences
-        if o.merchant_norm and not is_conduit(o.merchant_norm)
-    ]
-    unnamed_amounts = {
-        abs(o.amount_minor) for o in rows if is_rail(o.merchant_norm)
-    }
-
-    grouped: dict[tuple[str, int | None], list[Occurrence]] = {}
+    grouped: dict[int, list[Occurrence]] = {}
     for occurrence in rows:
-        amount = abs(occurrence.amount_minor)
-        key = (
-            (UNNAMED, amount) if amount in unnamed_amounts
-            else (occurrence.merchant_norm, None)
-        )
-        grouped.setdefault(key, []).append(occurrence)
+        grouped.setdefault(abs(occurrence.amount_minor), []).append(occurrence)
 
-    return {_named(key, rows): rows for key, rows in grouped.items()}
+    keyed: dict[tuple[str, int | None], list[Occurrence]] = {}
+    for amount, group in grouped.items():
+        keyed[(_best_name(group), amount)] = group
+    return keyed
 
 
-def _named(key, rows) -> tuple[str, int | None]:
-    """Label an amount-grouped set with whatever name the bank did print."""
-    if key[1] is None:
-        return key
-    names = Counter(o.merchant_norm for o in rows if not is_rail(o.merchant_norm))
-    return (names.most_common(1)[0][0] if names else UNNAMED, key[1])
+def _best_name(group) -> str:
+    """The most presentable name the bank printed for this amount.
 
+    A plain name beats a scheme code, then frequency decides. Both appear on
+    one policy: thirteen statements say `PACS BNC-P/`, five say `ACME LIFE
+    PACS BNC-P/`, and one says `Acme Life Insurance` — the last is the only
+    one worth showing a person, and it is also the rarest, so frequency alone
+    picks the code.
 
-def find_series(occurrences, *, today: date | None = None) -> list[Series]:
-    """Every repeating payment in the rows given.
-
-    Grouped by merchant, then by amount within a merchant, then into concurrent
-    runs: one shop can hold two subscriptions at different prices, and it can
-    hold two at the *same* price — see `_runs`.
+    `is_rail_name`, not `is_rail`: the question here is whether the
+    *counterparty* names anybody, not how the money travelled. A GIRO
+    collection that does print its insurer still knows who it paid.
     """
+    names = Counter(
+        o.merchant_norm for o in group if not is_rail_name(o.merchant_norm)
+    )
+    if not names:
+        return UNNAMED
+    plain = [name for name in names if name.replace(" ", "").isalpha()]
+    ranked = plain or list(names)
+    return max(ranked, key=lambda name: (names[name], name))
+
+
+def _detect(groups) -> tuple[list[Series], dict]:
+    """Run every group through amount clustering and concurrent-run splitting."""
     segments: list[Series] = []
     leftovers: dict[tuple[str, int | None], list[list[Occurrence]]] = {}
-
     # Sorted so the outcome never depends on the order rows arrived in. The
     # amount is `None` for a merchant group, so it cannot be compared directly.
-    ordered = sorted(_group(occurrences).items(), key=lambda kv: (kv[0][0], kv[0][1] or 0))
-    for key, rows in ordered:
+    for key, rows in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0)):
         for cluster in _by_amount(rows):
             for run in _runs(cluster):
                 found = _series_from(key[0], run)
@@ -327,6 +367,56 @@ def find_series(occurrences, *, today: date | None = None) -> list[Series]:
                     segments.append(found)
                 else:
                     leftovers.setdefault(key, []).append(run)
+    return segments, leftovers
+
+
+def find_series(occurrences, *, today: date | None = None) -> list[Series]:
+    """Every repeating payment in the rows given.
+
+    **By merchant first, and by amount only for what that leaves behind.**
+
+    The name is the better key wherever the bank prints one, and the second
+    pass exists because sometimes it does not. A direct debit reading only
+    `GIRO Payments / Collections via GIRO` names nobody; worse, one that reads
+    `… PACS BNC-P/N…` on thirteen statements and `… ACME LIFE PACS BNC-P/N…`
+    on five names the same payee two ways, so one monthly premium became two
+    merchants and neither reached the three occurrences a series needs.
+
+    So rows that travelled on a collection rail and did not end up in any
+    series are gathered again by exact amount. Strictly a fallback: replacing
+    the merchant pass with it instead cost four insurers that *do* print their
+    names, whose rows then dissolved into amount groups shared with unrelated
+    payments — the monthly commitment halved and nobody had cancelled anything.
+
+    Within a group: by amount, then into concurrent runs, because one provider
+    can hold two subscriptions at different prices and two at the same one.
+    """
+    rows = [
+        o for o in occurrences
+        if o.merchant_norm and not is_conduit(o.merchant_norm)
+    ]
+
+    # A bare mechanism is not a merchant, so those rows skip the first pass
+    # outright rather than lumping every direct debit under one name.
+    named = [o for o in rows if not is_rail_name(o.merchant_norm)]
+    segments, leftovers = _detect(_by_merchant(named))
+    claimed = {txn_id for found in segments for txn_id in found.txn_ids}
+
+    # The fallback reaches every unclaimed row sharing an amount with an
+    # unclaimed *rail* row — not only the rail rows themselves. The same policy
+    # arrives named on one statement and bare on the next, and the halves have
+    # to find each other or neither reaches three occurrences.
+    unclaimed = [o for o in rows if o.txn_id not in claimed]
+    rail_amounts = {
+        abs(o.amount_minor) for o in unclaimed
+        if is_rail(o.merchant_norm, o.description)
+    }
+    stranded = [o for o in unclaimed if abs(o.amount_minor) in rail_amounts]
+    if stranded:
+        more, more_leftovers = _detect(_by_exact_amount(stranded))
+        segments += more
+        for key, runs in more_leftovers.items():
+            leftovers.setdefault(key, []).extend(runs)
 
     series = _merge_price_changes(segments)
     series = _absorb_recent_changes(series, leftovers)

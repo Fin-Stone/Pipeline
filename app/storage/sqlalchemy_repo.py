@@ -1173,7 +1173,14 @@ class SqlAlchemyLedgerRepository:
             # row was with, the second keeps everything because it feeds the
             # dedupe key. Grouping on the latter makes one merchant paid three
             # ways look like three merchants, and nothing recurs.
-            select(txn.id, txn.posted_date, txn.amount_minor, txn.counterparty_norm)
+            # `description_raw` rides along because the *mechanism* is only in
+            # the raw text. A GIRO collection is a direct debit whatever code
+            # the bank printed after it, and normalisation has thrown the
+            # mechanism words away by the time recurrence sees the row.
+            select(
+                txn.id, txn.posted_date, txn.amount_minor, txn.counterparty_norm,
+                txn.description_raw,
+            )
             .where(
                 (txn.tenant_id == context.tenant_id)
                 # Money out only: a series is something paid, and an incoming

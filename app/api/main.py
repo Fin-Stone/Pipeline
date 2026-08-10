@@ -45,7 +45,7 @@ from ..domain.categories import (
     rule_origin,
 )
 from ..domain.networth import Declared, change, net_worth
-from ..domain.recurrence import Occurrence, find_series
+from ..domain.recurrence import UNNAMED, Occurrence, find_series
 from ..domain.transfers import Window
 from ..pipeline.transfers import preview, realign, save_window, window_for
 from ..storage.factory import build_repository
@@ -462,6 +462,7 @@ def recurring(
             posted_date=r["posted_date"],
             amount_minor=r["amount_minor"],
             merchant_norm=r["counterparty_norm"],
+            description=r.get("description_raw") or "",
         )
         for r in rows
     )
@@ -483,16 +484,28 @@ def recurring(
     live = [s for s in series if not s.is_lapsed(today)]
 
     def _out(s):
-        decision = categorise(s.merchant_norm, rules)
+        # A series grouped by amount carries a label this module invented, not
+        # a counterparty any row holds — the bank printed no payee. Deciding
+        # that label writes a rule matching nothing, so the category would read
+        # back as settled while no transaction had been touched. Reported as
+        # unnameable instead, which is the truth.
+        by_amount = s.merchant_norm == UNNAMED
+        decision = None if by_amount else categorise(s.merchant_norm, rules)
         return {
             "merchant": s.merchant_norm,
+            # How the rows were gathered. `amount` means the name is a label,
+            # not a counterparty, and a client must not offer to decide it.
+            "grouped_by": "amount" if by_amount else "merchant",
             # What this series is filed under, and whether a person put it
             # there. `null` means nothing has decided yet, which is the case a
             # client should offer to settle rather than hide.
-            "category": decision.category if decision.rule is not None else None,
+            "category": (
+                decision.category if decision is not None and decision.rule is not None
+                else None
+            ),
             "decided_by": (
                 rule_origin(decision.rule.weight, decision.rule.note)
-                if decision.rule is not None else None
+                if decision is not None and decision.rule is not None else None
             ),
             "amount_centre_minor": s.amount_centre_minor,
             "monthly_equivalent_minor": s.monthly_equivalent_minor,

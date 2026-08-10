@@ -828,6 +828,7 @@ def cmd_recurring(args) -> int:
             posted_date=row["posted_date"],
             amount_minor=row["amount_minor"],
             merchant_norm=row["counterparty_norm"],
+            description=row.get("description_raw") or "",
         )
         for row in rows
     )

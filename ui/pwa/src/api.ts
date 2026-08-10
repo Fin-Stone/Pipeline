@@ -118,6 +118,10 @@ export interface Series {
    *  merchant's category is one decision wherever it is made. */
   category: string | null;
   decided_by: "operator" | "imported" | null;
+  /** How the rows were gathered. `amount` means the bank printed no payee and
+   *  `merchant` is a label this server invented, not a counterparty any row
+   *  holds — so there is nothing `decide` could usefully be given. */
+  grouped_by: "merchant" | "amount";
 }
 export interface Recurring {
   currency: string; monthly_commitment_minor: number;

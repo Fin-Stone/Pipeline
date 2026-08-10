@@ -1132,6 +1132,70 @@ class TestRecategorisingASubscription:
         ).json()["transactions"]
         assert len(rows) == 4, "the correction covers the whole series, not one row"
 
+    def test_a_series_with_no_payee_is_not_offered_as_a_decision(self, client, repository):
+        """A series gathered by amount carries a label the server invented, not
+        a counterparty any row holds — the bank printed no payee.
+
+        Deciding that label writes a rule matching nothing, and the chip would
+        then read the rule back and show the category as settled while no
+        transaction had been touched. Saying there is nothing to file is worse
+        for the operator only until they notice the alternative was a lie.
+        """
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.domain.recurrence import UNNAMED
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        rail = "GIRO PAYMENTS / COLLECTIONS VIA GIRO"
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256="f" * 64, institution="Test", doc_type="acc",
+                period_start=date(2023, 1, 1), period_end=date(2026, 6, 30),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath="f.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [],
+            [
+                TxnRecord(
+                    account_key=account, posted_date=date(year, 3, 20),
+                    amount_minor=-21525, currency="SGD",
+                    description_raw=rail, description_norm=rail,
+                    counterparty_norm=rail, dedupe_key=f"rail{year}", seq=year,
+                )
+                for year in (2024, 2025, 2026)
+            ],
+        )
+
+        body = client.get(f"{PREFIX}/recurring", params={"profile": "dummy"}).json()
+        everything = body["series"] + body["lapsed"] + body["overdue"] + body["due_soon"]
+        found = next(s for s in everything if s["merchant"] == UNNAMED)
+
+        assert found["grouped_by"] == "amount"
+        assert found["category"] is None and found["decided_by"] is None
+
+    def test_deciding_the_invented_label_never_reports_a_category(self, client, repository):
+        """Even if a client tries it anyway, the series must not claim to be
+        filed — nothing was."""
+        from app.domain.recurrence import UNNAMED
+
+        client.post(
+            f"{PREFIX}/review/decide",
+            params={"profile": "dummy", "counterparty": UNNAMED, "category": "Insurance"},
+        )
+        body = client.get(f"{PREFIX}/recurring", params={"profile": "dummy"}).json()
+        everything = body["series"] + body["lapsed"] + body["overdue"] + body["due_soon"]
+        for series in everything:
+            if series["merchant"] == UNNAMED:
+                assert series["category"] is None
+
     def test_it_can_be_corrected_twice(self, client, repository):
         """A wrong category is exactly the thing a person fixes more than once."""
         self._seed_a_series(repository)
