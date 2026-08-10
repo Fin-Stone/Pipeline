@@ -632,7 +632,7 @@ def cmd_propose(args) -> int:
     ]
     seeds = seed_rules()
     proposals = propose(
-        ((t["counterparty_norm"], t["amount_minor"]) for t in targets),
+        ((t["counterparty_norm"], t["amount_minor"], t["description_raw"]) for t in targets),
         rules, suggest=seeds, by=args.by,
     )
     if args.only_unknown:
@@ -641,6 +641,7 @@ def cmd_propose(args) -> int:
     # Counted after the limit, not before: the number describes the file that
     # was written rather than the list it was cut from.
     suggested = sum(1 for p in proposals if p.suggested_category)
+    sampled = sum(1 for p in proposals if p.sample_description)
 
     payload = {
         "instruction": (
@@ -651,7 +652,10 @@ def cmd_propose(args) -> int:
             "{counterparty, category, agreed_with_suggestion, confidence 0-1}. "
             "'typical_amount' is in cents and is a coarse magnitude, not a real "
             "purchase; use it to tell a shop's cafe from the shop itself. "
-            "Answer 'Others' rather than guessing."
+            "'sample_description' is one statement line this counterparty "
+            "appeared on, with every number masked to '#'; where the name is a "
+            "bank's scheme code it is often the only thing that says who was "
+            "paid. Answer 'Others' rather than guessing."
         ),
         "categories": list(DEFAULT_CATEGORIES),
         "counterparties": [
@@ -659,6 +663,7 @@ def cmd_propose(args) -> int:
                 "counterparty": p.counterparty,
                 "occurrences": p.occurrences,
                 "typical_amount": p.typical_amount_minor,
+                **({"sample_description": p.sample_description} if p.sample_description else {}),
                 **(
                     {"suggested_category": p.suggested_category,
                      "suggested_by": p.suggested_by}
@@ -676,7 +681,9 @@ def cmd_propose(args) -> int:
         target.write_text(text + "\n", encoding="utf-8")
         print(f"{len(proposals)} counterparty(ies) written to {target}")
         print(f"  {suggested} carry a seeded suggestion to confirm or overturn.")
-        print("  No dates, no transactions, no accounts, no personal counterparties.")
+        print(f"  {sampled} carry one statement line, every number masked.")
+        print("  No dates, no transactions, no accounts, no personal counterparties,")
+        print("  and no line from a payment between people.")
         print("  Safe to hand to more than one model; where they disagree, the row")
         print("  goes to review rather than to whichever answered first.")
         return 0

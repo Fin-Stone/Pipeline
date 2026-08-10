@@ -19,7 +19,10 @@ fixed or that these particular names exist.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
+
+from .normalise import normalise_description
 
 #: What a new tenant starts with. Editable per tenant, so this is a seed and
 #: never a constraint. See architecture §3.1 for what each holds and why
@@ -260,6 +263,49 @@ def is_personal(counterparty: str) -> bool:
     return bool(_PERSONAL.search(counterparty) or _ACCOUNT_LIKE.search(counterparty))
 
 
+#: Any run of digits, however long. Collapsed to one mark rather than one per
+#: digit, so the length of a policy number does not survive either.
+_DIGIT_RUN = re.compile(r"\d+")
+
+#: Everything that is not a letter. Used only to ask whether a line begins with
+#: the name it belongs to, where `FISH & CO` and `FISH CO` are the same claim
+#: and the punctuation normalisation happened to drop is not a difference worth
+#: shipping a whole line over.
+_NOT_LETTERS = re.compile(r"[^A-Za-z]+")
+
+#: Long enough to carry a mechanism and a payee, short enough that nothing
+#: resembling a ledger line fits.
+SAMPLE_LIMIT = 120
+
+
+def redact_description(raw: str) -> str:
+    """The statement line reduced to the words that say what a payment was for.
+
+    A counterparty is sometimes not answerable on its own. DBS prints a direct
+    debit as the scheme's own code — `PACS BNC-P/` names nobody, and a model
+    asked to categorise it is exactly as stuck as a person reading it. The line
+    the bank prints underneath says `ACME LIFE`, and that is the whole answer.
+
+    So one line may travel, under two rules that between them decide what is
+    left of it:
+
+    **Digits go.** Every run of them, everywhere. A reference is a policy
+    number, an account, a terminal id or somebody's phone, and not one of them
+    says what a merchant *is* — they only say which customer this was.
+
+    **Person-to-person rows send nothing at all.** The text after `TO:` on a
+    transfer is whatever the payer typed, and on this corpus that is sometimes
+    a first name — the cleaner's, a friend's. There is no pattern that reliably
+    tells a payee's name from a shop's, so these are refused wholesale rather
+    than filtered. It costs the least informative descriptions in the ledger:
+    a transfer to a person needs no category a merchant vocabulary could give.
+    """
+    text = normalise_description(raw)
+    if not text or is_personal(text):
+        return ""
+    return _DIGIT_RUN.sub("#", text)[:SAMPLE_LIMIT].strip()
+
+
 @dataclass(frozen=True, slots=True)
 class Proposal:
     """One distinct counterparty, as much as may leave the household about it.
@@ -282,14 +328,19 @@ class Proposal:
     suggested_category: str | None = None
     #: Where the suggestion came from, so it can be weighed rather than trusted.
     suggested_by: str | None = None
+    #: One statement line for this counterparty, with every digit run masked
+    #: and person-to-person rows refused outright — see `redact_description`.
+    #: Empty where the name already says everything the line would.
+    sample_description: str = ""
 
 
 def propose(rows, rules=(), *, suggest=(), by: str = "value") -> list[Proposal]:
     """The counterparties worth asking about, aggregated and filtered.
 
-    `rows` are `(counterparty, amount_minor)` pairs. `rules` are settled and
-    remove a counterparty from the question entirely; `suggest` are the seed
-    rules, which propose an answer without closing it.
+    `rows` are `(counterparty, amount_minor)` pairs, optionally with the raw
+    statement line as a third element. `rules` are settled and remove a
+    counterparty from the question entirely; `suggest` are the seed rules,
+    which propose an answer without closing it.
 
     That split is the point. A seeded guess is a well-known chain matched by
     pattern, which is right often enough to be worth sending and wrong often
@@ -304,19 +355,57 @@ def propose(rows, rules=(), *, suggest=(), by: str = "value") -> list[Proposal]:
     suggest = RuleSet(suggest)
     counts: dict[str, int] = {}
     amounts: dict[str, list[int]] = {}
+    lines: dict[str, Counter] = {}
+    personal: set[str] = set()
     # Tallied first and judged once per distinct name, as in `review_queue`.
-    for counterparty, amount_minor in rows:
+    for row in rows:
+        counterparty, amount_minor = row[0], row[1]
         name = (counterparty or "").strip()
         if not name:
             continue
         counts[name] = counts.get(name, 0) + 1
         amounts.setdefault(name, []).append(abs(amount_minor))
+        if len(row) > 2:
+            # Judged on the statement line, because by the time a name reaches
+            # `counterparty_norm` the words that mark a payment to a person
+            # have been stripped from it as mechanism. `PAYNOW TRANSFER
+            # 1234567 TO: A N OTHER` normalises to `A N` — no marker left, no
+            # digits left, and `is_personal` had nothing to find. It was the
+            # one exclusion that mattered most, tested against a shape the
+            # pipeline never produces, failing open on real names.
+            #
+            # Once, not per row: a payee reached this way is a person whatever
+            # else they were paid by.
+            if is_personal(row[2]):
+                personal.add(name)
+            sample = redact_description(row[2])
+            if sample:
+                lines.setdefault(name, Counter())[sample] += 1
 
     proposals = []
     for name, count in counts.items():
-        if is_personal(name) or is_conduit(name) or categorise(name, rules).rule is not None:
+        if name in personal or is_personal(name) or is_conduit(name):
+            continue
+        if categorise(name, rules).rule is not None:
             continue
         hint = categorise(name, suggest)
+        # The line this counterparty most often appears on. The commonest
+        # rather than the first, so a one-off spelling does not stand for the
+        # merchant.
+        seen = lines.get(name)
+        sample = seen.most_common(1)[0][0] if seen else ""
+        # Sent only where the line does not simply begin with the name. A
+        # merchant that reads `PHARMACY EXAMPLE MALL CARD PAYMENT` has already
+        # said everything on the line, and shipping the tail of it pads every
+        # proposal to no purpose — on this ledger that was 245 of 286.
+        #
+        # What survives is the case the name cannot express: the bank printing
+        # its own vocabulary *before* the payee, where naming the mechanism is
+        # most of the answer. `GIRO PAYMENTS / COLLECTIONS VIA GIRO
+        # ACME LIFE...` says a standing arrangement, which no amount of
+        # staring at `ACME LIFE PACS BNC-P/` will tell anybody.
+        if _NOT_LETTERS.sub("", sample).startswith(_NOT_LETTERS.sub("", name)):
+            sample = ""
         proposals.append(Proposal(
             counterparty=name,
             occurrences=count,
@@ -325,6 +414,7 @@ def propose(rows, rules=(), *, suggest=(), by: str = "value") -> list[Proposal]:
             total_value_minor=sum(amounts[name]),
             suggested_category=hint.category if hint.rule else None,
             suggested_by=hint.rule.pattern if hint.rule else None,
+            sample_description=sample,
         ))
 
     # Ordered by money, not by frequency. Ranking on occurrences optimises the

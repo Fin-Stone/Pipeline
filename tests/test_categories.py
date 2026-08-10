@@ -11,6 +11,7 @@ import pytest
 
 from app.domain.categories import (
     DEFAULT_CATEGORIES,
+    SAMPLE_LIMIT,
     UNCATEGORISED,
     Proposal,
     Rule,
@@ -19,8 +20,10 @@ from app.domain.categories import (
     consolidate,
     coverage,
     gate_amount,
+    is_personal,
     operator_rule,
     propose,
+    redact_description,
 )
 
 
@@ -184,6 +187,28 @@ class TestSanitisation:
         rows = [("FAST PAYMENT FROM: A N OTHER", -2500)] * 5
         assert propose(rows) == []
 
+    def test_a_person_is_never_proposed_after_normalisation_either(self):
+        """The above tests a shape the pipeline does not produce, and that is
+        how real names got out. `normalise_counterparty` strips `PAYNOW` and
+        `TO:` as mechanism and the reference as digits, so what reaches
+        `propose` is `A N OTHER` — nothing left for `is_personal` to find. The
+        judgement has to be made on the line, which still says how they were
+        paid.
+        """
+        from app.domain.normalise import normalise_counterparty
+
+        raw = "Advice FAST Payment / Receipt PAYNOW TRANSFER 1234567 TO: A N OTHER"
+        name = normalise_counterparty(raw)
+        assert not is_personal(name), "if this fails the leak closed some other way"
+        assert propose([(name, -2500, raw)] * 5) == []
+
+    def test_one_such_row_settles_the_payee(self):
+        """A payee reached that way is a person whatever else they were paid
+        by, so a single transfer is enough to withdraw the name."""
+        rows = [("A N OTHER", -2500, "NETS PURCHASE A N OTHER")] * 4
+        rows += [("A N OTHER", -2500, "PAYNOW TRANSFER 1234567 TO: A N OTHER")]
+        assert propose(rows) == []
+
     def test_a_bare_account_number_is_never_proposed(self):
         assert propose([("ADVICE FUNDS TRANSFER 01-2345678-9", -20000)] * 3) == []
 
@@ -231,6 +256,81 @@ class TestSanitisation:
         """The median, so one unusual purchase does not set the magnitude."""
         rows = [("IKEA", -350)] * 5 + [("IKEA", -89000)]
         assert propose(rows)[0].typical_amount_minor == gate_amount(350)
+
+
+class TestTheSampleLine:
+    """A counterparty is sometimes unanswerable on its own.
+
+    `PACS BNC-P/` is what DBS calls a Acme Life premium, and a model asked to
+    categorise that name is exactly as stuck as the person reading it. The line
+    underneath says who was paid — so one line may go, stripped of everything
+    that says *which customer* rather than *what merchant*.
+    """
+
+    GIRO = "GIRO Payments / Collections via GIRO ACME LIFE PACS BNC-P/N12345678"
+
+    def test_the_line_that_names_the_payee_travels(self):
+        result = propose([("PACS BNC-P/", -27386, self.GIRO)] * 4)[0]
+        assert "ACME LIFE" in result.sample_description
+
+    def test_every_number_is_masked(self):
+        """A policy number identifies a customer and describes no merchant."""
+        sample = redact_description(self.GIRO)
+        assert "12345678" not in sample and not any(c.isdigit() for c in sample)
+
+    def test_the_length_of_a_reference_does_not_survive_either(self):
+        """One mark per run, not per digit: `####` and `########` would say
+        which scheme it was even with the digits gone."""
+        assert redact_description("ACME REF 12") == redact_description("ACME REF 1234") == "ACME REF #"
+
+    def test_a_bare_account_number_refuses_the_whole_line(self):
+        """Masking it would be enough for privacy, and refusing is still
+        right: a line whose only distinguishing content is an account number
+        describes no merchant, so there is nothing to weigh against the risk
+        of having judged that wrong."""
+        assert redact_description("ADVICE TRANSFER 01-2345678-9") == ""
+
+    def test_a_payment_between_people_sends_no_line_at_all(self):
+        """The text after `TO:` is whatever the payer typed, and on this corpus
+        that is sometimes a first name. Nothing tells a payee's name from a
+        shop's reliably, so these are refused wholesale rather than filtered."""
+        assert redact_description("FAST PAYMENT PAYNOW TRANSFER 123456 TO: ALEX") == ""
+        assert redact_description("ADVICE FUNDS TRANSFER FROM: A N OTHER") == ""
+
+    def test_a_line_that_only_repeats_the_name_is_not_sent(self):
+        """Padding every proposal with an echo of its own counterparty costs
+        context and tells a model nothing."""
+        assert propose([("SHENG SIONG", -2000, "Sheng Siong")] * 3)[0].sample_description == ""
+
+    def test_nor_is_the_name_with_the_bank_s_tail_on_it(self):
+        """`PHARMACY EXAMPLE MALL CARD PAYMENT` has said everything the name
+        says. On the real ledger this was 245 of 286 proposals."""
+        rows = [("PHARMACY EXAMPLE MALL", -2000, "PHARMACY EXAMPLE MALL CARD PAYMENT")] * 3
+        assert propose(rows)[0].sample_description == ""
+
+    def test_punctuation_normalisation_dropped_is_not_a_difference(self):
+        """`FISH & CO` normalises to `FISH CO`, and shipping the whole line to
+        restore an ampersand is not worth the context."""
+        rows = [("FISH CO", -2000, "FISH & CO")] * 3
+        assert propose(rows)[0].sample_description == ""
+
+    def test_a_mechanism_printed_before_the_payee_is_worth_sending(self):
+        """The case the name cannot express. `ACME LIFE PACS BNC-P/` does not
+        say that this is a standing arrangement; the words in front of it do,
+        and normalisation drops them because they are not the payee."""
+        rows = [("ACME LIFE PACS BNC-P/", -27386, self.GIRO)] * 4
+        assert propose(rows)[0].sample_description.startswith("GIRO PAYMENTS")
+
+    def test_the_commonest_line_stands_for_the_merchant(self):
+        rows = [("ACME", -100, "BILLED MONTHLY ACME")] * 3 + [("ACME", -100, "ONE OFF ACME")]
+        assert propose(rows)[0].sample_description == "BILLED MONTHLY ACME"
+
+    def test_rows_without_a_line_still_work(self):
+        """The pairs the rest of the codebase passes must keep working."""
+        assert propose([("SHENG SIONG", -2000)] * 3)[0].sample_description == ""
+
+    def test_nothing_a_ledger_line_would_carry_fits(self):
+        assert redact_description("X" * 400) == "X" * SAMPLE_LIMIT
 
 
 class TestWritingToTheLedger:

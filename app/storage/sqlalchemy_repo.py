@@ -1140,7 +1140,14 @@ class SqlAlchemyLedgerRepository:
             )
         )
         stmt = (
-            select(txn.id, txn.counterparty_norm, txn.amount_minor, txn.posted_date)
+            # `description_raw` rides along because the normalised name is
+            # sometimes not enough to say what a payment was: DBS prints a
+            # direct debit as a scheme code, and `PACS BNC-P/` names nothing a
+            # person or a model could categorise. The line under it does.
+            select(
+                txn.id, txn.counterparty_norm, txn.amount_minor, txn.posted_date,
+                txn.description_raw,
+            )
             .where(
                 (txn.tenant_id == context.tenant_id)
                 & (txn.amount_minor < 0)

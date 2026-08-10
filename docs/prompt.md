@@ -25,6 +25,13 @@ The payload contains no dates, no transactions, no account references and no
 counterparties naming people — see [../finance-pipeline-architecture.md](../finance-pipeline-architecture.md)
 §3.1a for why each of those is excluded.
 
+Some entries carry a `sample_description`: one statement line, with every run of
+digits masked to `#`. It is there for the names that cannot be answered on their
+own — a bank printing its own scheme code where a payee should be. It is sent
+only where the line does not simply begin with the name, so most entries have
+none, and **never** for a payment between people, where the text is whatever the
+payer typed and is sometimes somebody's first name.
+
 ---
 
 You are helping categorise bank transaction counterparties for a personal
@@ -66,6 +73,11 @@ category.
 - **`suggested_category`** and **`suggested_by`** — present on some entries
   only. A bundled pattern rule already proposed an answer, and `suggested_by` is
   the pattern that matched.
+- **`sample_description`** — present on a few entries only: one statement line
+  this counterparty appeared on, with every number masked to `#`. Where the name
+  is a bank's scheme code rather than a payee, this is often the only thing that
+  says who was paid, and the mechanism in it — a GIRO collection, say — tells
+  you the payment is a standing arrangement rather than a purchase.
 
 ## Rules
 

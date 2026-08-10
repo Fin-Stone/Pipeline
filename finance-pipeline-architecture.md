@@ -258,6 +258,24 @@ The list sent out is **an aggregate per distinct counterparty, never transaction
 | counterparty | The question is "is this a grocer", and the name is the whole question |
 | occurrence count | Tells a model what is routine rather than incidental |
 | typical amount, gated | Disambiguates `IKEA` at $3.50 from `IKEA` at $890 — the case already in this corpus |
+| one sample line, masked | Only where the name is *not* the whole question — see below |
+
+**A sample line, for the names that cannot be answered on their own.** DBS prints a direct
+debit as the scheme's own code: `PACS BNC-P/` names nobody, and a model asked to categorise
+it is exactly as stuck as the person reading it. The line the bank prints around it says
+`GIRO PAYMENTS / COLLECTIONS VIA GIRO ACME LIFE`, which is the whole answer — both who was
+paid and that it is a standing arrangement rather than a purchase.
+
+One line, the commonest for that counterparty, under three constraints:
+
+- **Every run of digits is masked to a single `#`.** One mark per run rather than per digit,
+  so the *length* of a policy number does not survive either. A reference identifies a
+  customer and describes no merchant.
+- **Sent only where the line does not begin with the name.** `PHARMACY EXAMPLE MALL CARD
+  PAYMENT` has already said everything the name says. On this ledger that dropped 245 of 286
+  samples, leaving the case that motivated it: the bank's vocabulary printed *before* the
+  payee, where normalisation strips it precisely because it is not the payee.
+- **Never for a payment between people** — see below.
 
 Amount gates — 1, 5, 10, 20, 50, 100, 300, 500, 1000, 10000, 50000, nearest and rounding up
 on a tie — exist **for capability, not for privacy**, and apply to one representative amount
@@ -276,6 +294,16 @@ Three things are excluded, and the reasons are not interchangeable:
   counterparties in this corpus. Scrubbing the operator's own identifiers while sending their
   friends' names inverts the protection, so person-like counterparties are filtered before
   the list is built, alongside the §3.2 conduits.
+
+  **Judged on the statement line, not on the normalised name** — and getting that wrong is
+  how it failed for real. `PAYNOW TRANSFER 1234567 TO: A N OTHER` normalises to `A N OTHER`:
+  the mechanism words go as mechanism, the reference goes as digits, and by the time the
+  filter sees the name there is nothing left in it to recognise. The test that guarded this
+  passed an unnormalised string and so tested a shape the pipeline never produces. On the
+  real ledger 180 of 466 proposals were people. One such row settles the payee — a name
+  reached that way is a person whatever else they were paid by — which withholds some
+  genuine merchants too, and that is the right direction to fail: a merchant nobody asked a
+  model about is still categorisable by hand, and a name that has left cannot be recalled.
 
 ### 3.2 Frequency: don't use an LLM for this
 
