@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from dataclasses import replace
 from pathlib import Path
 
 from ...domain.dates import DateParseError, parse_full_date, parse_numeric_date
@@ -81,8 +82,7 @@ _TOTAL_CARRIED = re.compile(r"total\s+balance\s+carried\s+forward", re.IGNORECAS
 #: Where a statement stops being a table and starts being prose.
 _SECTION_END = re.compile(r"^\s*Messages\s+For", re.IGNORECASE)
 
-#: Page furniture. The vertical strip of rotated registration text down the
-#: left margin lands in the date column and would otherwise look like rows.
+#: Page furniture, by what it says.
 _SKIP = re.compile(
     r"^\s*(?:Page\s+\d+\s+of\s+\d+"
     # The column header repeats at the top of every page, and its own words
@@ -93,9 +93,19 @@ _SKIP = re.compile(
     r"|Transaction\s+Details\b.*"
     r"|CURRENCY:.*"
     r"|Messages\s+For\b.*"
-    r"|PDS_.*"
-    r"|[A-Za-z0-9()/.\-]{1,14})\s*$",
+    r"|PDS_.*)\s*$",
 )
+
+#: Left of this is the margin, not the table. The date column starts at 45pt;
+#: the rotated registration strip runs down the page at 11.
+#:
+#: Position, because the rule this replaced dropped any short single-token
+#: line — which is what the strip looks like once it is broken into rows, and
+#: is also exactly what DBS trails under a GIRO collection to say who it paid.
+#: On one statement that rule destroyed 37 lines reading `ACME`, `ACME LIFE`
+#: and the policy numbers beside them, leaving a description of nothing but the
+#: mechanism. Length could never tell those apart; where they sit always could.
+MARGIN_X = 30.0
 
 #: DBS trails its references *under* each transaction and never above it, so
 #: every description-only line belongs to the row it follows. A fixed distance
@@ -320,15 +330,25 @@ class DbsAccountAdapter:
     def _table_lines(self, lines: list[pdfio.Line]) -> list[pdfio.Line]:
         """Cut a section off where its table stops.
 
-        A statement ends with pages of regulatory prose that runs the full
+A statement ends with pages of regulatory prose that runs the full
         page width. Cut into columns it produces lines carrying text in every
         money column at once, so it has to be excluded before assembly rather
         than filtered afterwards.
+
+        The margin strip is stripped **word by word**, not line by line,
+        because it overlaps the table rather than sitting beside it: one
+        continuation reads `A12345678` at 11pt and `A BILLER PTE. LTD.` at
+        113, and dropping the line would lose the payee to remove the noise.
         """
-        for index, line in enumerate(lines):
+        kept = []
+        for line in lines:
             if _SECTION_END.match(line.text):
-                return lines[:index]
-        return lines
+                break
+            words = tuple(w for w in line.words if w.x0 >= MARGIN_X)
+            if not words:
+                continue
+            kept.append(line if len(words) == len(line.words) else replace(line, words=words))
+        return kept
 
     def _balance(self, row) -> int:
         text = _amount_text(row.cell(BALANCE_COL))

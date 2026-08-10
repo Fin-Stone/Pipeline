@@ -202,6 +202,47 @@ class TestDbsSavings:
         account = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC)).accounts[0]
         assert not any(t.description_raw.startswith("OTHER") for t in account.txns)
 
+    def test_the_lines_trailing_a_row_are_kept(self, dummy_root):
+        """DBS writes who a direct debit paid on the lines *under* it.
+
+        A GIRO collection reads `GIRO Payments / Collections via GIRO` on the
+        row and then `ACME`, then the policy number, each on its own line. Those
+        were being dropped as page furniture — they are short single-token
+        lines, which is also what the rotated registration strip down the left
+        margin looks like once it is broken into rows. Thirty-seven of them
+        went on one statement, leaving a description of nothing but the
+        mechanism and a ledger that could not say who was paid.
+        """
+        from app.domain.normalise import normalise_counterparty
+        from app.parsers.dbs.acc import DbsAccountAdapter
+
+        parsed = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC))
+        giro = [
+            t for t in parsed.accounts[0].txns
+            if t.description_raw.lower().startswith("giro payments")
+        ]
+        assert giro, "the sample should carry GIRO collections"
+
+        bare = [t for t in giro if normalise_counterparty(t.description_raw) in
+                ("GIRO PAYMENTS / COLLECTIONS VIA GIRO", "")]
+        assert not bare, (
+            "every GIRO collection in this sample names its payee on a "
+            f"following line: {[t.description_raw for t in bare]}"
+        )
+
+    def test_the_margin_strip_is_still_removed(self, dummy_root):
+        """What the dropped rule was actually for. It runs down the page at
+        11pt, overlapping rows rather than sitting beside them, so it is
+        stripped word by word — dropping the whole line would take the payee
+        with it."""
+        from app.parsers.dbs.acc import DbsAccountAdapter
+
+        parsed = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC))
+        for txn in parsed.accounts[0].txns:
+            assert "PDS_" not in txn.description_raw
+            # The strip is reversed text: "POSB Biz Reg No." read backwards.
+            assert "BSOP" not in txn.description_raw
+
     def test_routes_to_the_dbs_adapter(self, dummy_root):
         document = pdfio.load(_require(dummy_root, DBS_ACC))
         assert build_default_registry().resolve(document).name == "dbs.acc"
