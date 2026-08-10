@@ -930,6 +930,75 @@ class SqlAlchemyLedgerRepository:
             ).rowcount
         return bool(removed)
 
+    def list_recurrence_marks(self, context: TenantContext) -> list[dict]:
+        """Series the operator has said *are* subscriptions, and how often."""
+        mark = schema.recurrence_mark.c
+        stmt = (
+            select(
+                mark.merchant_norm, mark.amount_centre_minor,
+                mark.period_label, mark.note, mark.marked_at,
+            )
+            .where(mark.tenant_id == context.tenant_id)
+            .order_by(mark.merchant_norm, mark.amount_centre_minor)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def mark_recurrence(
+        self, context: TenantContext, merchant_norm: str,
+        amount_centre_minor: int, period_label: str, note: str = "",
+    ) -> bool:
+        """Say something repeats, on a period. `False` when already marked.
+
+        Marking the same thing on a *different* period is a correction rather
+        than a second subscription, so it replaces: the unique constraint is on
+        the name and amount, which is what the operator was looking at, and
+        somebody choosing 'yearly' after 'monthly' is fixing a mistake.
+        """
+        mark = schema.recurrence_mark.c
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(mark.id, mark.period_label).where(
+                    (mark.tenant_id == context.tenant_id)
+                    & (mark.merchant_norm == merchant_norm)
+                    & (mark.amount_centre_minor == amount_centre_minor)
+                )
+            ).first()
+            if existing and existing.period_label == period_label:
+                return False
+            if existing:
+                conn.execute(
+                    schema.recurrence_mark.update()
+                    .where(mark.id == existing.id)
+                    .values(period_label=period_label, note=note,
+                            marked_at=datetime.now(timezone.utc))
+                )
+                return True
+            conn.execute(schema.recurrence_mark.insert().values(
+                tenant_id=context.tenant_id,
+                merchant_norm=merchant_norm,
+                amount_centre_minor=amount_centre_minor,
+                period_label=period_label,
+                note=note,
+                marked_at=datetime.now(timezone.utc),
+            ))
+        return True
+
+    def unmark_recurrence(
+        self, context: TenantContext, merchant_norm: str, amount_centre_minor: int,
+    ) -> bool:
+        """Take a mark back. `False` when there was nothing to take back."""
+        mark = schema.recurrence_mark.c
+        with self._engine.begin() as conn:
+            removed = conn.execute(
+                schema.recurrence_mark.delete().where(
+                    (mark.tenant_id == context.tenant_id)
+                    & (mark.merchant_norm == merchant_norm)
+                    & (mark.amount_centre_minor == amount_centre_minor)
+                )
+            ).rowcount
+        return bool(removed)
+
     def list_card_numbers(self, context: TenantContext) -> list[dict]:
         """Every card number on record, with the account it belongs to."""
         card, account = schema.account_card_number.c, schema.account.c

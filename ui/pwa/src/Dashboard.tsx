@@ -27,6 +27,7 @@ import {
   Account, ApiError, Category, Direction, Filters, Summary, Trend as TrendData, Txn, api,
 } from "./api";
 import PaybackDialog from "./PaybackDialog";
+import RecurringDialog from "./RecurringDialog";
 import Trend from "./Trend";
 import { magnitude, money, monthsAgo, today } from "./money";
 
@@ -79,6 +80,7 @@ export default function Dashboard({ mode }: { mode: Mode }) {
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
   const [linking, setLinking] = useState<Txn | null>(null);
+  const [marking, setMarking] = useState<Txn | null>(null);
   // Income only: the bars can show what came in, or what was left after it all
   // went out again. The second is the number that answers "are we ahead".
   const [measure, setMeasure] = useState<"in_minor" | "net_minor">("in_minor");
@@ -434,6 +436,13 @@ export default function Dashboard({ mode }: { mode: Mode }) {
                         </Button>
                       </Tooltip>
                     )}
+                    {t.amount_minor < 0 && (
+                      <Tooltip title="This repeats — a premium or a plan the detector cannot see yet">
+                        <Button size="small" onClick={() => setMarking(t)}>
+                          recurring
+                        </Button>
+                      </Tooltip>
+                    )}
                     <Tooltip title="Not real money in or out — a move between your own accounts">
                       <Button size="small" onClick={() => markTransfer(t.id)}>
                         transfer
@@ -537,6 +546,14 @@ export default function Dashboard({ mode }: { mode: Mode }) {
           charge={linking}
           onClose={() => setLinking(null)}
           onLinked={(message, undo) => { reload(); offerUndo(message, undo); }}
+        />
+      )}
+
+      {marking && (
+        <RecurringDialog
+          charge={marking}
+          onClose={() => setMarking(null)}
+          onMarked={(message, undo) => { reload(); offerUndo(message, undo); }}
         />
       )}
 

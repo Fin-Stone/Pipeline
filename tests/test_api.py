@@ -7,6 +7,7 @@ current implementation. A test here failing means somebody's install breaks.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 
 import pytest
 
@@ -1062,6 +1063,287 @@ class TestSayingItIsNotASubscription:
             f"{PREFIX}/transactions", params={"profile": "dummy"},
         ).json()["transactions"]
         assert [r["id"] for r in after] == [r["id"] for r in before]
+
+
+class TestSayingItIsASubscription:
+    """The other half, and needed for the same reason from the other side.
+
+    The detector wants three occurrences and gaps that barely vary. That is the
+    right bar for a guess — and it means a yearly premium is invisible for two
+    years, and a plan started last month cannot be seen at all. Loosening the
+    detector to reach those is what turned one monthly premium into three
+    quarterly ones; the operator knew the answer the whole time.
+    """
+
+    MERCHANT = "SOME INSURER"
+
+    def _seed(self, repository, dates, amount=-27386):
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256="e" * 64, institution="Test", doc_type="acc",
+                period_start=date(2023, 1, 1), period_end=date(2026, 12, 31),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath="e.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [],
+            [
+                TxnRecord(
+                    account_key=account, posted_date=day, amount_minor=amount,
+                    currency="SGD", description_raw=self.MERCHANT,
+                    description_norm=self.MERCHANT, counterparty_norm=self.MERCHANT,
+                    dedupe_key=f"m{index}", seq=index,
+                )
+                for index, day in enumerate(dates)
+            ],
+        )
+        return context
+
+    def _recurring(self, client):
+        return client.get(f"{PREFIX}/recurring", params={"profile": "dummy"}).json()
+
+    def _series(self, client):
+        """Across every list. A marked series is subject to the same lapsing as
+        a detected one — a monthly commitment last paid a year ago reads as
+        cancelled whoever said it was monthly — so which list it lands in is a
+        fact about the dates, not about the mark."""
+        body = self._recurring(client)
+        return {s["merchant"]: s for s in body["series"] + body["lapsed"]}
+
+    def _mark(self, client, period="yearly", **extra):
+        return client.post(f"{PREFIX}/recurring/mark", params={
+            "profile": "dummy", "merchant": self.MERCHANT,
+            "amount_centre_minor": 27386, "period": period, **extra,
+        })
+
+    def test_two_occurrences_are_a_subscription_when_a_person_says_so(
+        self, client, repository,
+    ):
+        """The case the detector cannot reach and the operator can: a yearly
+        premium is invisible until its third year."""
+        self._seed(repository, [date(2024, 6, 15), date(2025, 6, 15)])
+        assert self.MERCHANT not in self._series(client)
+
+        assert self._mark(client).json()["marked"] is True
+        series = self._series(client)
+        assert self.MERCHANT in series
+        assert series[self.MERCHANT]["period_label"] == "yearly"
+        assert series[self.MERCHANT]["occurrences"] == 2
+
+    def test_the_period_is_the_operator_s_and_not_inferred(self, client, repository):
+        """Two rows a year apart marked as monthly stay monthly. The gaps are
+        not evidence here — that is the point of a mark — and quietly
+        correcting the period to the one the dates imply would make the feature
+        useless for the irregular billing it exists for."""
+        self._seed(repository, [date(2025, 1, 10), date(2026, 1, 10)])
+        self._mark(client, period="monthly")
+        assert self._series(client)[self.MERCHANT]["period_label"] == "monthly"
+
+    def test_it_counts_toward_the_monthly_commitment(self, client, repository):
+        """A commitment nobody totals is a commitment nobody has accounted
+        for."""
+        self._seed(repository, [date(2024, 6, 15), date(2025, 6, 15)])
+        before = self._recurring(client)["monthly_commitment_minor"]
+        self._mark(client)
+        after = self._recurring(client)["monthly_commitment_minor"]
+        assert after - before == round(27386 / 12)
+
+    def test_a_marked_series_is_not_counted_twice(self, client, repository):
+        """Marking something the detector already found must not produce both
+        readings: the monthly total is the number this page exists to state."""
+        self._seed(repository, [date(2024, 1, 10), date(2024, 2, 10), date(2024, 3, 10)])
+        detected = self._recurring(client)
+        every = lambda body: [
+            s["merchant"] for s in body["series"] + body["lapsed"]
+        ]
+        assert self.MERCHANT in every(detected)
+
+        self._mark(client, period="monthly")
+        after = self._recurring(client)
+        assert every(after).count(self.MERCHANT) == 1
+        assert after["monthly_commitment_minor"] == detected["monthly_commitment_minor"]
+
+    def test_the_screen_says_who_decided(self, client, repository):
+        """A client offers to un-mark what a person marked and to dismiss what
+        the detector found. It cannot do that without being told which."""
+        self._seed(repository, [date(2024, 6, 15), date(2025, 6, 15)])
+        self._mark(client)
+        assert self._series(client)[self.MERCHANT]["marked_by"] == "operator"
+
+    def test_confidence_does_not_claim_evidence_it_lacks(self, client, repository):
+        """`confidence` describes how little the gaps varied, and two dates
+        have one gap, which never varies. Reporting 1.0 would dress the
+        operator's assertion up as the strongest possible evidence."""
+        self._seed(repository, [date(2024, 6, 15), date(2025, 6, 15)])
+        self._mark(client)
+        assert self._series(client)[self.MERCHANT]["confidence"] == 0.0
+
+    def test_unmarking_puts_everything_back(self, client, repository):
+        """Un-marking has to be as cheap as marking: a page somebody is afraid
+        to touch is one that stays wrong."""
+        self._seed(repository, [date(2024, 6, 15), date(2025, 6, 15)])
+        before = self._recurring(client)
+        self._mark(client)
+        body = client.request("DELETE", f"{PREFIX}/recurring/mark", params={
+            "profile": "dummy", "merchant": self.MERCHANT,
+            "amount_centre_minor": 27386,
+        }).json()
+
+        assert body["unmarked"] is True
+        assert self._recurring(client) == before
+
+    def test_marking_twice_is_not_an_error(self, client, repository):
+        self._seed(repository, [date(2024, 6, 15), date(2025, 6, 15)])
+        assert self._mark(client).json()["marked"] is True
+        assert self._mark(client).json()["marked"] is False
+
+    def test_a_different_period_corrects_rather_than_duplicates(self, client, repository):
+        """Somebody choosing quarterly after monthly is fixing a mistake, not
+        taking out a second subscription against the same charges."""
+        self._seed(repository, [date(2024, 6, 15), date(2025, 6, 15)])
+        self._mark(client, period="monthly")
+        self._mark(client, period="quarterly")
+
+        series = self._series(client)
+        assert series[self.MERCHANT]["period_label"] == "quarterly"
+        listed = client.get(f"{PREFIX}/recurring/marked", params={"profile": "dummy"}).json()
+        assert listed["total"] == 1
+
+    def test_unmarking_something_never_marked_is_not_an_error(self, client):
+        body = client.request("DELETE", f"{PREFIX}/recurring/mark", params={
+            "profile": "dummy", "merchant": "NOTHING", "amount_centre_minor": 1,
+        }).json()
+        assert body["unmarked"] is False
+
+    def test_a_mark_can_be_found_again(self, client, repository):
+        """Contract rule 2a. A mark whose rows a reparse renamed stops
+        appearing on the recurring page, and without this there would be
+        nothing anywhere to say it still existed."""
+        self._seed(repository, [date(2024, 6, 15), date(2025, 6, 15)])
+        self._mark(client)
+        body = client.get(f"{PREFIX}/recurring/marked", params={"profile": "dummy"}).json()
+        assert body["total"] == 1
+        assert body["marked"][0]["merchant_norm"] == self.MERCHANT
+        assert body["marked"][0]["period_label"] == "yearly"
+
+    def test_an_invented_period_is_refused(self, client):
+        assert self._mark(client, period="fortnightlyish").status_code == 422
+
+    def test_a_mark_does_not_touch_the_transactions(self, client, repository):
+        self._seed(repository, [date(2024, 6, 15), date(2025, 6, 15)])
+        before = client.get(
+            f"{PREFIX}/transactions", params={"profile": "dummy"},
+        ).json()["transactions"]
+        self._mark(client)
+        after = client.get(
+            f"{PREFIX}/transactions", params={"profile": "dummy"},
+        ).json()["transactions"]
+        assert [r["id"] for r in after] == [r["id"] for r in before]
+
+
+class TestSeeingWhatAMarkWouldGather:
+    """A mark reaches every comparable row, not the one that was clicked.
+
+    Those are different things, and the difference is only visible before the
+    mark is written — afterwards it is a monthly total nobody can account for.
+    """
+
+    MERCHANT = "SOME INSURER"
+
+    def _seed(self, repository, rows):
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256="f" * 64, institution="Test", doc_type="acc",
+                period_start=date(2023, 1, 1), period_end=date(2026, 12, 31),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath="f.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [],
+            [
+                TxnRecord(
+                    account_key=account, posted_date=day, amount_minor=amount,
+                    currency="SGD", description_raw=name, description_norm=name,
+                    counterparty_norm=name, dedupe_key=f"c{index}", seq=index,
+                )
+                for index, (day, amount, name) in enumerate(rows)
+            ],
+        )
+
+    def _candidates(self, client, txn_id, period="yearly"):
+        return client.get(f"{PREFIX}/recurring/candidates", params={
+            "profile": "dummy", "txn_id": txn_id, "period": period,
+        })
+
+    def test_it_shows_every_row_the_mark_would_take(self, client, repository):
+        self._seed(repository, [
+            (date(2024, 6, 15), -27386, self.MERCHANT),
+            (date(2025, 6, 15), -27386, self.MERCHANT),
+            (date(2025, 8, 1), -1200, "SOMEWHERE ELSE"),
+        ])
+        rows = client.get(f"{PREFIX}/transactions", params={"profile": "dummy"}).json()
+        chosen = next(r for r in rows["transactions"] if r["amount_minor"] == -27386)
+
+        body = self._candidates(client, chosen["id"]).json()
+        assert len(body["matches"]) == 2
+        assert body["merchant"] == self.MERCHANT
+        assert body["gap_days"] == [365]
+
+    def test_it_says_what_the_period_would_mean(self, client, repository):
+        """The gaps beside the period is how somebody notices they picked
+        monthly for something billed yearly."""
+        self._seed(repository, [
+            (date(2024, 6, 15), -27386, self.MERCHANT),
+            (date(2025, 6, 15), -27386, self.MERCHANT),
+        ])
+        rows = client.get(f"{PREFIX}/transactions", params={"profile": "dummy"}).json()
+        chosen = rows["transactions"][0]
+
+        body = self._candidates(client, chosen["id"], period="monthly").json()
+        assert body["expected_gap_days"] == 30
+        assert body["gap_days"] == [365]
+        assert body["monthly_equivalent_minor"] == 27386
+
+    def test_nothing_is_written(self, client, repository):
+        self._seed(repository, [(date(2024, 6, 15), -27386, self.MERCHANT)])
+        rows = client.get(f"{PREFIX}/transactions", params={"profile": "dummy"}).json()
+        self._candidates(client, rows["transactions"][0]["id"])
+        listed = client.get(f"{PREFIX}/recurring/marked", params={"profile": "dummy"}).json()
+        assert listed["total"] == 0
+
+    def test_a_row_that_is_not_a_candidate_says_so(self, client, repository):
+        """A transfer leg is deliberately not a recurrence candidate, and
+        answering 'no such row' about one on screen would be a lie nobody can
+        act on."""
+        assert self._candidates(client, 999999).status_code == 404
+
+    def test_an_invented_period_is_refused(self, client, repository):
+        self._seed(repository, [(date(2024, 6, 15), -27386, self.MERCHANT)])
+        rows = client.get(f"{PREFIX}/transactions", params={"profile": "dummy"}).json()
+        response = self._candidates(client, rows["transactions"][0]["id"], period="often")
+        assert response.status_code == 422
 
 
 class TestRecategorisingASubscription:

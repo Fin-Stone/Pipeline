@@ -486,12 +486,31 @@ recurrence_dismissal = Table(
     ),
 )
 
+recurrence_mark = Table(
+    "recurrence_mark",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_id", Integer, ForeignKey("tenant.id"), nullable=False),
+    Column("merchant_norm", Text, nullable=False),
+    Column("amount_centre_minor", BigInteger, nullable=False),
+    # The part that cannot be inferred, which is the whole point of the mark:
+    # the rows do not say how often this happens, and the person does.
+    Column("period_label", String(32), nullable=False),
+    Column("note", Text, nullable=False, server_default=""),
+    Column("marked_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint(
+        "tenant_id", "merchant_norm", "amount_centre_minor",
+        name="uq_recurrence_mark",
+    ),
+)
+
 TENANT_SCOPED_TABLES = (
     source_document,
     tenant_setting,
     account,
     account_card_number,
     recurrence_dismissal,
+    recurrence_mark,
     txn,
     transfer_link,
     payback_link,

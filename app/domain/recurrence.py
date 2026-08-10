@@ -201,6 +201,11 @@ _PERIODS: tuple[tuple[str, int, int], ...] = (
     ("yearly", 365, 7),
 )
 
+#: The periods a person may declare, for validating a manual mark. Taken from
+#: the same table the detector snaps to, so the two can never drift apart and
+#: offer the operator a period the rest of the module cannot express.
+PERIOD_LABELS: tuple[str, ...] = tuple(label for label, _, _ in _PERIODS)
+
 #: How many times a period falls in a month, for comparing unlike commitments.
 _PER_MONTH = {
     "weekly": 52 / 12,
@@ -732,6 +737,75 @@ def _canonical(average: float) -> tuple[str, int] | None:
         if abs(average - days) <= slack:
             return label, days
     return None
+
+
+def matching(
+    occurrences, merchant_norm: str, amount_centre_minor: int,
+) -> list[Occurrence]:
+    """The rows a manual mark would gather, oldest first.
+
+    The same merchant and an amount within the ordinary tolerance — the mark
+    says "this repeats", not "this is the only one". Shown to the operator
+    before anything is written, because a mark that silently swept up a
+    neighbouring payment would be discovered as a wrong monthly total months
+    later, with nothing on screen to explain it.
+    """
+    centre = abs(amount_centre_minor)
+    tolerance = centre * AMOUNT_TOLERANCE
+    return sorted(
+        (
+            row for row in occurrences
+            if row.merchant_norm == merchant_norm
+            and abs(abs(row.amount_minor) - centre) <= tolerance
+        ),
+        key=lambda r: (r.posted_date, r.txn_id),
+    )
+
+
+def declared_series(
+    occurrences, merchant_norm: str, amount_centre_minor: int, period_label: str,
+) -> Series | None:
+    """A series because a person said so, on the period they said.
+
+    The detector needs three occurrences and gaps that barely vary, and it is
+    right to: without those, "regular" is a claim the data does not support.
+    But an operator knows things the ledger cannot show — a policy paid yearly
+    has two rows so far, a quarterly bill lands whenever the vendor gets round
+    to invoicing — and refusing to record that is refusing the one source of
+    information better than the rows.
+
+    So the thresholds do not apply here, and **nothing else is relaxed**. The
+    period is the operator's, not inferred. `confidence` still describes the
+    gaps and nothing else: it reads 0.0 where there are not two of them to
+    compare, which is honest and is usually exactly why a person had to say so.
+
+    Returns `None` only when no row matches at all — a mark on a merchant whose
+    rows have since been reparsed away has nothing to describe.
+    """
+    rows = matching(occurrences, merchant_norm, amount_centre_minor)
+    if not rows:
+        return None
+
+    period_days = dict((label, days) for label, days, _ in _PERIODS)[period_label]
+    gaps = [(b.posted_date - a.posted_date).days for a, b in zip(rows, rows[1:])]
+    average = statistics.fmean(gaps) if gaps else 0.0
+    spread = (statistics.pstdev(gaps) / average) if len(gaps) > 1 and average else 1.0
+    centre = round(_centre(rows))
+    last_seen = rows[-1].posted_date
+
+    return Series(
+        merchant_norm=merchant_norm,
+        amount_centre_minor=centre,
+        amount_tolerance_minor=round(centre * AMOUNT_TOLERANCE),
+        period_days=period_days,
+        period_label=period_label,
+        confidence=round(max(0.0, 1.0 - spread / MAX_SPREAD), 4),
+        first_seen=rows[0].posted_date,
+        last_seen=last_seen,
+        expected_next=last_seen + timedelta(days=period_days),
+        txn_ids=tuple(r.txn_id for r in rows),
+        total_paid_minor=sum(abs(r.amount_minor) for r in rows),
+    )
 
 
 def price_rises(series: Series, recent: list[Occurrence]) -> list[Occurrence]:

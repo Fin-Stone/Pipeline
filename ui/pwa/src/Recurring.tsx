@@ -17,7 +17,9 @@ import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
 import CloseIcon from "@mui/icons-material/Close";
 import UndoIcon from "@mui/icons-material/Undo";
-import { ApiError, Category, Dismissed, Recurring as RecurringData, Series, api } from "./api";
+import {
+  ApiError, Category, Dismissed, Marked, Recurring as RecurringData, Series, api,
+} from "./api";
 import { magnitude } from "./money";
 
 /**
@@ -52,9 +54,14 @@ function SeriesRow({ s, note, categories, onCategorise, onDismiss }: {
               {magnitude(s.monthly_equivalent_minor)}/mo
             </Typography>
           </Stack>
-          {/* Detection is a guess, so saying no is one click and is listed
-              below where it can be taken back. */}
-          <Tooltip title="Not a subscription">
+          {/* Dismissing what was detected and un-marking what a person marked
+              are different acts on different things, so the button says which
+              — offering to "dismiss" somebody's own mark would read as the
+              server disagreeing with them. Both are one click, and both are
+              listed below where they can be taken back. */}
+          <Tooltip title={s.marked_by === "operator"
+            ? "You marked this as recurring — take it back"
+            : "Not a subscription"}>
             <IconButton size="small" onClick={() => onDismiss(s)}>
               <CloseIcon fontSize="small" />
             </IconButton>
@@ -67,6 +74,14 @@ function SeriesRow({ s, note, categories, onCategorise, onDismiss }: {
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
             <Typography component="span">{s.merchant}</Typography>
             <Chip size="small" variant="outlined" label={s.period_label} />
+            {/* Said out loud, because the period on one of these is an
+                assertion rather than a measurement, and a reader deciding
+                whether to trust the monthly total needs to know which. */}
+            {s.marked_by === "operator" && (
+              <Tooltip title="You said this repeats. The detector has not seen enough payments to tell.">
+                <Chip size="small" variant="outlined" color="primary" label="marked by you" />
+              </Tooltip>
+            )}
             {change && (
               // A price change is a fact about a subscription, not a new one,
               // so it is shown on the series rather than as a second entry.
@@ -127,12 +142,16 @@ export default function Recurring() {
   const [data, setData] = useState<RecurringData | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [dismissed, setDismissed] = useState<Dismissed[]>([]);
+  const [marked, setMarked] = useState<Marked[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    Promise.all([api.recurring(), api.categories(), api.dismissedRecurring()])
-      .then(([r, c, d]) => {
-        setData(r); setCategories(c.categories); setDismissed(d.dismissed);
+    Promise.all([
+      api.recurring(), api.categories(), api.dismissedRecurring(), api.markedRecurring(),
+    ])
+      .then(([r, c, d, m]) => {
+        setData(r); setCategories(c.categories);
+        setDismissed(d.dismissed); setMarked(m.marked);
       })
       .catch((e) => setError(String(e instanceof ApiError ? e.detail : e)));
   }, []);
@@ -147,13 +166,26 @@ export default function Recurring() {
     load();
   }, [load]);
 
+  // One button, two inverses. Dismissing a series a person marked would leave
+  // the mark in place and hide its own result — the page would go on believing
+  // in a subscription nobody could see, and the monthly commitment would still
+  // count it. So the act taken back is the act that was made.
   const dismiss = useCallback(async (s: Series) => {
-    await api.dismissRecurring(s.merchant, s.amount_centre_minor);
+    if (s.marked_by === "operator") {
+      await api.unmarkRecurring(s.merchant, s.amount_centre_minor);
+    } else {
+      await api.dismissRecurring(s.merchant, s.amount_centre_minor);
+    }
     load();
   }, [load]);
 
   const restore = useCallback(async (d: Dismissed) => {
     await api.restoreRecurring(d.merchant_norm, d.amount_centre_minor);
+    load();
+  }, [load]);
+
+  const unmark = useCallback(async (m: Marked) => {
+    await api.unmarkRecurring(m.merchant_norm, m.amount_centre_minor);
     load();
   }, [load]);
 
@@ -267,6 +299,35 @@ export default function Recurring() {
                   <ListItemText
                     primary={d.merchant_norm}
                     secondary={`${magnitude(d.amount_centre_minor)} · dismissed ${d.dismissed_at.slice(0, 10)}`}
+                  />
+                </ListItem>
+              ))}
+            </List>
+          </CardContent>
+        </Card>
+      )}
+      {marked.length > 0 && (
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="h6" color="text.secondary">Marked by you</Typography>
+            <Typography variant="caption" color="text.secondary">
+              Things you said repeat, on a period you chose. Listed here because
+              a mark whose payments were later renamed stops appearing above,
+              and this is the only place left that says it still exists.
+            </Typography>
+            <List dense>
+              {marked.map((m) => (
+                <ListItem key={m.merchant_norm + m.amount_centre_minor} divider disableGutters
+                  secondaryAction={
+                    <Button size="small" startIcon={<UndoIcon />}
+                      onClick={() => unmark(m)}>
+                      Un-mark
+                    </Button>
+                  }
+                >
+                  <ListItemText
+                    primary={m.merchant_norm}
+                    secondary={`${magnitude(m.amount_centre_minor)} · ${m.period_label} · marked ${m.marked_at.slice(0, 10)}`}
                   />
                 </ListItem>
               ))}

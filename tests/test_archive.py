@@ -86,6 +86,8 @@ def _seed(url: str, store_dir: Path) -> dict:
     repository.hide_txn(context, 1, note="a note")
     repository.mark_transfer(context, 2)
     repository.set_human_category(context, 3, "Grocery")
+    repository.dismiss_recurrence(context, "NOT A SUBSCRIPTION", 1000)
+    repository.mark_recurrence(context, "SOME INSURER", 27386, "yearly")
 
     LocalFsBlobStore(store_dir).put(_write_original(store_dir), SHA)
 
@@ -197,6 +199,14 @@ class TestRoundTrip:
         context = repository.resolve_context("default", "owner@localhost")
         assert len(repository.list_hidden(context)) == 1
         assert repository.count_transfer_links(context) == 1
+        # What repeats and what does not, where a person overruled the detector
+        # in either direction. Neither is derivable from the rows — that is why
+        # the tables exist — so a backup that dropped them would restore a
+        # ledger quietly missing decisions nobody would think to check.
+        assert len(repository.list_recurrence_dismissals(context)) == 1
+        marks = repository.list_recurrence_marks(context)
+        assert [m["merchant_norm"] for m in marks] == ["SOME INSURER"]
+        assert marks[0]["period_label"] == "yearly"
         engine = create_engine(into)
         with engine.connect() as conn:
             sources = conn.execute(select(schema.txn_enrichment.c.source)).scalars().all()

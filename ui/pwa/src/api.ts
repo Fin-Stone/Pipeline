@@ -122,6 +122,11 @@ export interface Series {
    *  `merchant` is a label this server invented, not a counterparty any row
    *  holds — so there is nothing `decide` could usefully be given. */
   grouped_by: "merchant" | "amount";
+  /** Who says this repeats. `operator` means a person marked it and the period
+   *  is theirs — so offer to un-mark it, where a detected series is dismissed.
+   *  `confidence` on one of these describes the gaps and nothing else, and
+   *  reads 0 where there are not two of them to compare. */
+  marked_by: "operator" | null;
 }
 export interface Recurring {
   currency: string; monthly_commitment_minor: number;
@@ -132,6 +137,21 @@ export interface Dismissed {
   merchant_norm: string; amount_centre_minor: number;
   note: string; dismissed_at: string;
 }
+export interface Marked {
+  merchant_norm: string; amount_centre_minor: number;
+  period_label: string; note: string; marked_at: string;
+}
+export interface RecurringCandidates {
+  merchant: string; amount_centre_minor: number; period: string;
+  expected_gap_days: number | null; monthly_equivalent_minor: number;
+  expected_next: string | null;
+  /** Days between each pair of matches, oldest first. Read against
+   *  `expected_gap_days`: it is how somebody notices they picked monthly for
+   *  something billed yearly. */
+  gap_days: number[];
+  matches: { txn_id: number; posted_date: string; amount_minor: number }[];
+}
+export const PERIODS = ["weekly", "fortnightly", "monthly", "quarterly", "yearly"] as const;
 export interface ReviewItem { counterparty: string; occurrences: number; total_minor: number }
 export interface Review { outstanding: number; value_at_stake_minor: number; items: ReviewItem[] }
 
@@ -318,6 +338,28 @@ export const api = {
     ),
   dismissedRecurring: () =>
     call<{ total: number; dismissed: Dismissed[] }>("/recurring/dismissed"),
+  /** What marking this row would gather, before anything is written. The mark
+   *  reaches every comparable row, not the one that was clicked, and this is
+   *  the only place that difference is visible. */
+  recurringCandidates: (txn_id: number, period: string) =>
+    call<RecurringCandidates>("/recurring/candidates", { txn_id, period }),
+  /** Says something repeats, on a period the detector cannot infer — a yearly
+   *  premium is invisible until its third year. Marking again on a different
+   *  period corrects it rather than adding a second subscription. */
+  markRecurring: (merchant: string, amountCentreMinor: number, period: string) =>
+    call<{ marked: boolean }>(
+      "/recurring/mark",
+      { merchant, amount_centre_minor: amountCentreMinor, period },
+      { method: "POST" },
+    ),
+  unmarkRecurring: (merchant: string, amountCentreMinor: number) =>
+    call<{ unmarked: boolean }>(
+      "/recurring/mark",
+      { merchant, amount_centre_minor: amountCentreMinor },
+      { method: "DELETE" },
+    ),
+  markedRecurring: () =>
+    call<{ total: number; marked: Marked[] }>("/recurring/marked"),
   review: (limit = 50) => call<Review>("/review", { limit }),
   transfers: () => call<Transfers>("/transfers"),
   /** Reports by default. `apply` is what makes it true; `save` is what makes

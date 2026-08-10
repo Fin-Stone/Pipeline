@@ -53,6 +53,7 @@ nobody can reach is not an undo:
 | `POST /rules` | `DELETE /rules/{id}` | `GET /rules?origin=all` |
 | `POST /documents` | `DELETE /documents/{sha256}` | `GET /documents` |
 | `POST /recurring/dismiss` | `DELETE /recurring/dismiss` | `GET /recurring/dismissed` |
+| `POST /recurring/mark` | `DELETE /recurring/mark` | `GET /recurring/marked` |
 | `POST /transfers/rematch?apply=true` | run it again with the old window | `GET /transfers` |
 
 **A new endpoint that changes a figure must add a row to that table.** Marking a
@@ -436,8 +437,14 @@ Behind the recurring-payments page, §5.1(C).
 Each series carries `amount_centre_minor` (what it costs **now**),
 `monthly_equivalent_minor` (normalised so a yearly and a monthly commitment
 compare), `occurrences`, `total_paid_minor`, `first_seen`, `last_seen`,
-`expected_next`, `confidence`, `price_changes`, and `category` with
+`expected_next`, `confidence`, `price_changes`, `marked_by`, and `category` with
 `decided_by`.
+
+**`marked_by` is `operator` when a person said this repeats** and `null` when
+the detector found it. The distinction is what a client needs to offer the right
+inverse — un-marking somebody's own mark, rather than dismissing it — and it is
+also the honest label for the period, which on a marked series is an assertion
+rather than a measurement.
 
 **`category` is `null` when nothing has decided yet**, which is a case a client
 should offer to settle rather than hide. `decided_by` is `operator` or
@@ -524,6 +531,80 @@ second click does what the first one did.
 Everything said not to be a subscription, with `merchant_norm`,
 `amount_centre_minor`, `note` and `dismissed_at`. Contract rule 2a: without it
 the series would vanish from every screen with nothing to name it by.
+
+### `POST /api/v1/recurring/mark?merchant=&amount_centre_minor=&period=&note=`
+
+Says something **is** a subscription, on a period the detector cannot infer.
+`201`.
+
+```json
+{ "merchant": "...", "amount_centre_minor": 27386, "period": "yearly", "marked": true }
+```
+
+- **Because the detector's bar is right and still leaves real commitments
+  invisible.** It needs three occurrences and gaps that barely vary; a yearly
+  premium has two rows after two years, a quarterly bill invoiced whenever the
+  vendor remembers never qualifies, and a plan taken out last month has one row.
+  Loosening the detector to reach those is the wrong trade — it is what turned
+  one monthly premium into three quarterly ones — and the person paying it knew
+  the answer all along.
+- `period` is one of `weekly`, `fortnightly`, `monthly`, `quarterly`, `yearly`.
+  Anything else is `422`. **It is not second-guessed:** two rows a year apart
+  marked `monthly` stay monthly, because correcting the period to the one the
+  dates imply would make the route useless for the irregular billing it exists
+  for.
+- Keyed on the **name and amount**, exactly as a dismissal is, so it survives a
+  reparse. Detection stays a pure function of the ledger; a mark is a second
+  reading laid over it.
+- **A marked series replaces whatever the detector made of the same rows.** Both
+  readings at once would count one commitment twice, and
+  `monthly_commitment_minor` is the figure the page exists to state.
+- `confidence` on a marked series still describes **the gaps and nothing else**,
+  and reads `0` where there are not two of them to compare. It is not raised to
+  reflect that a person is sure: that would dress an assertion up as the
+  strongest evidence available.
+- Marking again on a **different period corrects it** rather than creating a
+  second subscription. Saying the same thing twice is not an error — `marked` is
+  `false`.
+- **Nothing about the transactions changes.**
+
+### `GET /api/v1/recurring/candidates?txn_id=&period=`
+
+What marking that row would gather, **before anything is written**.
+
+```json
+{ "merchant": "...", "amount_centre_minor": 27386, "period": "yearly",
+  "expected_gap_days": 365, "monthly_equivalent_minor": 2282,
+  "expected_next": "2026-06-15", "gap_days": [365],
+  "matches": [{ "txn_id": 1, "posted_date": "2024-06-15", "amount_minor": -27386 }] }
+```
+
+- **A mark reaches the merchant, not the charge that was clicked** — every row
+  with the same name and an amount within the ordinary tolerance. Those are not
+  the same thing, and this is the only place the difference is visible; a mark
+  that quietly swept up a neighbouring payment surfaces months later as a
+  monthly total nobody can account for.
+- `gap_days` against `expected_gap_days` is the useful comparison: it is how a
+  person notices they picked `monthly` for something billed yearly. A client
+  should **flag a mismatch and not block it** — irregular billing is what the
+  mark is for.
+- `404` when the row is not a recurrence candidate, which includes a transfer
+  leg or a hidden row. Answering "no such row" about one visibly on screen would
+  be a lie nobody can act on.
+- Writes nothing.
+
+### `DELETE /api/v1/recurring/mark?merchant=&amount_centre_minor=`
+
+Takes the mark back. `unmarked` is `false` when there was nothing to take back.
+Un-marking has to be as cheap as marking: a page somebody is afraid to touch is
+one that stays wrong.
+
+### `GET /api/v1/recurring/marked`
+
+Everything said to be a subscription, with `merchant_norm`,
+`amount_centre_minor`, `period_label`, `note` and `marked_at`. Contract rule 2a:
+a mark whose rows a reparse later renamed stops appearing on the recurring page,
+and without this there would be nothing anywhere to say it still existed.
 
 ### `GET /api/v1/review`
 

@@ -45,7 +45,14 @@ from ..domain.categories import (
     rule_origin,
 )
 from ..domain.networth import Declared, change, net_worth
-from ..domain.recurrence import UNNAMED, Occurrence, find_series
+from ..domain.recurrence import (
+    PERIOD_LABELS,
+    UNNAMED,
+    Occurrence,
+    declared_series,
+    find_series,
+    matching,
+)
 from ..domain.transfers import Window
 from ..pipeline.transfers import preview, realign, save_window, window_for
 from ..storage.factory import build_repository
@@ -433,6 +440,17 @@ def transactions(
     return {"transactions": rows, "limit": limit, "offset": offset, "q": filters["q"]}
 
 
+def _occurrence(row: dict) -> Occurrence:
+    """One candidate row as recurrence sees it."""
+    return Occurrence(
+        txn_id=row["id"],
+        posted_date=row["posted_date"],
+        amount_minor=row["amount_minor"],
+        merchant_norm=row["counterparty_norm"],
+        description=row.get("description_raw") or "",
+    )
+
+
 @app.get(f"{PREFIX}/recurring", tags=["dashboard"])
 def recurring(
     handle: Session,
@@ -456,16 +474,8 @@ def recurring(
         Rule(pattern=r["pattern"], category=r["category"], weight=r["weight"], note=r["note"])
         for r in handle.repository.list_category_rules(handle.context)
     )
-    series = find_series(
-        Occurrence(
-            txn_id=r["id"],
-            posted_date=r["posted_date"],
-            amount_minor=r["amount_minor"],
-            merchant_norm=r["counterparty_norm"],
-            description=r.get("description_raw") or "",
-        )
-        for r in rows
-    )
+    occurrences = [_occurrence(r) for r in rows]
+    series = find_series(occurrences)
     # What the operator has said is not a subscription. Applied after detection
     # rather than before, because the pass is a pure function of the ledger and
     # must keep being one — a dismissal is a fact about the *reading*, not about
@@ -479,6 +489,28 @@ def recurring(
         s for s in series
         if (s.merchant_norm, s.amount_centre_minor) not in dismissed
     ]
+
+    # What the operator has said *is* a subscription, built the same way round:
+    # detection stays a pure function of the ledger, and a mark is a second
+    # reading laid over it rather than a thumb on the detector's scale.
+    marked = {}
+    for m in handle.repository.list_recurrence_marks(handle.context):
+        declared = declared_series(
+            occurrences, m["merchant_norm"], m["amount_centre_minor"], m["period_label"],
+        )
+        # None where the rows a mark named are no longer in the ledger. Kept
+        # rather than deleted: a reparse can rename a merchant, and silently
+        # dropping the mark would lose a decision the operator would then have
+        # to make again without ever being told it had gone.
+        if declared is not None:
+            marked[declared.merchant_norm] = declared
+
+    # A marked series replaces whatever the detector made of the same rows.
+    # Both readings at once would count one commitment twice, and the monthly
+    # total is the number this page exists to state.
+    claimed = {txn_id for s in marked.values() for txn_id in s.txn_ids}
+    series = [s for s in series if not claimed.intersection(s.txn_ids)]
+    series += list(marked.values())
 
     today = date.today()
     live = [s for s in series if not s.is_lapsed(today)]
@@ -496,6 +528,10 @@ def recurring(
             # How the rows were gathered. `amount` means the name is a label,
             # not a counterparty, and a client must not offer to decide it.
             "grouped_by": "amount" if by_amount else "merchant",
+            # Who says this repeats. `operator` means the period is theirs and
+            # the detector's thresholds were not met — so a client offers to
+            # un-mark it, where for a detected series it offers to dismiss.
+            "marked_by": "operator" if s.merchant_norm in marked else None,
             # What this series is filed under, and whether a person put it
             # there. `null` means nothing has decided yet, which is the case a
             # client should offer to settle rather than hide.
@@ -579,6 +615,133 @@ def restore_recurring(handle: Session, merchant: str, amount_centre_minor: int) 
             handle.context, merchant, amount_centre_minor,
         ),
     }
+
+
+@app.get(f"{PREFIX}/recurring/candidates", tags=["dashboard"])
+def recurring_candidates(
+    handle: Session,
+    txn_id: Annotated[int, Query(description="The row being marked as recurring")],
+    period: Annotated[str, Query(description=f"One of {', '.join(PERIOD_LABELS)}")],
+) -> dict:
+    """What marking this row as recurring would gather, before anything is written.
+
+    The operator picks one charge; the mark reaches every row with the same
+    merchant and a comparable amount. Those are not the same thing, and the
+    difference is only visible here — a mark that quietly swept up a
+    neighbouring payment would surface months later as a monthly total nobody
+    could account for.
+
+    `expected_gap_days` against the real gaps is the useful comparison: it is
+    how a person notices they picked 'monthly' for something billed quarterly,
+    which is the mistake this dialog exists to catch.
+    """
+    if period not in PERIOD_LABELS:
+        raise HTTPException(422, f"period must be one of {', '.join(PERIOD_LABELS)}")
+
+    rows = handle.repository.list_recurrence_candidates(handle.context)
+    occurrences = [_occurrence(r) for r in rows]
+    chosen = next((o for o in occurrences if o.txn_id == txn_id), None)
+    if chosen is None:
+        # Not merely absent: a transfer leg or a hidden row is deliberately not
+        # a candidate, and saying "no such row" about one that is on screen
+        # would be a lie the operator cannot act on.
+        raise HTTPException(404, f"transaction {txn_id} is not a recurrence candidate")
+
+    found = matching(occurrences, chosen.merchant_norm, chosen.amount_minor)
+    declared = declared_series(
+        occurrences, chosen.merchant_norm, chosen.amount_minor, period,
+    )
+    gaps = [
+        (b.posted_date - a.posted_date).days for a, b in zip(found, found[1:])
+    ]
+    return {
+        "merchant": chosen.merchant_norm,
+        "amount_centre_minor": abs(chosen.amount_minor),
+        "period": period,
+        "expected_gap_days": declared.period_days if declared else None,
+        "monthly_equivalent_minor": declared.monthly_equivalent_minor if declared else 0,
+        "expected_next": declared.expected_next if declared else None,
+        "gap_days": gaps,
+        "matches": [
+            {
+                "txn_id": o.txn_id,
+                "posted_date": o.posted_date,
+                "amount_minor": o.amount_minor,
+            }
+            for o in found
+        ],
+    }
+
+
+@app.post(f"{PREFIX}/recurring/mark", tags=["dashboard"], status_code=201)
+def mark_recurring(
+    handle: Session,
+    merchant: str,
+    amount_centre_minor: int,
+    period: Annotated[str, Query(description=f"One of {', '.join(PERIOD_LABELS)}")],
+    note: str = "",
+) -> dict:
+    """Say something repeats, on a period, when the detector cannot tell.
+
+    The detector needs three occurrences and gaps that barely vary, and that is
+    the right bar for a guess: below it, "regular" is a claim the rows do not
+    support. It also means a yearly premium is invisible for two years, a
+    quarterly bill invoiced whenever the vendor remembers never qualifies, and
+    a plan taken out last month cannot be seen at all.
+
+    Loosening the detector to reach those is the wrong trade — it is what
+    turned one monthly premium into three quarterly ones — and the operator
+    knows the answer anyway. So the thresholds stay, and this is the way past
+    them.
+
+    Keyed on the name and amount, as a dismissal is, so it survives a reparse.
+    Marking the same thing on a different period corrects the period rather
+    than creating a second subscription.
+
+    Saying it twice changes nothing — `marked` is `false`.
+    """
+    if period not in PERIOD_LABELS:
+        raise HTTPException(422, f"period must be one of {', '.join(PERIOD_LABELS)}")
+    return {
+        "merchant": merchant,
+        "amount_centre_minor": amount_centre_minor,
+        "period": period,
+        "marked": handle.repository.mark_recurrence(
+            handle.context, merchant, amount_centre_minor, period, note,
+        ),
+    }
+
+
+@app.delete(f"{PREFIX}/recurring/mark", tags=["dashboard"])
+def unmark_recurring(handle: Session, merchant: str, amount_centre_minor: int) -> dict:
+    """Take a mark back, in the words it was made in.
+
+    Un-marking has to be as cheap as marking. A person who has to think about
+    whether they can undo something will not try it, and a recurring page they
+    are afraid to touch is one that stays wrong.
+
+    Un-marking nothing is not an error — `unmarked` is `false`.
+    """
+    return {
+        "merchant": merchant,
+        "amount_centre_minor": amount_centre_minor,
+        "unmarked": handle.repository.unmark_recurrence(
+            handle.context, merchant, amount_centre_minor,
+        ),
+    }
+
+
+@app.get(f"{PREFIX}/recurring/marked", tags=["dashboard"])
+def marked_recurring(handle: Session) -> dict:
+    """Everything the operator has said is a subscription.
+
+    Contract rule 2a: a mark that changes the monthly commitment needs both an
+    inverse and a way to find what has been marked. Without this, a mark whose
+    rows a reparse renamed would stop appearing on the recurring page with
+    nothing anywhere to say it still existed.
+    """
+    rows = handle.repository.list_recurrence_marks(handle.context)
+    return {"total": len(rows), "marked": rows}
 
 
 @app.get(f"{PREFIX}/recurring/dismissed", tags=["dashboard"])
