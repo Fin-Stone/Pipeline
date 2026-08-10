@@ -817,7 +817,7 @@ def cmd_recurring(args) -> int:
     """
     from datetime import date
 
-    from .domain.recurrence import Occurrence, find_series
+    from .domain.recurrence import Occurrence, declared_series, find_series
     from .pipeline.diagnostics import _money, describe
 
     config = load_config()
@@ -826,10 +826,12 @@ def cmd_recurring(args) -> int:
         check_schema(repository)
         context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
         rows = repository.list_recurrence_candidates(context)
+        dismissals = repository.list_recurrence_dismissals(context)
+        marks = repository.list_recurrence_marks(context)
     finally:
         repository.close()
 
-    series = find_series(
+    occurrences = [
         Occurrence(
             txn_id=row["id"],
             posted_date=row["posted_date"],
@@ -838,7 +840,28 @@ def cmd_recurring(args) -> int:
             description=row.get("description_raw") or "",
         )
         for row in rows
-    )
+    ]
+    series = find_series(occurrences)
+
+    # The operator's readings, exactly as `/recurring` applies them. Without
+    # these this command answered from detection alone and printed a monthly
+    # commitment that disagreed with the dashboard's — two figures for one
+    # household's money, differing by whichever series had been dismissed, and
+    # neither screen saying why.
+    dismissed = {(d["merchant_norm"], d["amount_centre_minor"]) for d in dismissals}
+    series = [s for s in series if (s.merchant_norm, s.amount_centre_minor) not in dismissed]
+
+    marked = {}
+    for m in marks:
+        declared = declared_series(
+            occurrences, m["merchant_norm"], m["amount_centre_minor"], m["period_label"],
+        )
+        if declared is not None:
+            marked[declared.merchant_norm] = declared
+    claimed = {txn_id for s in marked.values() for txn_id in s.txn_ids}
+    series = [s for s in series if not claimed.intersection(s.txn_ids)]
+    series += list(marked.values())
+
     today = date.today()
     live = [s for s in series if not s.is_lapsed(today)]
 
@@ -847,6 +870,10 @@ def cmd_recurring(args) -> int:
     print(f"series found         {len(series)}")
     print(f"  still running      {len(live)}")
     print(f"  lapsed             {len(series) - len(live)}")
+    if marked:
+        print(f"  you marked         {len(marked)}")
+    if dismissed:
+        print(f"dismissed            {len(dismissed)}   held back from every figure below")
     print(f"monthly commitment   {_money(sum(s.monthly_equivalent_minor for s in live)).strip()}")
 
     if live:
