@@ -55,7 +55,7 @@ cd /opt/finstone
 ./infra/scripts/install.sh --server-name finstone.lan
 ```
 
-One command, which is Rule 3 in [development-rules.md](development-rules.md) and
+One command, which is Rule 3 of the development rules in [the README](../README.md) and
 not a slogan: every manual step is a tax paid on every future install and on the
 one restore that matters.
 

@@ -6,7 +6,6 @@ document breaks somebody's install rather than somebody's build.
 
 > **If you are building a UI or any other client, read this first.**
 > **If you are changing `app/api/`, change this in the same commit.**
-> That obligation is in [../AGENTS.md](../AGENTS.md) and is not optional.
 
 Implementation: [`app/api/main.py`](../app/api/main.py).
 Tests asserting these promises: [`tests/test_api.py`](../tests/test_api.py).

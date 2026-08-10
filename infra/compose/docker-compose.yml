@@ -28,7 +28,7 @@ x-app: &app
     # settable for the case where somebody serves the client from elsewhere.
     FINSTONE_CORS_ORIGINS: ${FINSTONE_CORS_ORIGINS:-*}
     # Deliberately absent: FINSTONE_ALLOW_PROD. Processing real data must be an
-    # explicit act. See docs/development-rules.md Rule 2.
+    # explicit act. See the development rules in README.md, Rule 2.
   volumes:
     - ../../data:/srv/finstone/data
     # Read-only: the pipeline copies out of uploads and must never write to the

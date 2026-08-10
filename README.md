@@ -117,9 +117,8 @@ automated retrieval — write into it directly.
 
 ## Development rules
 
-Three rules bind every contributor, human or agent. All are stated in full in
-[docs/development-rules.md](docs/development-rules.md) and summarised in
-[AGENTS.md](AGENTS.md):
+Three rules bind every contributor, and the code cites them by number where it
+depends on them:
 
 1. **Decouple by default, up to a 20% performance ceiling.** Implementation choices sit
    behind a seam unless the abstraction costs 20% or more. Anything measured above 15% must
@@ -134,15 +133,11 @@ Three rules bind every contributor, human or agent. All are stated in full in
 ## Documentation
 
 - [finance-pipeline-architecture.md](finance-pipeline-architecture.md) is the design and architecture source of truth.
-- [docs/development-rules.md](docs/development-rules.md) states the three binding development rules.
 - [docs/ingestion.md](docs/ingestion.md) is the Phase 1 ingestion and storage design of record.
 - [docs/api-contracts.md](docs/api-contracts.md) is what a client is written against, and binding.
 - [docs/install.md](docs/install.md) is the step-by-step install, from nothing to a categorised ledger.
 - [docs/deploy.md](docs/deploy.md) is a permanent install — nginx, systemd, TLS — and what none of it yet protects.
 - [docs/backups.md](docs/backups.md) is what is worth backing up, and why a restore is the same command as a migration.
-- [docs/repo-structure.md](docs/repo-structure.md) explains the repository layout and startup strategy.
-- [docs/agent-doc-sync.md](docs/agent-doc-sync.md) defines the documentation synchronization contract.
-- [AGENTS.md](AGENTS.md) provides the operating contract for agent-driven changes.
 
 ## One-command uptake path
 

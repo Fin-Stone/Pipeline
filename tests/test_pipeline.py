@@ -115,7 +115,7 @@ class TestStaging:
 
     def test_refuses_prod_without_explicit_opt_in(self, config, repository, context):
         """uploads/prod holds real financial data; processing it must be a
-        deliberate act. See docs/development-rules.md Rule 2."""
+        deliberate act. See the development rules in README.md, Rule 2."""
         from app.config import ConfigError
         with pytest.raises(ConfigError, match="FINSTONE_ALLOW_PROD"):
             stage(config, "prod", repository=repository, context=context)

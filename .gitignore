@@ -1,5 +1,5 @@
 # Real financial data. Never committed, never read by agents.
-# See docs/development-rules.md Rule 2.
+# See the development rules in README.md, Rule 2.
 uploads/prod/**
 
 # Operator-supplied redacted samples. The folder is tracked, its contents are not.
@@ -21,6 +21,17 @@ data/*.sqlite3
 !data/inbox/README.md
 !data/store/README.md
 !data/quarantine/README.md
+
+# Working notes for whoever is building this, agent or otherwise. Kept on disk
+# and out of the repository: what is published is what builds and installs, and
+# an operating contract for contributors is neither. The three binding rules
+# they refer to are stated in full in README.md, which is published.
+AGENTS.md
+.claude/
+docs/development-rules.md
+docs/repo-structure.md
+docs/agent-doc-sync.md
+scripts/
 
 # Secrets and environment
 .env

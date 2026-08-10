@@ -1,7 +1,7 @@
 """Money parsing.
 
 Amounts are integers in minor units. Nothing in this module — or anywhere
-downstream of it — is ever a float. See docs/development-rules.md.
+downstream of it — is ever a float.
 """
 
 from __future__ import annotations

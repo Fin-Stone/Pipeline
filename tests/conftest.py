@@ -3,7 +3,7 @@
 The important one is `repository`, which is parametrized over both engines.
 Every pipeline test therefore runs twice: on SQLite, which needs no services,
 and on Postgres when TEST_DATABASE_URL is set. That dual run is the
-enforcement mechanism for Rule 1 in docs/development-rules.md — if a
+enforcement mechanism for Rule 1 of the development rules in README.md — if a
 Postgres-ism leaks into shared code, the SQLite run fails; if a SQLite
 assumption does, the Postgres run fails.
 """

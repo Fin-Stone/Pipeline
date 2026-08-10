@@ -38,7 +38,7 @@ ENV FINSTONE_DATA_DIR=/srv/finstone/data \
     FINSTONE_UPLOADS_DIR=/srv/finstone/uploads \
     FINSTONE_WEB_ROOT=/srv/finstone/web
 # Deliberately absent: FINSTONE_ALLOW_PROD. Processing real statements is an
-# explicit act each time — see docs/development-rules.md Rule 2.
+# explicit act each time — see the development rules in README.md, Rule 2.
 
 WORKDIR /srv/finstone
 

@@ -86,7 +86,7 @@ class Config:
 
         Holds real statements under recognisable names, which is the whole point
         and also why it is denied to agents alongside uploads/prod — see
-        docs/development-rules.md Rule 2.
+        the development rules in README.md, Rule 2.
         """
         return self.quarantine_dir_for(profile) / "files"
 
@@ -137,7 +137,7 @@ class Config:
         """Refuse to touch real data unless the operator opted in explicitly.
 
         uploads/prod holds real financial statements. Processing it must be a
-        deliberate act, never muscle memory. See docs/development-rules.md
+        deliberate act, never muscle memory. See the development rules in README.md
         Rule 2.
         """
         if profile == PROFILE_PROD and not self.allow_prod:

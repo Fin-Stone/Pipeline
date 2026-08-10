@@ -4,7 +4,7 @@ Pipeline code imports from this package and never from a concrete
 implementation. Swapping Postgres for MySQL, local disk for S3, or a log
 notifier for ntfy is a change of one factory line and nothing else.
 
-See docs/development-rules.md Rule 1.
+See the development rules in README.md, Rule 1.
 """
 
 from .blobstore import BlobStore

@@ -77,7 +77,7 @@ by bank, by year, nested arbitrarily deep — and it is split into two profiles 
 different handling:
 
 - `uploads/prod/` holds real statements. **Agents must never read it.** See
-  [development-rules.md](development-rules.md) Rule 2.
+  the development rules in [the README](../README.md), Rule 2.
 - `uploads/dummy/` holds redacted or synthetic statements that are safe for agents and for
   development.
 
@@ -200,7 +200,7 @@ as a stale `reason.json`, in a form someone can double-click.
 
 Because that folder holds real statements under recognisable names, it is denied to agents
 alongside `uploads/prod/` and `data/store/` — see
-[development-rules.md](development-rules.md) Rule 2.
+the development rules in [the README](../README.md), Rule 2.
 
 ### `reparse`
 
@@ -519,7 +519,7 @@ only after all six layouts were measured:
 
 Implemented: `trust.acc`, `trust.cc`, `dbs.acc`, `ocbc.acc`, `ocbc.cc`,
 `maribank.acc`, `maribank.cc`. See "Statements that group their rows" below for
-what MariBank forced, and [repo-structure.md](repo-structure.md) for where each
+what MariBank forced, and the package layout for where each
 lives.
 
 **One sample of a layout is one era of it.** Every adapter here was written
@@ -780,7 +780,7 @@ initial migration cost one column.
 Every `LedgerRepository` method takes a `TenantContext` as a required argument, so ingestion
 already runs under a tenant. Turning multi-tenancy on later changes how that context is
 *resolved* — from configuration to an authenticated session — and nothing else. See
-[development-rules.md](development-rules.md) Rule 3.
+the development rules in [the README](../README.md), Rule 3.
 
 ---
 
@@ -825,7 +825,7 @@ host, and a documented command that does not run is worse than no command at all
 
 The test suite runs the same ingestion tests against **both** SQLite (default, no services
 required) and Postgres (when `TEST_DATABASE_URL` is set). That dual run is the proof that
-Rule 1 in [development-rules.md](development-rules.md) actually holds rather than being
+Rule 1 of the development rules in [the README](../README.md) actually holds rather than being
 merely asserted.
 
 Test documents come from two places, and they are not interchangeable:
@@ -867,9 +867,6 @@ statements. A second run inserts nothing.
 ## Related documents
 
 - [finance-pipeline-architecture.md](../finance-pipeline-architecture.md) — design source of truth
-- [development-rules.md](development-rules.md) — the two binding development rules
-- [repo-structure.md](repo-structure.md) — repository layout
-- [AGENTS.md](../AGENTS.md) — operating contract for agent-driven changes
 
 ## HSBC, and statements with no text in them
 

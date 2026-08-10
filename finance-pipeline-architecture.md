@@ -91,7 +91,7 @@ uploads/prod/    ← real statements, never read by agents, untracked
 real-shaped documents that is provably *not* the real one — and putting that boundary at a
 single, explicit step means the prod/dummy distinction is enforced in one place instead of
 being smeared through every downstream component. See
-[docs/development-rules.md](docs/development-rules.md) and
+the development rules in [README.md](README.md) and
 [docs/ingestion.md](docs/ingestion.md).
 
 **Optional but recommended: Paperless-ngx as the document-of-record layer.** It already

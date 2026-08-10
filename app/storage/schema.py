@@ -13,7 +13,8 @@ constraint that could otherwise collide between households is scoped by it.
 The system runs single-tenant and single-member for now â€” one default tenant
 is seeded and everything resolves to it â€” but the *shape* is here from the
 start, because adding a tenant scope after a ledger has history means
-recomputing every dedupe key in it. See docs/development-rules.md Rule 3.
+recomputing every dedupe key in it. See the development rules in
+README.md, Rule 3.
 """
 
 from __future__ import annotations

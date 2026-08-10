@@ -7,7 +7,7 @@ return on a write-mostly ingestion path.
 Everything here is portable SQL. Deduplication is a *select existing keys â†’
 insert the complement* with the unique index as a backstop, deliberately not
 `ON CONFLICT`, so SQLite and Postgres run identical code and the dual-engine
-test run stays meaningful. See docs/development-rules.md Rule 1.
+test run stays meaningful. See the development rules in README.md, Rule 1.
 
 **Every read and write is filtered by `context.tenant_id`.** There is no code
 path in this class that touches a ledger table without that filter, and the
