@@ -87,7 +87,7 @@ def _seed(url: str, store_dir: Path) -> dict:
     repository.mark_transfer(context, 2)
     repository.set_human_category(context, 3, "Grocery")
     repository.dismiss_recurrence(context, "NOT A SUBSCRIPTION", 1000)
-    repository.mark_recurrence(context, "SOME INSURER", 27386, "yearly")
+    repository.mark_recurrence(context, "SOME INSURER", 24000, "yearly")
 
     LocalFsBlobStore(store_dir).put(_write_original(store_dir), SHA)
 

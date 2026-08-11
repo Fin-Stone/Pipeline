@@ -381,37 +381,37 @@ class TestPaymentsTheBankDidNotName:
         ]
 
     def test_an_unnamed_direct_debit_is_still_found(self):
-        series = find_series(self._yearly("GIRO PAYMENTS / COLLECTIONS VIA GIRO", -82600))
+        series = find_series(self._yearly("GIRO PAYMENTS / COLLECTIONS VIA GIRO", -60000))
         assert len(series) == 1
         assert series[0].period_label == "yearly"
         assert series[0].merchant_norm == "Unnamed direct debit"
 
     def test_a_reference_stuck_to_the_rail_is_still_the_rail(self):
         """The same mechanism arrives bare and with the bank's own reference."""
-        rows = self._yearly("GIRO PAYMENTS / COLLECTIONS VIA GIRO H123456789", -82600)
+        rows = self._yearly("GIRO PAYMENTS / COLLECTIONS VIA GIRO H123456789", -60000)
         assert len(find_series(rows)) == 1
 
     def test_the_named_half_and_the_unnamed_half_are_one_policy(self):
         """The case that was actually missed: the same premium filed under the
         insurer on two statements and under the rail on two others, so neither
         half reached the three occurrences a series needs."""
-        rows = self._yearly("ACME", -82600, years=2, txn_from=1)
+        rows = self._yearly("ACME LIFE", -60000, years=2, txn_from=1)
         rows += [
             Occurrence(txn_id=10 + i, merchant_norm="GIRO PAYMENTS / COLLECTIONS VIA GIRO",
-                       amount_minor=-82600, posted_date=date(2025 + i, 6, 15))
+                       amount_minor=-60000, posted_date=date(2025 + i, 6, 15))
             for i in range(2)
         ]
         series = find_series(rows)
         assert len(series) == 1
         assert series[0].occurrences == 4
         # Labelled with the name the bank did print, where it printed one.
-        assert series[0].merchant_norm == "ACME"
+        assert series[0].merchant_norm == "ACME LIFE"
 
     def test_a_named_payee_on_a_rail_prefix_is_not_grouped_by_amount(self):
-        """`FAST PRU- INSURANCE PREMIUM` does name a payee."""
+        """`FAST ACME- INSURANCE PREMIUM` does name a payee."""
         from app.domain.recurrence import is_rail
 
-        assert is_rail("FAST PRU- INSURANCE PREMIUM") is False
+        assert is_rail("FAST ACME- INSURANCE PREMIUM") is False
         assert is_rail("FAST") is True
 
 
@@ -422,7 +422,7 @@ class TestWhatAPersonKnowsThatTheRowsDoNot:
     monthly premium into three quarterly ones. The operator has the answer.
     """
 
-    def _rows(self, days, amount=-27386, merchant="SOME INSURER"):
+    def _rows(self, days, amount=-24000, merchant="SOME INSURER"):
         return [
             Occurrence(txn_id=i, posted_date=day, amount_minor=amount, merchant_norm=merchant)
             for i, day in enumerate(days)
@@ -432,14 +432,14 @@ class TestWhatAPersonKnowsThatTheRowsDoNot:
         rows = self._rows([date(2024, 6, 15), date(2025, 6, 15)])
         assert find_series(rows) == []
 
-        series = declared_series(rows, "SOME INSURER", 27386, "yearly")
+        series = declared_series(rows, "SOME INSURER", 24000, "yearly")
         assert series.occurrences == 2
         assert series.period_label == "yearly"
 
     def test_one_payment_is_enough(self):
         """Nothing but a person can know a plan started last month, and
         refusing to record it is refusing the only source that knows."""
-        series = declared_series(self._rows([date(2026, 7, 1)]), "SOME INSURER", 27386, "monthly")
+        series = declared_series(self._rows([date(2026, 7, 1)]), "SOME INSURER", 24000, "monthly")
         assert series.occurrences == 1
         assert series.expected_next == date(2026, 7, 31)
 
@@ -448,38 +448,38 @@ class TestWhatAPersonKnowsThatTheRowsDoNot:
         period to the one the dates imply would make this useless for the
         irregular billing it exists for."""
         rows = self._rows([date(2025, 1, 10), date(2026, 1, 10)])
-        assert declared_series(rows, "SOME INSURER", 27386, "monthly").period_label == "monthly"
+        assert declared_series(rows, "SOME INSURER", 24000, "monthly").period_label == "monthly"
 
     def test_confidence_still_describes_the_gaps_and_nothing_else(self):
         """It means "how little the gaps varied". Two dates have one gap, which
         never varies, and reporting 1.0 would dress an assertion up as the
         strongest evidence available."""
         rows = self._rows([date(2024, 6, 15), date(2025, 6, 15)])
-        assert declared_series(rows, "SOME INSURER", 27386, "yearly").confidence == 0.0
+        assert declared_series(rows, "SOME INSURER", 24000, "yearly").confidence == 0.0
 
         # Exactly thirty days apart, because calendar months are 31 and 28 and
         # that variation is real: those gaps score 0.661, which is the number
         # doing its job rather than a problem with it.
         start = date(2026, 1, 10)
         steady = self._rows([start + timedelta(days=30 * i) for i in range(3)])
-        assert declared_series(steady, "SOME INSURER", 27386, "monthly").confidence == 1.0
+        assert declared_series(steady, "SOME INSURER", 24000, "monthly").confidence == 1.0
 
     def test_it_gathers_the_merchant_not_the_one_charge(self):
         """The mark is on a merchant, and this is the difference that has to be
         visible before it is written rather than found in a monthly total."""
         rows = self._rows([date(2024, 6, 15), date(2025, 6, 15), date(2026, 6, 15)])
         rows += self._rows([date(2025, 8, 1)], amount=-1200, merchant="SOMEWHERE ELSE")
-        assert len(matching(rows, "SOME INSURER", 27386)) == 3
+        assert len(matching(rows, "SOME INSURER", 24000)) == 3
 
     def test_a_price_that_crept_is_still_the_same_commitment(self):
         """The ordinary amount tolerance, so a premium that rose with tax does
         not fall out of the series a person marked."""
-        rows = self._rows([date(2024, 6, 15)]) + self._rows([date(2025, 6, 15)], amount=-28000)
-        assert len(matching(rows, "SOME INSURER", 27386)) == 2
+        rows = self._rows([date(2024, 6, 15)]) + self._rows([date(2025, 6, 15)], amount=-25000)
+        assert len(matching(rows, "SOME INSURER", 24000)) == 2
 
     def test_an_unrelated_amount_is_not_swept_in(self):
         rows = self._rows([date(2024, 6, 15)]) + self._rows([date(2025, 6, 15)], amount=-90000)
-        assert len(matching(rows, "SOME INSURER", 27386)) == 1
+        assert len(matching(rows, "SOME INSURER", 24000)) == 1
 
     def test_a_merchant_with_no_rows_left_declares_nothing(self):
         """A reparse can rename a merchant. Returning a series over no rows
@@ -492,4 +492,4 @@ class TestWhatAPersonKnowsThatTheRowsDoNot:
         fails on submit."""
         rows = self._rows([date(2026, 1, 10), date(2026, 2, 10)])
         for label in PERIOD_LABELS:
-            assert declared_series(rows, "SOME INSURER", 27386, label).period_label == label
+            assert declared_series(rows, "SOME INSURER", 24000, label).period_label == label

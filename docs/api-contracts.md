@@ -537,7 +537,7 @@ Says something **is** a subscription, on a period the detector cannot infer.
 `201`.
 
 ```json
-{ "merchant": "...", "amount_centre_minor": 27386, "period": "yearly", "marked": true }
+{ "merchant": "...", "amount_centre_minor": 24000, "period": "yearly", "marked": true }
 ```
 
 - **Because the detector's bar is right and still leaves real commitments
@@ -572,10 +572,10 @@ Says something **is** a subscription, on a period the detector cannot infer.
 What marking that row would gather, **before anything is written**.
 
 ```json
-{ "merchant": "...", "amount_centre_minor": 27386, "period": "yearly",
+{ "merchant": "...", "amount_centre_minor": 24000, "period": "yearly",
   "expected_gap_days": 365, "monthly_equivalent_minor": 2282,
   "expected_next": "2026-06-15", "gap_days": [365],
-  "matches": [{ "txn_id": 1, "posted_date": "2024-06-15", "amount_minor": -27386 }] }
+  "matches": [{ "txn_id": 1, "posted_date": "2024-06-15", "amount_minor": -24000 }] }
 ```
 
 - **A mark reaches the merchant, not the charge that was clicked** — every row

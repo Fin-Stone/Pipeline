@@ -102,8 +102,8 @@ _SKIP = re.compile(
 #: Position, because the rule this replaced dropped any short single-token
 #: line — which is what the strip looks like once it is broken into rows, and
 #: is also exactly what DBS trails under a GIRO collection to say who it paid.
-#: On one statement that rule destroyed 37 lines reading `ACME`, `ACME LIFE`
-#: and the policy numbers beside them, leaving a description of nothing but the
+#: On one statement that rule destroyed 37 lines — each an insurer's name, or a
+#: policy number beside it — leaving a description of nothing but the
 #: mechanism. Length could never tell those apart; where they sit always could.
 MARGIN_X = 30.0
 

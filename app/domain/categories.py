@@ -6,8 +6,8 @@ fast and free and explainable. A rule that fires can always be pointed at,
 which is what makes a wrong category a fixable bug rather than an argument
 with a model.
 
-**The merchant is a strong prior, not an answer.** `IKEA-RESTAURANT` is in this
-corpus and is Dining, not Furnishing. So rules match on a pattern and carry a
+**The merchant is a strong prior, not an answer.** `IKEA-RESTAURANT` is Dining,
+not Furnishing, though the name says furniture. So rules match on a pattern and carry a
 weight, the most specific match wins, and where two fire with equal claim the
 row is left for a human rather than decided by declaration order.
 
@@ -284,7 +284,7 @@ def redact_description(raw: str) -> str:
     A counterparty is sometimes not answerable on its own. DBS prints a direct
     debit as the scheme's own code — `PACS BNC-P/` names nobody, and a model
     asked to categorise it is exactly as stuck as a person reading it. The line
-    the bank prints underneath says `ACME LIFE`, and that is the whole answer.
+    the bank prints underneath names the insurer, and that is the whole answer.
 
     So one line may travel, under two rules that between them decide what is
     left of it:
@@ -395,7 +395,7 @@ def propose(rows, rules=(), *, suggest=(), by: str = "value") -> list[Proposal]:
         seen = lines.get(name)
         sample = seen.most_common(1)[0][0] if seen else ""
         # Sent only where the line does not simply begin with the name. A
-        # merchant that reads `PHARMACY EXAMPLE MALL CARD PAYMENT` has already
+        # merchant that reads `GUARDIAN PHARMACY CARD PAYMENT` has already
         # said everything on the line, and shipping the tail of it pads every
         # proposal to no purpose — on this ledger that was 245 of 286.
         #

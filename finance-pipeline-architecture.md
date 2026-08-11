@@ -232,8 +232,9 @@ a real MCC would be worth more than any amount of rule authoring.
 **The bootstrap is layered, cheapest and most explainable first**, mirroring §3.1 itself:
 
 1. **Open POI data** — OpenStreetMap and Wikidata, name to shop type. Free, self-hostable,
-   and it will clear the recognisable chains. It will not touch `BUS/MRT 100200300` or
-   `MALL EXAMPLE DUMPLING`, and the local tail is most of the *rows* in this ledger.
+   and it will clear the recognisable chains. It will not touch a transit fare tagged with
+   a terminal id, or a hawker stall truncated mid-word by the acquirer's field width, and
+   the local tail is most of the *rows* in this ledger.
 2. **Community rule sets** — Firefly III and similar. Worth harvesting, but overwhelmingly
    US and EU merchants, so expect thin coverage of a Singaporean corpus.
 3. **Models, for the residual only.**
@@ -271,7 +272,7 @@ One line, the commonest for that counterparty, under three constraints:
 - **Every run of digits is masked to a single `#`.** One mark per run rather than per digit,
   so the *length* of a policy number does not survive either. A reference identifies a
   customer and describes no merchant.
-- **Sent only where the line does not begin with the name.** `PHARMACY EXAMPLE MALL CARD
+- **Sent only where the line does not begin with the name.** `GUARDIAN PHARMACY CARD
   PAYMENT` has already said everything the name says. On this ledger that dropped 245 of 286
   samples, leaving the case that motivated it: the bank's vocabulary printed *before* the
   payee, where normalisation strips it precisely because it is not the payee.

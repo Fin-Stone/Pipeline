@@ -261,7 +261,7 @@ class TestSanitisation:
 class TestTheSampleLine:
     """A counterparty is sometimes unanswerable on its own.
 
-    `PACS BNC-P/` is what DBS calls a Acme Life premium, and a model asked to
+    `PACS BNC-P/` is what DBS calls an insurance premium, and a model asked to
     categorise that name is exactly as stuck as the person reading it. The line
     underneath says who was paid — so one line may go, stripped of everything
     that says *which customer* rather than *what merchant*.
@@ -270,7 +270,7 @@ class TestTheSampleLine:
     GIRO = "GIRO Payments / Collections via GIRO ACME LIFE PACS BNC-P/N12345678"
 
     def test_the_line_that_names_the_payee_travels(self):
-        result = propose([("PACS BNC-P/", -27386, self.GIRO)] * 4)[0]
+        result = propose([("PACS BNC-P/", -20000, self.GIRO)] * 4)[0]
         assert "ACME LIFE" in result.sample_description
 
     def test_every_number_is_masked(self):
@@ -303,9 +303,9 @@ class TestTheSampleLine:
         assert propose([("SHENG SIONG", -2000, "Sheng Siong")] * 3)[0].sample_description == ""
 
     def test_nor_is_the_name_with_the_bank_s_tail_on_it(self):
-        """`PHARMACY EXAMPLE MALL CARD PAYMENT` has said everything the name
+        """`GUARDIAN PHARMACY CARD PAYMENT` has said everything the name
         says. On the real ledger this was 245 of 286 proposals."""
-        rows = [("PHARMACY EXAMPLE MALL", -2000, "PHARMACY EXAMPLE MALL CARD PAYMENT")] * 3
+        rows = [("GUARDIAN PHARMACY", -2000, "GUARDIAN PHARMACY CARD PAYMENT")] * 3
         assert propose(rows)[0].sample_description == ""
 
     def test_punctuation_normalisation_dropped_is_not_a_difference(self):
@@ -318,7 +318,7 @@ class TestTheSampleLine:
         """The case the name cannot express. `ACME LIFE PACS BNC-P/` does not
         say that this is a standing arrangement; the words in front of it do,
         and normalisation drops them because they are not the payee."""
-        rows = [("ACME LIFE PACS BNC-P/", -27386, self.GIRO)] * 4
+        rows = [("ACME LIFE PACS BNC-P/", -20000, self.GIRO)] * 4
         assert propose(rows)[0].sample_description.startswith("GIRO PAYMENTS")
 
     def test_the_commonest_line_stands_for_the_merchant(self):

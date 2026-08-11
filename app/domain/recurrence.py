@@ -162,7 +162,7 @@ def is_rail(merchant_norm: str, description: str = "") -> bool:
     rail arrives both bare and with the bank's reference stuck to the end —
     `GIRO PAYMENTS / COLLECTIONS VIA GIRO` and the same followed by a reference
     are one mechanism and neither names anybody. Dropping only tokens carrying
-    a digit keeps it narrow: `FAST PRU- INSURANCE PREMIUM` does name a payee
+    a digit keeps it narrow: `FAST ACME- INSURANCE PREMIUM` does name a payee
     and survives intact.
 
     From the **raw line**: a GIRO collection is a direct debit whatever code

@@ -1077,7 +1077,7 @@ class TestSayingItIsASubscription:
 
     MERCHANT = "SOME INSURER"
 
-    def _seed(self, repository, dates, amount=-27386):
+    def _seed(self, repository, dates, amount=-24000):
         from datetime import date, datetime, timezone
 
         from app.domain.models import DEPOSIT
@@ -1124,7 +1124,7 @@ class TestSayingItIsASubscription:
     def _mark(self, client, period="yearly", **extra):
         return client.post(f"{PREFIX}/recurring/mark", params={
             "profile": "dummy", "merchant": self.MERCHANT,
-            "amount_centre_minor": 27386, "period": period, **extra,
+            "amount_centre_minor": 24000, "period": period, **extra,
         })
 
     def test_two_occurrences_are_a_subscription_when_a_person_says_so(
@@ -1157,7 +1157,7 @@ class TestSayingItIsASubscription:
         before = self._recurring(client)["monthly_commitment_minor"]
         self._mark(client)
         after = self._recurring(client)["monthly_commitment_minor"]
-        assert after - before == round(27386 / 12)
+        assert after - before == round(24000 / 12)
 
     def test_a_marked_series_is_not_counted_twice(self, client, repository):
         """Marking something the detector already found must not produce both
@@ -1197,7 +1197,7 @@ class TestSayingItIsASubscription:
         self._mark(client)
         body = client.request("DELETE", f"{PREFIX}/recurring/mark", params={
             "profile": "dummy", "merchant": self.MERCHANT,
-            "amount_centre_minor": 27386,
+            "amount_centre_minor": 24000,
         }).json()
 
         assert body["unmarked"] is True
@@ -1299,12 +1299,12 @@ class TestSeeingWhatAMarkWouldGather:
 
     def test_it_shows_every_row_the_mark_would_take(self, client, repository):
         self._seed(repository, [
-            (date(2024, 6, 15), -27386, self.MERCHANT),
-            (date(2025, 6, 15), -27386, self.MERCHANT),
+            (date(2024, 6, 15), -24000, self.MERCHANT),
+            (date(2025, 6, 15), -24000, self.MERCHANT),
             (date(2025, 8, 1), -1200, "SOMEWHERE ELSE"),
         ])
         rows = client.get(f"{PREFIX}/transactions", params={"profile": "dummy"}).json()
-        chosen = next(r for r in rows["transactions"] if r["amount_minor"] == -27386)
+        chosen = next(r for r in rows["transactions"] if r["amount_minor"] == -24000)
 
         body = self._candidates(client, chosen["id"]).json()
         assert len(body["matches"]) == 2
@@ -1315,8 +1315,8 @@ class TestSeeingWhatAMarkWouldGather:
         """The gaps beside the period is how somebody notices they picked
         monthly for something billed yearly."""
         self._seed(repository, [
-            (date(2024, 6, 15), -27386, self.MERCHANT),
-            (date(2025, 6, 15), -27386, self.MERCHANT),
+            (date(2024, 6, 15), -24000, self.MERCHANT),
+            (date(2025, 6, 15), -24000, self.MERCHANT),
         ])
         rows = client.get(f"{PREFIX}/transactions", params={"profile": "dummy"}).json()
         chosen = rows["transactions"][0]
@@ -1324,10 +1324,10 @@ class TestSeeingWhatAMarkWouldGather:
         body = self._candidates(client, chosen["id"], period="monthly").json()
         assert body["expected_gap_days"] == 30
         assert body["gap_days"] == [365]
-        assert body["monthly_equivalent_minor"] == 27386
+        assert body["monthly_equivalent_minor"] == 24000
 
     def test_nothing_is_written(self, client, repository):
-        self._seed(repository, [(date(2024, 6, 15), -27386, self.MERCHANT)])
+        self._seed(repository, [(date(2024, 6, 15), -24000, self.MERCHANT)])
         rows = client.get(f"{PREFIX}/transactions", params={"profile": "dummy"}).json()
         self._candidates(client, rows["transactions"][0]["id"])
         listed = client.get(f"{PREFIX}/recurring/marked", params={"profile": "dummy"}).json()
@@ -1340,7 +1340,7 @@ class TestSeeingWhatAMarkWouldGather:
         assert self._candidates(client, 999999).status_code == 404
 
     def test_an_invented_period_is_refused(self, client, repository):
-        self._seed(repository, [(date(2024, 6, 15), -27386, self.MERCHANT)])
+        self._seed(repository, [(date(2024, 6, 15), -24000, self.MERCHANT)])
         rows = client.get(f"{PREFIX}/transactions", params={"profile": "dummy"}).json()
         response = self._candidates(client, rows["transactions"][0]["id"], period="often")
         assert response.status_code == 422

@@ -2,17 +2,18 @@
 
 Layer one of the bootstrap in §3.1a. Two things it deliberately is not:
 
-**Not scraped POI data.** Matching a statement descriptor like
-`MALL EXAMPLE DUMPLING` to an OpenStreetMap entry is its own problem, and a
-lookup at classify time would put a network call between the operator and their
-own ledger — which §5.2 forbids in a self-hosted install. A curated list
-versioned in git does the same job, ships with the product, and can be read.
+**Not scraped POI data.** Matching a typical stall descriptor — a mall code, a
+unit number and a trading name truncated mid-word by the acquirer's field width
+— to an OpenStreetMap entry is its own problem, and a lookup at classify time
+would put a network call between the operator and their own ledger, which §5.2
+forbids in a self-hosted install. A curated list versioned in git does the same
+job, ships with the product, and can be read.
 
 **Not a claim to be right.** These are the well-known chains, and the tail of
-any real ledger is local: this corpus contains `TS/Example Diner` and
-`BUS/MRT 100200300`, neither of which any general dataset would hold. The seed
-exists to take the obvious cases off the table so that judgement — human or
-model — is spent on the rest.
+any real ledger is local: a coffee-shop stall trading under a food-court
+operator's prefix, or a transit fare tagged with the id of the terminal that
+took it. No general dataset holds either. The seed exists to take the obvious
+cases off the table so that judgement — human or model — is spent on the rest.
 
 Patterns are matched against `counterparty_norm`, case-insensitively, and the
 narrower one wins on its own (see `categories.Rule.specificity`), which is what
