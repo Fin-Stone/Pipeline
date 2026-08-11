@@ -58,13 +58,21 @@ log = logging.getLogger("finstone.parsers.trust")
 
 OPENING_LABEL = "previous balance"
 
-#: A description-only line this far *below* a row belongs to that row.
+#: A description-only line this far below the last line of a row belongs to
+#: that row.
 #:
-#: Measured from the statements: a row's wrapped parts sit about 6pt from its
-#: dated line, the next row's lead-in about 13pt, and the row pitch is about
-#: 25pt. Anything past this threshold is treated as a lead-in for the row that
-#: follows, which is how foreign-currency rows print their merchant.
-CONTINUATION_GAP = 9.0
+#: Measured from the statements: a card statement's wrapped parts sit 6.000pt
+#: apart, a savings statement's 9.005pt, the next row's lead-in about 13pt, and
+#: the row pitch 24.75pt and up. Anything past this threshold is treated as a
+#: lead-in for the row that follows, which is how foreign-currency rows print
+#: their merchant.
+#:
+#: It was 9.0, which is *below* the 9.004565pt a savings statement actually
+#: wraps at, so a merchant's address never attached to its own row at all — it
+#: was held over and prepended to the next one instead. Set above the widest
+#: wrap and well below the narrowest lead-in, so neither end is decided by a
+#: rounding error.
+CONTINUATION_GAP = 11.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,10 +125,22 @@ def assemble_rows(lines: list[Line], bands: ColumnBands) -> list[Row]:
     on one, the date and amounts on the next, and the exchange rate on a third.
     A description carried above its own row is held and attached to the dated
     row that follows it.
+
+    The distance to a continuation is measured from the last line already
+    attached to the row rather than from the row itself, because a merchant's
+    address wraps onto two lines about 9pt apart: measuring from the row put the
+    second line 18pt away, past the threshold, so it was held over and prepended
+    to the next row instead — "SAMPLE CIRCLE #01-01 GROCER HUB SINGAPORE
+    000000 ..ID:T00XX0000X Interest" was one month's interest credit. A held
+    fragment is also required to sit just above the row that claims it, and on
+    the same page, or anything left over attaches to whatever comes next.
     """
     rows: list[Row] = []
-    pending: list[str] = []
-    last_row_top: float | None = None
+    #: Held fragments with where they were printed, so a row only claims one
+    #: that is genuinely above it.
+    pending: list[tuple[int, float, str]] = []
+    #: Page and baseline of the last line belonging to the row being built.
+    anchor: tuple[int, float] | None = None
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -147,23 +167,35 @@ def assemble_rows(lines: list[Line], bands: ColumnBands) -> list[Row]:
         # the adapter cannot price is not a row.
         if not sgd_text:
             if description and not date_text:
-                if rows and last_row_top is not None and 0 < line.top - last_row_top <= CONTINUATION_GAP:
+                wraps_under = (
+                    rows and anchor is not None
+                    and line.page_number == anchor[0]
+                    and 0 < line.top - anchor[1] <= CONTINUATION_GAP
+                )
+                if wraps_under:
                     # A long merchant name wrapping under its own row. Without
                     # this it would be held over and prepended to the *next*
                     # row's description, corrupting both.
                     rows[-1] = _with_extra_description(rows[-1], description)
+                    # The wrap continues from here, so a second line is measured
+                    # against this one and not against the row.
+                    anchor = (line.page_number, line.top)
                 else:
                     # Further away: a description printed above the row it
                     # belongs to, which is how foreign-currency rows print.
-                    pending.append(description)
+                    pending.append((line.page_number, line.top, description))
             continue
 
-        if pending:
-            description = " ".join([*pending, description]).strip()
-            pending = []
+        lead_ins = [
+            text for page, top, text in pending
+            if page == line.page_number and 0 < line.top - top <= CONTINUATION_GAP
+        ]
+        if lead_ins:
+            description = " ".join([*lead_ins, description]).strip()
+        pending = []
 
         rows.append(Row(line, date_text, description, fcy_text, sgd_text))
-        last_row_top = line.top
+        anchor = (line.page_number, line.top)
     return rows
 
 

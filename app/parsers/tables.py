@@ -84,10 +84,15 @@ class TableSpec:
     columns: tuple[Column, ...]
     #: How a description-only line is attached.
     #:
-    #: A distance means "belongs to the row above if within this many points,
-    #: otherwise it is a lead-in for the row below" — Trust prints merchant
-    #: names above their row as well as below, so it needs the distinction and
-    #: its wraps sit ~6pt away against a 25pt pitch.
+    #: A distance means "belongs to the row above if within this many points of
+    #: the last line already attached to it, otherwise it is a lead-in for the
+    #: row below" — Trust prints merchant names above their row as well as
+    #: below, so it needs the distinction and its wraps sit ~6pt away against a
+    #: 25pt pitch.
+    #:
+    #: Measured line to line rather than from the row, so this is the pitch of
+    #: one wrapped line and not the total depth of the wrap. A description that
+    #: runs onto three lines is as attachable as one that runs onto one.
     #:
     #: `None` means "always belongs to the row above". Layouts that only ever
     #: wrap downwards want this: DBS trails up to four reference lines under a
@@ -260,13 +265,41 @@ def assemble_rows(
     Getting the "below" case wrong is not cosmetic: the fragment is otherwise
     carried forward onto the *next* row, corrupting two descriptions, and
     `description_norm` feeds the dedupe key.
+
+    Three rules keep a fragment with the row that printed it, and each exists
+    because a real statement broke without it:
+
+    - **The gap is measured from the last line attached to the row, not from
+      the row itself.** A description that wraps onto three lines steps down one
+      line at a time, so measuring from the row makes the distance accumulate
+      and the wrap stops attaching part-way through. OCBC trails a card number,
+      then the channel, then the country under a bill payment, each ~11pt below
+      the last: the first attached, the second was held over and prepended to
+      the *next* row, and the third was dropped.
+    - **A fragment stays on its own page.** `pending` used to survive a page
+      break, and `line.top` resets at the top of a page, so the previous page's
+      footer read as sitting "above" the first row of the next one — OCBC card
+      statements imported "HCBS250101(000000) 7624 LAZADA SINGAPORE" as a
+      merchant.
+    - **A lead-in must actually be above its row.** The distance test had no
+      lower bound, so anything left pending qualified however far below it sat.
     """
     rows: list[Row] = []
-    #: Carried with its position: a fragment only leads into a row it is near.
-    pending: list[tuple[float, str]] = []
-    last_top: float | None = None
+    #: Carried with its position: a fragment only leads into a row it is near,
+    #: on the same page.
+    pending: list[tuple[int, float, str]] = []
+    #: Page and baseline of the last line belonging to the row being built —
+    #: the row itself, or the last fragment attached under it.
+    anchor: tuple[int, float] | None = None
     text_names = [c.name for c in spec.text_columns]
     value_names = [c.name for c in spec.value_columns]
+
+    def wraps_under(line: Line, page: int, top: float) -> bool:
+        """Is this line close enough under (page, top) to be its continuation?"""
+        return (
+            line.page_number == page and line.top > top
+            and (spec.continuation_gap is None or line.top - top <= spec.continuation_gap)
+        )
 
     for line in lines:
         if not line.text.strip() or (skip is not None and skip.match(line.text)):
@@ -279,18 +312,16 @@ def assemble_rows(
             fragment = " ".join(cells.get(name, "") for name in text_names).strip()
             if not fragment:
                 continue
-            attaches = rows and last_top is not None and line.top > last_top and (
-                spec.continuation_gap is None
-                or line.top - last_top <= spec.continuation_gap
-            )
-            if attaches:
+            if rows and anchor is not None and wraps_under(line, *anchor):
                 previous = rows[-1]
                 rows[-1] = Row(
                     previous.line, previous.cells,
                     previous.fragments + (fragment,), previous.lead_ins,
                 )
+                # The wrap continues from here, not from the row.
+                anchor = (line.page_number, line.top)
             else:
-                pending.append((line.top, fragment))
+                pending.append((line.page_number, line.top, fragment))
             continue
 
         # A fragment above the row joins it only if it is as close as one below
@@ -298,12 +329,13 @@ def assemble_rows(
         # printed over the first row of its section — MariBank's "Purchase" —
         # became the start of that row's description.
         lead_ins = tuple(
-            text for top, text in pending
-            if spec.continuation_gap is None or line.top - top <= spec.continuation_gap
+            text for page, top, text in pending
+            if page == line.page_number and 0 < line.top - top
+            and (spec.continuation_gap is None or line.top - top <= spec.continuation_gap)
         )
         rows.append(Row(line, cells, lead_ins, len(lead_ins)))
         pending = []
-        last_top = line.top
+        anchor = (line.page_number, line.top)
 
     return rows
 

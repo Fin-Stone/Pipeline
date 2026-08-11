@@ -163,7 +163,7 @@ def two_date_statement(
     period: str = "1 Jun 2024 - 30 Jun 2024",
     closing_label: str = "Total outstanding balance",
     lead_ins: dict[int, str] | None = None,
-    continuations: dict[int, str] | None = None,
+    continuations: dict[int, str | list[str]] | None = None,
 ) -> list[tuple[float, float, str]]:
     """Build a statement whose table carries transaction *and* posting dates.
 
@@ -171,6 +171,10 @@ def two_date_statement(
     `lead_ins` and `continuations` map a row index to text printed just above
     or just below that row — how long merchant names and foreign-currency
     details are actually laid out.
+
+    A continuation may be a list, for the wrap that runs onto more than one
+    line: an address spilling onto a second line puts it two wrap-offsets below
+    its row, which is the case that used to be held over onto the next row.
     """
     lead_ins = lead_ins or {}
     continuations = continuations or {}
@@ -216,7 +220,9 @@ def two_date_statement(
         if description:
             placements.append((TWO_DESC_X, top, description))
         if index in continuations:
-            placements.append((TWO_DESC_X, top + WRAP_OFFSET, continuations[index]))
+            extra = continuations[index]
+            for offset, text in enumerate([extra] if isinstance(extra, str) else extra, start=1):
+                placements.append((TWO_DESC_X, top + WRAP_OFFSET * offset, text))
         top += ROW_PITCH
 
     if closing is not None:

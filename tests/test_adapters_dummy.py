@@ -80,6 +80,23 @@ class TestTrustSavings:
             t.amount_minor for t in account.txns
         ) == account.closing_balance_minor
 
+    def test_a_merchants_address_stays_on_its_own_row(self, dummy_root):
+        """The address wraps onto a second line 9.005pt under the first, against
+        a threshold of exactly 9.0 measured from the row.
+
+        So neither line attached, both were held over, and the row beneath —
+        that month's interest credit — was recorded as "SAMPLE CIRCLE #01-01
+        GROCER HUB SINGAPORE 000000 ..ID:T00XX0000X Interest". Two
+        descriptions wrong from one wrap, and `description_norm` feeds the
+        dedupe key.
+        """
+        account = TrustAccountAdapter().parse(_require(dummy_root, TRUST_ACC_2024)).accounts[0]
+        by_start = {t.description_raw.split()[0]: t.description_raw for t in account.txns}
+
+        assert by_start["Interest"] == "Interest"
+        assert "SAMPLE CIRCLE" in by_start["NTUC"]
+        assert "ID:T00XX0000X" in by_start["NTUC"]
+
     def test_both_years_route_to_the_same_adapter(self, dummy_root):
         """Layout identity must survive a change in pocket count (1 vs 3)."""
         registry = build_default_registry()
@@ -213,7 +230,8 @@ class TestDbsSavings:
         """DBS writes who a direct debit paid on the lines *under* it.
 
         A GIRO collection reads `GIRO Payments / Collections via GIRO` on the
-        row and then `ACME`, then the policy number, each on its own line. Those
+        row and then the insurer's name, then the policy number, each on its
+        own line. Those
         were being dropped as page furniture — they are short single-token
         lines, which is also what the rotated registration strip down the left
         margin looks like once it is broken into rows. Thirty-seven of them
@@ -518,6 +536,33 @@ class TestOcbcSavings:
         account = self._account(dummy_root)
         assert any("360 CC SPEND BONUS" in t.description_raw for t in account.txns)
 
+    def test_a_reference_wrapping_onto_three_lines_is_kept_whole(self, dummy_root):
+        """OCBC trails the counterparty under a transfer across three lines,
+        each ~10.8pt below the last.
+
+        The gap was measured from the row rather than from the last line
+        attached to it, so it accumulated: only the first line attached, the
+        middle was dropped and the last was prepended to the row below —
+        "SALA Salary INTEREST CREDIT" was a month's interest credit.
+        """
+        account = self._account(dummy_root)
+        transfer = next(t for t in account.txns if "PAYMENT/TRANSFER" in t.description_raw)
+        assert transfer.description_raw == "PAYMENT/TRANSFER TRBU from DANIEL SIM SALA Salary"
+
+        # And the row beneath it carries none of that.
+        interest = next(t for t in account.txns if t.description_raw.startswith("INTEREST"))
+        assert interest.description_raw == "INTEREST CREDIT"
+
+    def test_the_posting_lag_is_declared(self, dummy_root):
+        """OCBC credits month-end interest with the last day of the month as its
+        value date and the next day as its posting date, counted in the balance
+        the statement carries forward. June's landed on the 30th, July's on
+        1 August — and quarantined the statement until the layout said so."""
+        from app.parsers.ocbc.acc import OcbcAccountAdapter
+
+        parsed = OcbcAccountAdapter().parse(_require(dummy_root, OCBC_ACC))
+        assert parsed.posting_grace_days > 0
+
     def test_the_card_statement_does_not_claim_it(self, dummy_root):
         """Both are OCBC and both come off the same renderer, so the header
         lines are all that separate a savings statement from a card one."""
@@ -562,6 +607,26 @@ class TestOcbcCardVariants:
             _require(dummy_root, "OCBC Bank/cc/0f16e5c9.pdf")
         ).accounts[0]
         assert any(t.amount_minor > 0 for t in account.txns)
+
+    @pytest.mark.parametrize("relpath", [
+        "OCBC Bank/cc/0f16e5c9.pdf",
+        "OCBC Bank/cc/5d61df4f.pdf",
+    ])
+    def test_a_page_footer_is_not_part_of_a_merchant(self, dummy_root, relpath):
+        """OCBC prints a document reference in the footer of every page.
+
+        `line.top` restarts at the top of each page, so a footer at y=823 read
+        as sitting "above" the first row of the page after it and was held to
+        lead into it: "HCBS250101(000000) 7624 LAZADA SINGAPORE" went into the
+        ledger as a merchant, and `description_norm` feeds the dedupe key.
+        """
+        from app.parsers.ocbc.cc import OcbcCardAdapter
+
+        parsed = OcbcCardAdapter().parse(_require(dummy_root, relpath))
+        for account in parsed.accounts:
+            for txn in account.txns:
+                assert "HCBS" not in txn.description_raw
+                assert "PAGE" not in txn.description_raw.upper()
 
 
 class TestUnregisteredLayouts:

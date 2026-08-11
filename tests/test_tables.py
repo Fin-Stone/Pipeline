@@ -145,6 +145,77 @@ class TestDescriptionWrapping:
         row = tables.assemble_rows(lines, spec)[0]
         assert row.description("description") == "ABOVE OWN BELOW"
 
+    def test_a_wrap_running_onto_several_lines_attaches_whole(self):
+        """OCBC's geometry: a bill payment trails the card number it settled,
+        then the channel, then the country, each ~10.8pt under the last against
+        a 14pt threshold.
+
+        The gap used to be measured from the *row*, so it accumulated: the first
+        line attached at 10.8, the second was already 21.6 away and fell out.
+        The lines that fell out did not vanish quietly — the last of them was
+        prepended to the next row, so one wrap corrupted two descriptions.
+        """
+        spec = _dbs_spec(continuation_gap=14.0)
+        lines = [
+            _line([("31/07/2026", 45.4, 90.4), ("BILL", 113.1, 135.0),
+                   ("PAYMENT", 137.0, 175.0), ("1,577.07", 367.4, 394.9)], top=454.1),
+            _line([("5555555555554444", 113.1, 200.0)], top=464.9),
+            _line([("INTERNET", 113.1, 160.0), ("BANKING", 162.0, 205.0)], top=475.7),
+            _line([("SINGAPORE", 113.1, 170.0)], top=486.5),
+            _line([("01/08/2026", 45.4, 90.4), ("INTEREST", 113.1, 160.0),
+                   ("0.18", 451.5, 474.0)], top=499.4),
+        ]
+        rows = tables.assemble_rows(lines, spec)
+        assert len(rows) == 2
+        assert rows[0].description("description") == (
+            "BILL PAYMENT 5555555555554444 INTERNET BANKING SINGAPORE"
+        )
+        # And the row below inherits none of it.
+        assert rows[1].description("description") == "INTEREST"
+
+    def test_a_fragment_on_the_previous_page_is_not_a_lead_in(self):
+        """`line.top` restarts at the top of each page, so a footer at y=823 read
+        as sitting "above" a row at y=158 on the page after it. OCBC card
+        statements imported their own page footer as part of a merchant name."""
+        spec = _dbs_spec(continuation_gap=7.0)
+        lines = [
+            _line([("01/12/2021", 45.4, 90.4), ("First", 113.1, 140.1),
+                   ("10.00", 367.4, 394.9)], top=158.8, page=1),
+            _line([("HCBS250101(000000)", 113.1, 220.0)], top=823.2, page=1),
+            _line([("02/12/2021", 45.4, 90.4), ("LAZADA", 113.1, 160.0),
+                   ("74.51", 367.4, 394.9)], top=158.8, page=2),
+        ]
+        rows = tables.assemble_rows(lines, spec)
+        assert rows[1].description("description") == "LAZADA"
+        assert "HCBS250101(000000)" not in rows[0].description("description")
+
+    def test_a_continuation_does_not_cross_a_page_break(self):
+        """The same guard from the other side: an unbounded gap must not let the
+        top of a new page attach to the last row of the one before it."""
+        spec = _dbs_spec(continuation_gap=None)
+        lines = [
+            _line([("01/12/2021", 45.4, 90.4), ("Advice", 113.1, 140.1),
+                   ("321.90", 367.4, 394.9)], top=100.0, page=1),
+            _line([("PROSE", 113.1, 150.0)], top=140.0, page=2),
+        ]
+        rows = tables.assemble_rows(lines, spec)
+        assert rows[0].description("description") == "Advice"
+
+    def test_text_below_the_last_row_is_dropped_not_carried_forward(self):
+        """A fragment too far under its row and too far above the next belongs
+        to neither, and must end up in neither."""
+        spec = _dbs_spec(continuation_gap=9.0)
+        lines = [
+            _line([("01/12/2021", 45.4, 90.4), ("First", 113.1, 140.1),
+                   ("10.00", 367.4, 394.9)], top=252.0),
+            _line([("ORPHAN", 113.1, 160.0)], top=290.0),   # 38pt under, 40pt over
+            _line([("05/12/2021", 45.4, 90.4), ("Second", 113.1, 145.0),
+                   ("20.00", 367.4, 394.9)], top=330.0),
+        ]
+        rows = tables.assemble_rows(lines, spec)
+        assert rows[0].description("description") == "First"
+        assert rows[1].description("description") == "Second"
+
 
 class TestSkipping:
     def test_skipped_lines_never_become_rows(self):

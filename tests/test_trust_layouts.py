@@ -128,6 +128,42 @@ class TestWrappedDescriptions:
         ))
         assert "MERCHANT ABOVE" in rows[1].description
 
+    def test_an_address_wrapping_onto_two_lines_stays_with_its_row(self, tmp_path):
+        """A merchant's address wraps onto a second line 9.005pt under the
+        first, and the threshold was 9.0 — measured from the row, so the second
+        line sat 18pt away and fell out entirely.
+
+        Both halves then went wrong at once: the address was held over and
+        prepended to the row below, so a savings statement recorded its June
+        interest credit as "SAMPLE CIRCLE #01-01 GROCER HUB SINGAPORE 000000
+        ..ID:T00XX0000X Interest". Two descriptions corrupted, and
+        `description_norm` feeds the dedupe key.
+        """
+        rows = _rows(tmp_path, two_date_statement(
+            [("27 Jun", "27 Jun", "EXAMPLE ENTERPRISE MALL", "32.70"),
+             ("30 Jun", "30 Jun", "Interest", "1.16")],
+            continuations={0: ["SAMPLE CIRCLE #01-01 GROCER HUB", "000000 ..ID:T00XX0000X"]},
+        ))
+        wrapped, following = rows[1], rows[2]
+        assert wrapped.description == (
+            "EXAMPLE ENTERPRISE MALL SAMPLE CIRCLE #01-01 GROCER HUB 000000 ..ID:T00XX0000X"
+        )
+        assert following.description == "Interest"
+
+    def test_a_held_fragment_does_not_attach_to_a_distant_row(self, tmp_path):
+        """What is left pending has to sit just above the row that claims it.
+        Without a lower bound anything held over joined whatever came next,
+        however far away it had been printed."""
+        rows = _rows(tmp_path, two_date_statement(
+            [("03 Jun", "03 Jun", "Coffee", "4.50"),
+             ("05 Jun", "05 Jun", "Groceries", "12.00")],
+            # Four wrap-offsets down: too far under its own row to be a
+            # continuation, and too far above the next to lead into it.
+            continuations={0: ["", "", "", "STRAY FOOTER TEXT"]},
+        ))
+        assert "STRAY FOOTER TEXT" not in rows[1].description
+        assert "STRAY FOOTER TEXT" not in rows[2].description
+
 
 class TestDateResolution:
     def test_lookback_accepts_a_date_before_the_period(self):
