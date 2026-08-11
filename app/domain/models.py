@@ -133,6 +133,19 @@ class ParsedDocument:
     accounts: tuple[ParsedAccount, ...] = ()
     statement_date: date | None = None
     declared_txn_count: int | None = None
+    #: How many days past `period_end` this layout may legitimately post a row.
+    #:
+    #: Zero for almost everything, and zero is the honest default: a posting
+    #: date outside the period the statement claims to cover normally means a
+    #: row was misread, and that check has caught real errors. But OCBC credits
+    #: a 360 account's month-end interest on the day after the month ends,
+    #: inside the closing balance the statement carries forward — so the row
+    #: genuinely posts on 1 August and genuinely belongs to the July statement.
+    #:
+    #: Declared by the adapter that knows its format rather than relaxed
+    #: globally, so one institution's posting habit does not quietly widen the
+    #: window for every other layout.
+    posting_grace_days: int = 0
 
     @property
     def txn_count(self) -> int:

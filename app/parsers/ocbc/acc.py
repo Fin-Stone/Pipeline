@@ -11,11 +11,14 @@ checks are available on one document.
     BALANCE C/F                        3,740.55
     Total Withdrawals/Deposits    0.00 2,500.00
 
-Two details worth naming. A cheque number sits between the description and the
+Three details worth naming. A cheque number sits between the description and the
 amounts, and it is text rather than money — it is left of the money columns, so
-the shared engine bands it with the description without being told. And the
-description wraps *below* its row, carrying the bonus category that says what
-an interest line was actually for, which is the part worth keeping.
+the shared engine bands it with the description without being told. The
+description wraps *below* its row and only below it, sometimes onto three lines:
+the bonus category that says what an interest line was for, or the card number,
+channel and country under a bill payment. And OCBC posts the month-end interest
+credit on the day after the period ends, inside the balance it carries forward,
+so this is a layout whose last row is dated outside its own period.
 """
 
 from __future__ import annotations
@@ -23,7 +26,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ...domain.dates import DateParseError, parse_full_date, resolve_period_date
+from ...domain.dates import (
+    DEFAULT_LOOKAHEAD_DAYS,
+    DateParseError,
+    parse_full_date,
+    resolve_near_period,
+)
 from ...domain.models import DEPOSIT, DOC_TYPE_ACCOUNT, ParsedAccount, ParsedDocument, ParsedTxn
 from ...domain.money import AmountParseError, parse_amount
 from ...ports.parser import ParseError
@@ -49,8 +57,25 @@ OUT_COL = "withdrawal"
 IN_COL = "deposit"
 BALANCE_COL = "balance"
 
-#: The bonus category wraps about 11pt under its row; the next row is 24pt on.
-CONTINUATION_GAP = 14.0
+#: OCBC only ever wraps *downwards*, and it wraps more than one line: a bill
+#: payment trails the card number it settled, then the channel, then the
+#: country, each about 11pt under the last. `None` is "always belongs to the row
+#: above", which is what DBS uses for the same reason.
+#:
+#: This was 14.0, a distance chosen from the one-line bonus-category wrap. The
+#: shared assembler measures the gap from the *row*, not from the last line
+#: attached to it, so the distance accumulates: the first wrapped line landed at
+#: 11pt and attached, the second at 22pt and did not. The second was then held
+#: over and prepended to the *next* row — "SALA Salary INTEREST CREDIT" — while
+#: the lines between were dropped outright. Two descriptions corrupted per wrap,
+#: and `description_norm` feeds the dedupe key.
+CONTINUATION_GAP = None
+
+#: OCBC posts a month-end interest credit on the following day — value date
+#: 31 JUL, posting date 01 AUG — and counts it in the balance the statement
+#: carries forward. The row belongs to the statement that prints it, so its
+#: posting date has to be readable just past the period end.
+POSTING_GRACE_DAYS = DEFAULT_LOOKAHEAD_DAYS
 
 _AMOUNT_IN_CELL = re.compile(r"[\d,]*\d\.\d{2}")
 _HEADER = re.compile(r"\bDate\b.*\bDescription\b.*\bWithdrawal\b.*\bDeposit\b", re.IGNORECASE)
@@ -144,6 +169,19 @@ class OcbcAccountAdapter:
             statement_date=period_end,
             parser_version=f"{self.name}@{self.version}",
             accounts=(account,),
+            posting_grace_days=POSTING_GRACE_DAYS,
+        )
+
+    def _date(self, text: str, period_start, period_end):
+        """A row's year-less date, allowing for the month-end posting lag.
+
+        No lookback: OCBC does not print a date earlier than the period on a
+        savings statement, and leaving that end strict keeps the window narrow
+        enough that "exactly one candidate" stays a real guarantee.
+        """
+        return resolve_near_period(
+            text, period_start, period_end,
+            lookback_days=0, lookahead_days=POSTING_GRACE_DAYS,
         )
 
     def _period(self, document):
@@ -199,7 +237,7 @@ class OcbcAccountAdapter:
             return None
 
         try:
-            posted = resolve_period_date(posted_text, period_start, period_end)
+            posted = self._date(posted_text, period_start, period_end)
         except DateParseError as exc:
             raise ParseError(str(exc), context={
                 "page": row.line.page_number, "y": round(row.line.top, 1),
@@ -211,7 +249,7 @@ class OcbcAccountAdapter:
         value_text = row.cell(VALUE_COL)
         if value_text.strip():
             try:
-                value_date = resolve_period_date(value_text, period_start, period_end)
+                value_date = self._date(value_text, period_start, period_end)
             except DateParseError:
                 value_date = None
 

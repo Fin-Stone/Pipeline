@@ -7,7 +7,12 @@ from decimal import Decimal
 
 import pytest
 
-from app.domain.dates import DateParseError, parse_period, resolve_period_date
+from app.domain.dates import (
+    DateParseError,
+    parse_period,
+    resolve_near_period,
+    resolve_period_date,
+)
 from app.domain.dedupe import assign_seq, dedupe_key
 from app.domain.models import ParsedTxn
 from app.domain.money import AmountParseError, from_minor, is_signed, parse_amount, to_minor
@@ -89,6 +94,57 @@ class TestDates:
 
     def test_parses_period(self):
         assert parse_period("1 Jul 2025 - 31 Jul 2025") == (date(2025, 7, 1), date(2025, 7, 31))
+
+
+class TestPostingLag:
+    """A statement can post a row after its own period closed.
+
+    OCBC credits a 360 account's month-end interest with 31 JUL as its value
+    date and 01 AUG as its posting date, inside the balance the statement
+    carries forward. Read strictly against the period, the row is unreadable and
+    the whole statement quarantines — for 0.18 that the statement's own closing
+    balance already accounts for.
+    """
+
+    JULY = (date(2026, 7, 1), date(2026, 7, 31))
+
+    def _resolve(self, text, period=None, lookahead_days=5):
+        return resolve_near_period(text, *(period or self.JULY),
+                                   lookback_days=0, lookahead_days=lookahead_days)
+
+    def test_the_day_after_the_period_resolves(self):
+        assert self._resolve("01 AUG") == date(2026, 8, 1)
+
+    def test_a_date_inside_the_period_is_unaffected(self):
+        assert self._resolve("31 JUL") == date(2026, 7, 31)
+
+    def test_beyond_the_lookahead_still_raises(self):
+        with pytest.raises(DateParseError):
+            self._resolve("20 AUG")
+
+    def test_no_lookahead_is_the_strict_behaviour(self):
+        with pytest.raises(DateParseError):
+            self._resolve("01 AUG", lookahead_days=0)
+
+    def test_the_lookahead_carries_across_a_year_boundary(self):
+        """A December statement's grace runs into the next January, and the
+        year has to come off the widened end rather than the printed one."""
+        assert self._resolve("03 JAN", (date(2026, 12, 1), date(2026, 12, 31))) == date(2027, 1, 3)
+
+    def test_a_lookahead_cannot_introduce_ambiguity(self):
+        """Days of grace keep the window far short of a year, so a day-and-month
+        still has exactly one candidate in it."""
+        assert self._resolve("15 JUL") == date(2026, 7, 15)
+
+    def test_lookback_and_lookahead_are_independent(self):
+        """A card's transaction date runs early and a deposit account's posting
+        date can run late; widening both ends by both amounts would accept dates
+        neither layout ever prints."""
+        with pytest.raises(DateParseError):
+            resolve_near_period("15 JUN", *self.JULY, lookback_days=0, lookahead_days=5)
+        assert resolve_near_period(
+            "15 JUN", *self.JULY, lookback_days=95, lookahead_days=0
+        ) == date(2026, 6, 15)
 
 
 class TestNormalise:

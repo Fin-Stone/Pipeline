@@ -142,28 +142,51 @@ def resolve_period_date(text: str, period_start: date, period_end: date) -> date
 #: year, so the "exactly one candidate" guarantee below still holds.
 DEFAULT_LOOKBACK_DAYS = 95
 
+#: How far *after* a period a posting date may legitimately fall.
+#:
+#: A statement can carry a row it posted after the period closed and still
+#: count in the closing balance: OCBC credits a 360 account's month-end
+#: interest with the last day of the month as its value date and the next day
+#: as its posting date, inside the balance the statement carries forward.
+#:
+#: Days, not months, and deliberately small. This widens the window a year-less
+#: date is resolved against, so it has to stay far short of a year for the
+#: "exactly one candidate" rule to keep meaning what it says — and a settlement
+#: that lands weeks after its period is a misread row, not a posting lag.
+DEFAULT_LOOKAHEAD_DAYS = 5
+
 
 def resolve_near_period(
     text: str,
     period_start: date,
     period_end: date,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    lookahead_days: int = 0,
 ) -> date:
-    """Resolve a year-less date that may fall shortly *before* the period.
+    """Resolve a year-less date that may fall just outside the period.
 
     Card statements print a transaction date alongside the posting date, and
     the transaction routinely happened in the previous month — "29 Dec" on a
-    January statement is normal, not an error. The posting date must stay
-    inside the period and keeps using `resolve_period_date`; this is for the
-    secondary date only.
+    January statement is normal, not an error. That is what `lookback_days` is
+    for, and it is the common case.
 
-    The same single-match rule applies, over a window widened backwards: a
-    lookback under a year cannot make a day-and-month ambiguous.
+    `lookahead_days` widens the other end, for the rarer statement that posts a
+    row after its own period closed while still counting it in the closing
+    balance. The two are separate because a layout usually needs one or the
+    other: a card's *transaction* date runs early, a deposit account's month-end
+    *posting* date can run late, and widening both ends by both amounts would
+    accept dates neither layout ever prints.
+
+    The same single-match rule applies, over the widened window: a margin under
+    a year cannot make a day-and-month ambiguous.
     """
     from datetime import timedelta
 
-    widened_start = period_start - timedelta(days=lookback_days)
-    return resolve_period_date(text, widened_start, period_end)
+    return resolve_period_date(
+        text,
+        period_start - timedelta(days=lookback_days),
+        period_end + timedelta(days=lookahead_days),
+    )
 
 
 def parse_period(text: str) -> tuple[date, date]:

@@ -436,7 +436,7 @@ class TestReparse:
 
 
 class TestValidation:
-    def _document(self, txns, opening, closing):
+    def _document(self, txns, opening, closing, posting_grace_days=0):
         return ParsedDocument(
             institution="Test", doc_type="acc",
             period_start=date(2024, 6, 1), period_end=date(2024, 6, 30),
@@ -445,6 +445,7 @@ class TestValidation:
                 account_ref_masked="x", currency="SGD", kind=DEPOSIT,
                 txns=tuple(txns), opening_balance_minor=opening, closing_balance_minor=closing,
             ),),
+            posting_grace_days=posting_grace_days,
         )
 
     def _txn(self, day, amount):
@@ -475,6 +476,37 @@ class TestValidation:
         doc = self._document([ParsedTxn(posted_date=date(2024, 8, 1), amount_minor=0,
                                         currency="SGD", description_raw="x")], 0, 0)
         checks = {f.check for f in validate(doc, amount_ceiling_minor=10**9).failures}
+        assert "dates_within_period" in checks
+
+    def test_a_declared_posting_grace_admits_the_day_after_the_period(self):
+        """OCBC credits a 360 account's month-end interest with the last day of
+        the month as its value date and the *next* day as its posting date, and
+        counts it in the balance the statement carries forward. The row belongs
+        to the statement that prints it, so the check has to allow for it —
+        without this the July statement quarantined on a 0.18 interest credit.
+        """
+        row = ParsedTxn(posted_date=date(2024, 7, 1), amount_minor=18,
+                        currency="SGD", description_raw="INTEREST CREDIT")
+        assert validate(self._document([row], 0, 18, posting_grace_days=5),
+                        amount_ceiling_minor=10**9).ok
+
+    def test_without_a_declared_grace_the_check_is_unchanged(self):
+        """Zero is the default and the honest one: on every other layout a
+        posting date outside the period means a row was misread."""
+        row = ParsedTxn(posted_date=date(2024, 7, 1), amount_minor=18,
+                        currency="SGD", description_raw="INTEREST CREDIT")
+        checks = {f.check for f in
+                  validate(self._document([row], 0, 18), amount_ceiling_minor=10**9).failures}
+        assert "dates_within_period" in checks
+
+    def test_the_grace_does_not_open_the_window_indefinitely(self):
+        """Days, not months. A settlement landing weeks after its period is a
+        misread row, not a posting lag."""
+        row = ParsedTxn(posted_date=date(2024, 7, 20), amount_minor=18,
+                        currency="SGD", description_raw="x")
+        checks = {f.check for f in
+                  validate(self._document([row], 0, 18, posting_grace_days=5),
+                           amount_ceiling_minor=10**9).failures}
         assert "dates_within_period" in checks
 
     def test_amounts_above_the_ceiling_fail(self):

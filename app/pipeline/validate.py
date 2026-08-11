@@ -17,6 +17,7 @@ imports produce a ledger that looks fine and is wrong.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 from ..domain.models import ParsedAccount, ParsedDocument
 from ..ports.repository import STATUS_IMPORTED, STATUS_IMPORTED_UNVERIFIED
@@ -181,9 +182,14 @@ def _first_disorder(dates) -> int | None:
 def _secondary_checks(account, document, name, amount_ceiling_minor) -> list[Failure]:
     failures: list[Failure] = []
 
+    # The window a posting date may land in. Wider than the printed period only
+    # where the adapter says its layout posts after the period closes — see
+    # `ParsedDocument.posting_grace_days`. Left at zero the check is exactly
+    # what it was.
+    latest = document.period_end + timedelta(days=document.posting_grace_days)
     outside = [
         t.posted_date.isoformat() for t in account.txns
-        if not (document.period_start <= t.posted_date <= document.period_end)
+        if not (document.period_start <= t.posted_date <= latest)
     ]
     if outside:
         failures.append(Failure(
@@ -191,6 +197,7 @@ def _secondary_checks(account, document, name, amount_ceiling_minor) -> list[Fai
             check="dates_within_period",
             detail={
                 "period": [document.period_start.isoformat(), document.period_end.isoformat()],
+                "allowed_through": latest.isoformat(),
                 "outside": outside[:20],
                 "outside_count": len(outside),
             },
