@@ -1,0 +1,87 @@
+# Finstone, from nothing to a running dashboard, with one file and one command.
+#
+#     curl -fsSL https://raw.githubusercontent.com/Fin-Stone/Pipeline/main/infra/compose/standalone.yml -o compose.yaml
+#     docker compose up -d
+#
+# Then open http://localhost:8000 and drag statements onto the Import tab.
+#
+# No clone, no toolchain, no build, and nothing to edit before it works. That
+# is the whole point of publishing an image: a self-hoster deciding whether to
+# trust this with their bank statements should be able to see it running first.
+#
+# The other compose file in this directory builds from source instead, which is
+# what a contributor wants and what nobody evaluating this should have to do.
+
+name: finstone
+
+services:
+  app:
+    image: ghcr.io/fin-stone/finstone:latest
+    restart: unless-stopped
+
+    ports:
+      # Empty by default, so a laptop gets 0.0.0.0 and the phone on the sofa
+      # can reach it. On a server set FINSTONE_BIND=127.0.0.1: so a reverse
+      # proxy is the only way in — which matters more here than usual, because
+      # there is no authentication yet to fall back on if something else finds
+      # the port.
+      - "${FINSTONE_BIND:-}${FINSTONE_PORT:-8000}:8000"
+
+    environment:
+      # SQLite in the data volume. One file, no second container, and the
+      # ledger is portable by copying it. Postgres is the overlay below.
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////srv/finstone/data/finstone.db}
+
+    volumes:
+      # A named volume, deliberately, and not a bind mount. The image runs as
+      # uid 10001 and creates this directory owned by that user; Docker
+      # initialises a named volume from the image and keeps that ownership. A
+      # bind mount to a host folder arrives root-owned on Linux, and the first
+      # thing the container does on boot is run migrations — so the friendly
+      # `./data` version of this file fails on start for exactly the people
+      # least equipped to debug it.
+      #
+      # Everything durable is in here: the SQLite ledger, the content-addressed
+      # store of original statements, and whatever `finstone backup` writes.
+      - finstone_data:/srv/finstone/data
+
+      # Bulk import, for a folder of statements too large to drag into the
+      # browser. Uncomment, put files under ./uploads/dummy/<Bank>/<type>/, and
+      # run:  docker compose run --rm app finstone run --profile dummy
+      #
+      # Read-only on purpose: the pipeline copies out of this folder and must
+      # never write to the operator's own files. Not needed for the ordinary
+      # path — uploading through the dashboard puts statements straight into
+      # the inbox and never touches this.
+      # - ./uploads:/srv/finstone/uploads:ro
+
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  finstone_data:
+
+# ---------------------------------------------------------------------------
+# Postgres instead of SQLite, when one household outgrows a single file:
+#
+#     curl -fsSL https://raw.githubusercontent.com/Fin-Stone/Pipeline/main/infra/compose/postgres.yml -o postgres.yml
+#     POSTGRES_PASSWORD=$(openssl rand -hex 16) docker compose -f compose.yaml -f postgres.yml up -d
+#
+# Keep that password: it is how the ledger is opened again. Migrations run on
+# every start, so moving engines is a restore into the new URL rather than a
+# migration script anybody has to write.
+#
+# Upgrading, either way:
+#
+#     docker compose pull && docker compose up -d
+#
+# and back it up first, because a restore is only as real as the last time you
+# tried one:
+#
+#     docker compose exec app finstone backup
+#     docker compose cp app:/srv/finstone/data/backups ./backups

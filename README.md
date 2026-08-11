@@ -1,6 +1,21 @@
 # Finstone Finance Pipeline
 
-This repository is the main delivery repo for the self-hosted finance pipeline.
+Self-hosted personal finance: bank and card statements in, a normalised ledger out.
+Everything stays on hardware you own.
+
+## Try it
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Fin-Stone/Pipeline/main/infra/compose/standalone.yml -o compose.yaml
+docker compose up -d
+```
+
+Then open <http://localhost:8000> and drag statements onto the Import tab.
+
+No clone, no toolchain, no build, and nothing to edit first — the published image
+carries the API, the CLI and the dashboard, and runs its own migrations on start.
+It stores a SQLite ledger in a Docker volume; Postgres is one overlay file away,
+and the same statements reconcile identically on either.
 
 ## Goal
 
@@ -13,14 +28,20 @@ Keep the system as one coherent runtime with one shared data model and one boots
 ## Status
 
 **Phase 1 — data ingestion and storage — is implemented.** Statements dropped into
-`uploads/` are staged, hashed into an immutable content-addressed store, routed to an adapter
-by layout fingerprint, validated against the statement's own opening and closing balances,
-and written to Postgres. Anything that fails is quarantined with a readable reason and the
-run continues.
+`uploads/`, or uploaded through the dashboard, are staged, hashed into an immutable
+content-addressed store, routed to an adapter by layout fingerprint, validated against the
+statement's own opening and closing balances, and written to the ledger. Anything that fails
+is quarantined with a readable reason and the run continues.
 
-Trust Bank savings and credit card statements parse and reconcile end to end. DBS, MariBank
-and OCBC quarantine as unknown layouts until their adapters are written — the designed
-behaviour, not a gap. See [docs/ingestion.md](docs/ingestion.md).
+Eight adapters parse and reconcile end to end: Trust Bank savings and card, DBS consolidated
+savings, OCBC savings and card, MariBank savings and card, and HSBC card. The HSBC statements
+carry no text layer at all — they are decoded by matching glyph bitmaps against a hash table,
+which is exact rather than OCR's best guess. An unrecognised layout quarantines with a
+readable reason rather than guessing, which is the designed behaviour and not a gap. See
+[docs/ingestion.md](docs/ingestion.md).
+
+Beyond ingestion: category rules with a review queue, transfer matching between your own
+accounts, paybacks for a shared charge, recurring-payment detection, and a PWA dashboard.
 
 ```
 finstone run --profile dummy      stage and ingest

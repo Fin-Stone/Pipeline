@@ -16,10 +16,24 @@ docker run -d \
 
 Then open `http://<your-box>:8000`.
 
-> **The image publishes from CI on the first push to `main`.** Until that has
-> run once, `docker pull` will 404 and you want
-> [build it yourself](#appendix-build-it-yourself), which is the same thing a
-> few minutes slower and is what everything below was tested against.
+Or with Compose, which is the same thing plus a file you can keep, edit and
+put under version control:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Fin-Stone/Pipeline/main/infra/compose/standalone.yml -o compose.yaml
+docker compose up -d
+```
+
+The image is published for `linux/amd64` and `linux/arm64`, so a Pi 5 or an ARM
+VPS is the same install as an x86 mini-PC. It runs its own migrations on start,
+which is why there is no setup step between `up` and a working dashboard.
+
+> **Note the volume, not a bind mount.** The container runs as uid 10001 and
+> owns `/srv/finstone/data` in the image; a named volume inherits that. A bind
+> mount to a host folder arrives root-owned on Linux and the first thing the
+> container does is run migrations — so the friendlier-looking `./data` version
+> fails on start, for exactly the people least equipped to debug it. `uploads`
+> is different: it is read-only, so a root-owned folder is fine there.
 
 ---
 
@@ -322,7 +336,7 @@ Check a number you recognise before trusting it.
 |---|---|
 | `permission denied … docker.sock` | Not in the `docker` group, or you have not logged out since being added |
 | `port is already allocated` | Something else has 8000. Change `FINSTONE_PORT` in `.env` |
-| `manifest unknown` on pull | The image has not been published yet — [build it yourself](#appendix-build-it-yourself) |
+| `denied` or `manifest unknown` on pull | GHCR publishes a package **private** by default, including from a public repository. If this is your own fork, set the package to Public in its settings. Otherwise [build it yourself](#appendix-build-it-yourself) |
 | The container restarts in a loop | `docker compose logs app`. Almost always a migration; the schema guard refuses to run at the wrong revision on purpose |
 | The page loads but says it cannot reach the server | You are on a different address from the one the container answers on. Use **Change** and enter the address in your browser's bar, including `http://` |
 | Everything is `Others` | Nothing has been categorised yet — Step 8 |
