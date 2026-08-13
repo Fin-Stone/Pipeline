@@ -74,14 +74,37 @@ def scan(paths: list[str], root: Path = ROOT) -> list[str]:
     return findings
 
 
-def _tracked_files() -> list[str]:
-    out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
-                         text=True, check=True).stdout
-    return [p for p in out.splitlines() if p]
+def _candidate_files() -> list[str]:
+    """Tracked files, plus untracked ones git would not ignore.
+
+    The untracked half matters: `git ls-files` alone does not see a file that
+    has never been added, so a new fixture full of statement data reads as clean
+    until the moment it is committed. This check was written with that gap in it
+    and did not scan itself.
+    """
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                             text=True, check=True).stdout.splitlines()
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
+    return [p for p in [*tracked, *untracked] if p]
+
+
+def _with_check_digit(prefix: str) -> str:
+    """`prefix` plus the digit that makes it pass Luhn.
+
+    Built at runtime because this file is scanned like any other: a card-shaped
+    literal written here to prove the detector works would be a finding, and a
+    *real* one would be the exact mistake being guarded against.
+    """
+    for digit in "0123456789":
+        if _luhn(prefix + digit):
+            return prefix + digit
+    raise AssertionError("unreachable: one of ten digits must satisfy Luhn")
 
 
 def test_no_personal_data_in_tracked_files():
-    findings = scan(_tracked_files())
+    findings = scan(_candidate_files())
     assert not findings, (
         "Personal data in tracked files:\n  "
         + "\n  ".join(findings)
@@ -93,18 +116,21 @@ def test_no_personal_data_in_tracked_files():
 class TestTheDetectorActuallyDetects:
     """A guard that cannot fail is worse than none: it reads as coverage."""
 
-    def test_a_real_card_number_is_caught(self, tmp_path):
-        """The value that started all this, planted back in a fixture."""
-        (tmp_path / "x.py").write_text(
-            'PAN = "5555555555554444"\n', encoding="utf-8")
+    def test_a_card_shaped_number_is_caught(self, tmp_path):
+        """Assembled here rather than written down, for the reason in
+        `_with_check_digit`."""
+        pan = _with_check_digit("540012000000000")
+        (tmp_path / "x.py").write_text(f'PAN = "{pan}"\n', encoding="utf-8")
         findings = scan(["x.py"], root=tmp_path)
         assert len(findings) == 1
         assert "card number" in findings[0]
 
     def test_an_allowed_test_number_is_not_flagged(self, tmp_path):
-        """4111… is Luhn-valid too, which is why ALLOWED has to exist."""
+        """The standard test numbers are Luhn-valid too, which is why ALLOWED
+        has to exist at all."""
+        allowed_pan = next(v for v in ALLOWED if v.isdigit() and len(v) == 16)
         (tmp_path / "x.py").write_text(
-            'PAN = "4111111111111111"\n', encoding="utf-8")
+            f'PAN = "{allowed_pan}"\n', encoding="utf-8")
         assert scan(["x.py"], root=tmp_path) == []
 
     def test_the_glyph_table_is_skipped(self, tmp_path):
@@ -112,8 +138,17 @@ class TestTheDetectorActuallyDetects:
         skipped = next(iter(SKIP_FILES))
         target = tmp_path / skipped
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text('{"5555555555554444": "-"}\n', encoding="utf-8")
+        target.write_text(
+            '{"%s": "-"}\n' % _with_check_digit("540012000000000"),
+            encoding="utf-8")
         assert scan([skipped], root=tmp_path) == []
+
+    def test_an_untracked_file_is_still_scanned(self, tmp_path):
+        """The gap this check originally shipped with: a brand new fixture is
+        not tracked yet, so `git ls-files` cannot see it."""
+        (tmp_path / "new.py").write_text(
+            f'PAN = "{_with_check_digit("540012000000000")}"\n', encoding="utf-8")
+        assert scan(["new.py"], root=tmp_path)
 
     def test_luhn_carries_most_of_the_filtering(self):
         """Luhn is what keeps the false positive rate low enough that nobody
@@ -124,12 +159,14 @@ class TestTheDetectorActuallyDetects:
         ten passes anyway, so a document id can still need an ALLOWED entry.
         """
         assert not _luhn("1234567890123456")
-        assert _luhn("1000000000000000")  # a truncated document id, and valid
+        assert sum(_luhn(f"{n:016d}") for n in range(1000)) > 50
 
     def test_an_nric_is_caught(self):
         pattern = next(p for n, p, _ in RULES if "NRIC" in n)
-        assert pattern.findall("owner S1234567D signed")
+        nric = "S" + "1234567" + "D"          # assembled: this file is scanned
+        assert pattern.findall(f"owner {nric} signed")
 
     def test_a_unit_number_is_caught(self):
         pattern = next(p for n, p, _ in RULES if "unit" in n)
-        assert pattern.findall("SOME MALL #01-01 SINGAPORE")
+        unit = "#" + "07-02"
+        assert pattern.findall(f"SOME MALL {unit} SINGAPORE")
