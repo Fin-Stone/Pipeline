@@ -15,7 +15,7 @@ in the mirror backup named at the bottom, and nowhere else.
 | Pushed to `origin` | **Not yet.** `origin/main` still holds the unscrubbed history |
 | Tests | 732 passed, 6 skipped — unchanged before and after the rewrite |
 | `HEAD` tree hash | Identical before and after the rewrite (`c1a9680`) |
-| Recurrence guard | Added — `tests/test_no_personal_data.py`, suite now 739 passed |
+| Recurrence guard | Added — `tests/test_no_personal_data.py`, suite now 740 passed |
 
 **The remaining action is a force-push.** Until it happens, everything below is
 still on GitHub.
