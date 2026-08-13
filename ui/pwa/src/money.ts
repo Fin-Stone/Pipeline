@@ -11,7 +11,27 @@
 /** Spending arrives negative, signed by its effect on the account. */
 export const isSpend = (minor: number) => minor < 0;
 
-export function money(minor: number | null | undefined, currency = "SGD"): string {
+/**
+ * What the ledger on the other end is denominated in.
+ *
+ * Learned from the server, not compiled in. Every endpoint that reports money
+ * says which money it is, and `api.ts` hands that here as the responses arrive
+ * — so the formatter follows the ledger instead of assuming the currency of
+ * the household this was first built for. The initial value is only what is
+ * shown before the first response lands.
+ *
+ * A ledger holding more than one currency is refused by the server rather than
+ * summed, so there is never a second answer to hold.
+ */
+let ledger = "SGD";
+
+export function setCurrency(code: string | null | undefined): void {
+  if (code) ledger = code;
+}
+
+export const currency = () => ledger;
+
+export function money(minor: number | null | undefined, currency = ledger): string {
   // Null is not zero. An average over an unbounded range has no value, and
   // showing 0.00 would state something false rather than admit a gap.
   if (minor === null || minor === undefined) return "—";
@@ -23,7 +43,7 @@ export function money(minor: number | null | undefined, currency = "SGD"): strin
 }
 
 /** Magnitude only, for places where the sign is already carried by the label. */
-export function magnitude(minor: number | null | undefined, currency = "SGD"): string {
+export function magnitude(minor: number | null | undefined, currency = ledger): string {
   if (minor === null || minor === undefined) return "—";
   return money(Math.abs(minor), currency);
 }

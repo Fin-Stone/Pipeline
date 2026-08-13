@@ -132,6 +132,22 @@ def export_originals(quarantine_dir: Path, files_dir: Path, blob_store) -> list[
     return written
 
 
+def read_reason(quarantine_dir: Path, sha256: str) -> dict | None:
+    """Why one document was rejected, or `None` if nothing here says.
+
+    The reason is a file rather than a column because it holds a traceback and
+    the expected-versus-actual detail, and none of that belongs in the ledger.
+    That makes it invisible to anything reading the database alone — which is
+    why this exists: an API serving a dashboard has to be able to answer "why"
+    without shelling into the container to read JSON off a disk.
+    """
+    target = quarantine_dir / f"{sha256}{REASON_SUFFIX}"
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def clear_reason(quarantine_dir: Path, sha256: str, files_dir: Path | None = None) -> bool:
     """Remove a document's reason file and any export of it, before reparsing.
 

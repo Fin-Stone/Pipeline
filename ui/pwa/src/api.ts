@@ -12,6 +12,8 @@
  *    API version.
  */
 
+import { setCurrency } from "./money";
+
 const SERVER_KEY = "finstone.serverUrl";
 const PROFILE_KEY = "finstone.profile";
 
@@ -86,7 +88,16 @@ async function call<T>(path: string, params: object = {}, init?: RequestInit): P
     try { detail = (await response.json()).detail ?? detail; } catch { /* body was not JSON */ }
     throw new ApiError(response.status, detail);
   }
-  return response.json() as Promise<T>;
+  const body = await response.json();
+  // The server says what its money is; the formatter follows it. Done here
+  // rather than threaded through every component, because a currency is a
+  // property of the ledger being read and not of any one screen — and a client
+  // that formats a USD ledger with a dollar sign it assumed is wrong in the way
+  // nobody notices.
+  if (body && typeof body === "object" && typeof body.currency === "string") {
+    setCurrency(body.currency);
+  }
+  return body as T;
 }
 
 // ---------------------------------------------------------------- shapes ---

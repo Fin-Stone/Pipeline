@@ -435,6 +435,148 @@ class TestReparse:
         assert after["institution"] == "MyBank"
 
 
+class TestDecisionsSurviveAReparse:
+    """A reparse rewrites a document's rows with new ids.
+
+    Everything a reparse touches is regenerable except the part a person typed:
+    the category they corrected, the row they put away, the movement they said
+    was their own, the money that came back to them. Those exist in one place
+    and a replacement used to delete them without saying so — on the real
+    ledger, nearly two thousand of them.
+
+    `dedupe_key` is derived from what the statement says, so it is the same
+    before and after. These tests are the reason it is.
+    """
+
+    ROWS = [("03 Jun", "Refund Acme", "+50.00"), ("10 Jun", "Dinner", "300.00")]
+
+    def _ingest(self, config, context, repository, blob_store, notifier, registry_for):
+        path = _statement_pdf(
+            config.inbox_dir / "dummy" / "a.pdf", self.ROWS,
+            opening="1,000.00", closing="750.00",
+        )
+        registry = registry_for(path)
+        _run(config, context, repository, blob_store, notifier, registry)
+        return registry
+
+    def _rows(self, repository, context):
+        """Every row, by what it says rather than by id — which is the point."""
+        return {
+            r["counterparty_norm"]: r
+            for r in repository.list_spending(context, direction="net", limit=50)
+        }
+
+    def test_a_hand_set_category_lands_on_the_same_transaction(
+        self, config, repository, context, blob_store, notifier, registry_for
+    ):
+        registry = self._ingest(config, context, repository, blob_store, notifier, registry_for)
+        before = self._rows(repository, context)["DINNER"]
+        repository.set_human_category(context, before["id"], "Dining")
+
+        summary = reparse(config, context, repository, blob_store, notifier, registry)
+
+        # Whether the replacement row *happens* to get the old id is the
+        # engine's business — SQLite reuses rowids and Postgres does not — so
+        # the assertion is on the outcome. The delete cascades enrichments, so
+        # a category present afterwards is one that was put back.
+        after = self._rows(repository, context)["DINNER"]
+        assert after["category"] == "Dining"
+        assert (summary.decisions_restored, summary.decisions_dropped) == (1, 0)
+        assert len(repository.list_human_categories(context)) == 1
+
+    def test_a_hidden_row_stays_hidden(
+        self, config, repository, context, blob_store, notifier, registry_for
+    ):
+        registry = self._ingest(config, context, repository, blob_store, notifier, registry_for)
+        hidden_id = self._rows(repository, context)["DINNER"]["id"]
+        repository.hide_txn(context, hidden_id, note="paid in cash")
+
+        reparse(config, context, repository, blob_store, notifier, registry)
+
+        hidden = repository.list_hidden(context)
+        assert [h["counterparty_norm"] for h in hidden] == ["DINNER"]
+        assert hidden[0]["note"] == "paid in cash"
+
+    def test_a_manual_transfer_mark_survives(
+        self, config, repository, context, blob_store, notifier, registry_for
+    ):
+        """The one-sided kind: the operator knows the money went to an account
+        this ledger does not hold, so there is no counterpart to re-find."""
+        registry = self._ingest(config, context, repository, blob_store, notifier, registry_for)
+        repository.mark_transfer(context, self._rows(repository, context)["DINNER"]["id"])
+
+        reparse(config, context, repository, blob_store, notifier, registry)
+
+        marked = repository.list_manual_transfers(context)
+        assert [m["counterparty_norm"] for m in marked] == ["DINNER"]
+
+    def test_a_payback_still_settles_the_charge_it_settled(
+        self, config, repository, context, blob_store, notifier, registry_for
+    ):
+        registry = self._ingest(config, context, repository, blob_store, notifier, registry_for)
+        rows = self._rows(repository, context)
+        repository.link_paybacks(
+            context, rows["DINNER"]["id"], [rows["REFUND ACME"]["id"]],
+        )
+
+        reparse(config, context, repository, blob_store, notifier, registry)
+
+        links = repository.list_paybacks(context)
+        assert len(links) == 1
+        after = self._rows(repository, context)["DINNER"]
+        assert links[0]["expense_txn_id"] == after["id"]
+        # And the arithmetic the link exists for still holds.
+        assert after["effective_amount_minor"] == -25000
+
+    def test_a_decision_whose_row_changed_is_reported_not_moved(
+        self, config, repository, context, blob_store, notifier, registry_for
+    ):
+        """The case that makes matching by key rather than by position right.
+
+        An adapter fix can legitimately change what a row says, and a changed
+        description is a changed key. Putting the category on whatever now sits
+        in that position would be worse than losing it: it would be wrong and
+        silent. So it is dropped, counted, and said out loud.
+        """
+        registry = self._ingest(config, context, repository, blob_store, notifier, registry_for)
+        repository.set_human_category(
+            context, self._rows(repository, context)["DINNER"]["id"], "Dining",
+        )
+
+        summary = reparse(
+            config, context, repository, blob_store, notifier, _renaming(registry),
+        )
+
+        assert summary.imported == 1
+        assert (summary.decisions_restored, summary.decisions_dropped) == (0, 1)
+        assert all(r["category"] is None for r in self._rows(repository, context).values())
+
+
+def _renaming(registry: AdapterRegistry) -> AdapterRegistry:
+    """A registry whose adapter reads the same statement differently.
+
+    Stands in for the thing this whole mechanism exists to survive: an adapter
+    fix that changes what a row says.
+    """
+    from dataclasses import replace as _replace
+
+    class RenamingAdapter(SyntheticAdapter):
+        def parse(self, path, *, password=None):
+            document = super().parse(path, password=password)
+            account = document.accounts[0]
+            return _replace(document, accounts=(_replace(
+                account,
+                txns=tuple(
+                    _replace(t, description_raw=f"{t.description_raw} PTE LTD")
+                    for t in account.txns
+                ),
+            ),))
+
+    renaming = AdapterRegistry()
+    renaming.register(RenamingAdapter(), synthetic_signature())
+    return renaming
+
+
 class TestValidation:
     def _document(self, txns, opening, closing, posting_grace_days=0):
         return ParsedDocument(

@@ -353,10 +353,32 @@ statement_balance = Table(
     UniqueConstraint("account_id", "source_document_id", name="uq_statement_balance"),
 )
 
-# --- Created now, unused until the enrichment phase -------------------------
+# --- Created now, filled in as each phase lands ------------------------------
 # The data model is the architecture: separating immutable facts from mutable
 # predictions is what lets five years of history be re-classified without
 # touching the ledger underneath.
+#
+# What is actually written today, so that reading the schema does not overstate
+# the system — a column nobody populates looks exactly like a feature until
+# somebody queries it:
+#
+#   txn_enrichment      written. `category` by the rule pass and by hand.
+#                       `beneficiary` and `beneficiary_member_id` are NOT: the
+#                       "for whom" label of architecture §3.1 has no pass and no
+#                       endpoint yet, and a joint card cannot be attributed by
+#                       guessing. `confidence` and `model_version` stay null
+#                       until the k-NN and model tiers exist to fill them.
+#   recurrence_series   NOT written. Detection is a pure function over the
+#                       ledger (`app/domain/recurrence.py`) and is recomputed on
+#                       every request, deliberately: a stored series would be a
+#                       cached answer that a reparse silently invalidates. What
+#                       the operator asserts lives in `recurrence_mark` and
+#                       `recurrence_dismissal`, which *are* written. These two
+#                       tables are where the declared/watching/confirmed state
+#                       of §3.2a lands when it is built, and they are kept for
+#                       that rather than dropped and re-added.
+#   txn_series_link     NOT written, for the same reason. Cleared on delete so
+#                       the foreign key holds if it ever is.
 
 txn_enrichment = Table(
     "txn_enrichment",
@@ -366,8 +388,13 @@ txn_enrichment = Table(
     Column("txn_id", Integer, ForeignKey("txn.id"), nullable=False),
     Column("category", String(64)),
     Column("subcategory", String(64)),
-    # "For whom" â€” which member the spend was for. Distinct from the account's
+    # "For whom" — which member the spend was for. Distinct from the account's
     # owner: a joint card can pay for any member.
+    #
+    # Nothing writes these yet. Kept because they are the one part of §3.1 that
+    # is painful to add later — a nullable foreign key on a table with history
+    # is free now and a backfill afterwards — and because a reparse already
+    # carries them, so the day they are filled in they survive on their own.
     Column("beneficiary_member_id", Integer, ForeignKey("member.id")),
     Column("beneficiary", String(64)),
     Column("confidence", Numeric(5, 4)),
@@ -377,6 +404,10 @@ txn_enrichment = Table(
     CheckConstraint("source IN ('rule','knn','llm','human')", name="ck_txn_enrichment_source"),
 )
 
+#: Reserved for the series states of architecture §3.2a — `declared`,
+#: `watching`, `confirmed`. Empty today: detection is a pure function over the
+#: ledger and is recomputed per request, so there is nothing here worth
+#: persisting until a series can carry something the rows do not imply.
 recurrence_series = Table(
     "recurrence_series",
     metadata,

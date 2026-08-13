@@ -46,10 +46,16 @@ accounts, paybacks for a shared charge, recurring-payment detection, and a PWA d
 ```
 finstone run --profile dummy      stage and ingest
 finstone status                   ledger and quarantine counts
+finstone reconcile                does the ledger still agree with the banks
 finstone doctor <path>            parse one document and explain the result
 finstone quarantine               which documents failed, and which files they are
 finstone report                   why every quarantined document failed
 ```
+
+`reconcile` is the check that only means something later: validation at import
+proves a statement consistent with itself, and this asks whether the ledger
+still agrees with every declared balance once overlapping documents have been
+deduplicated into it. It exits `1` on drift, so a timer can act on it.
 
 Every command that touches the ledger takes `--profile dummy|prod`. It selects the uploads
 tree, the tenant, and that tenant's quarantine — real and synthetic documents share none of
@@ -154,6 +160,7 @@ depends on them:
 ## Documentation
 
 - [finance-pipeline-architecture.md](finance-pipeline-architecture.md) is the design and architecture source of truth.
+- [docs/roadmap.md](docs/roadmap.md) is what is next, in the order it happens.
 - [docs/ingestion.md](docs/ingestion.md) is the Phase 1 ingestion and storage design of record.
 - [docs/api-contracts.md](docs/api-contracts.md) is what a client is written against, and binding.
 - [docs/install.md](docs/install.md) is the step-by-step install, from nothing to a categorised ledger.

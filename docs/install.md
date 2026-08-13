@@ -157,6 +157,15 @@ something automation must never do. Handing a file over in the browser is
 already the deliberate act that flag exists to require, which is why the Import
 tab does not need it.
 
+The same pass is reachable over HTTP — `POST /api/v1/documents/scan?profile=…`
+— under exactly the same guard: for `prod` it answers `409` and names the
+variable rather than waiving it. Re-running either is safe and is the intended
+use, because documents already in the ledger are recognised by digest.
+
+If something *else* writes into that folder — a Syncthing share, a scanner, a
+mail rule — there is a timer for it, installed and left switched off. See
+[../infra/systemd/README.md](../infra/systemd/README.md).
+
 </details>
 
 ## Step 7 — Check where it went

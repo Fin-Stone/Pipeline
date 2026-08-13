@@ -163,6 +163,15 @@ def _print_summary(summary, config=None, profile=PROFILE_DUMMY) -> None:
         print(f"  healed:   {summary.healed} document(s) matched a renamed vendor string "
               f"and reconciled; see `finstone learned`")
 
+    if summary.decisions_restored:
+        print(f"  kept:     {summary.decisions_restored} operator decision(s) reattached "
+              f"to the replacement rows")
+    if summary.decisions_dropped:
+        # Loud, and never folded into the line above. This is the only number
+        # in this output describing something nobody can get back.
+        print(f"  LOST:     {summary.decisions_dropped} operator decision(s) had no row to "
+              f"return to — the reparse changed what those rows say")
+
     if not summary.quarantined:
         return
 
@@ -275,6 +284,47 @@ def cmd_status(args) -> int:
         print("  finstone report                  why each one failed")
         print("  finstone reparse --quarantined   retry after adding an adapter")
     return 0
+
+
+def cmd_reconcile(args) -> int:
+    """Check the ledger against every balance the banks declared.
+
+    Import-time validation proves one statement consistent with itself. This is
+    the other half, and the half that can only be run later: whether the ledger
+    still agrees with the banks *across* statements, once overlapping documents
+    have been deduplicated into it.
+
+    Exits 1 when anything drifted, so a timer or a monitor can act on it
+    without parsing this output.
+    """
+    from .pipeline.reconcile import check
+
+    config = load_config()
+    repository = build_repository(config)
+    try:
+        check_schema(repository)
+        context = repository.resolve_context(config.tenant_for(args.profile), config.member_email)
+        found = check(repository, context)
+        accounts = len({row["account_id"] for row in repository.declared_balances(context)})
+    finally:
+        repository.close()
+
+    if not found:
+        print(f"reconciled: {accounts} account(s) agree with every declared balance")
+        return 0
+
+    print(f"{len(found)} disagreement(s) across {accounts} account(s)\n")
+    for drift in found:
+        print(f"{drift.account}   {drift.since} -> {drift.until}   [{drift.kind}]")
+        print(f"  banks say   {drift.declared_minor / 100:>14,.2f}")
+        print(f"  ledger says {drift.observed_minor / 100:>14,.2f}")
+        print(f"  difference  {drift.difference_minor / 100:>14,.2f}")
+    print(
+        "\nA continuity gap is usually a statement nobody has imported yet.\n"
+        "A movement difference is the ledger disagreeing with the banks about\n"
+        "what happened, and is worth opening the two statements over."
+    )
+    return 1
 
 
 def cmd_reparse(args) -> int:
@@ -1379,6 +1429,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("status", help="ledger and quarantine counts for one profile")
     p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser(
+        "reconcile",
+        help="check the ledger against every balance the banks declared",
+    )
+    p.add_argument("--profile", choices=PROFILES, default=PROFILE_DUMMY)
+    p.set_defaults(func=cmd_reconcile)
 
     p = sub.add_parser(
         "reparse",

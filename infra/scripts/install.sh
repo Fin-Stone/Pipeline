@@ -10,6 +10,7 @@
 #
 #     --server-name NAME   what nginx answers to (default: this host's name)
 #     --engine ENGINE      postgres (default) or sqlite
+#     --ingest-profile P   which profile the (disabled) ingest timer would run
 #     --no-nginx           skip the reverse proxy; publish the ports instead
 #     --no-systemd         skip boot-time start and the nightly backup timer
 #
@@ -23,21 +24,31 @@ SERVER_NAME=$(hostname)
 ENGINE=postgres
 WITH_NGINX=1
 WITH_SYSTEMD=1
+# Baked into the ingest unit, which is installed and left disabled. `prod` is
+# the default because an operator who enables that timer means their own
+# statements — the synthetic set is what a developer ingests, by hand.
+INGEST_PROFILE=prod
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --server-name) SERVER_NAME=${2:?--server-name needs a value}; shift 2 ;;
-        --engine)      ENGINE=${2:?--engine needs a value}; shift 2 ;;
-        --no-nginx)    WITH_NGINX=0; shift ;;
-        --no-systemd)  WITH_SYSTEMD=0; shift ;;
-        -h|--help)     sed -n '2,20p' "$0" | sed 's/^# \?//'; exit 0 ;;
-        *)             die "unknown option $1" ;;
+        --server-name)    SERVER_NAME=${2:?--server-name needs a value}; shift 2 ;;
+        --engine)         ENGINE=${2:?--engine needs a value}; shift 2 ;;
+        --ingest-profile) INGEST_PROFILE=${2:?--ingest-profile needs a value}; shift 2 ;;
+        --no-nginx)       WITH_NGINX=0; shift ;;
+        --no-systemd)     WITH_SYSTEMD=0; shift ;;
+        -h|--help)        sed -n '2,18p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)                die "unknown option $1" ;;
     esac
 done
 
 case "$ENGINE" in
     postgres|sqlite) ;;
     *) die "--engine must be postgres or sqlite" ;;
+esac
+
+case "$INGEST_PROFILE" in
+    prod|dummy) ;;
+    *) die "--ingest-profile must be prod or dummy" ;;
 esac
 
 APP_PORT=8000
@@ -138,6 +149,7 @@ if [ "$WITH_SYSTEMD" = 1 ]; then
             sed -e "s|INSTALL_DIR|${REPO_ROOT}|g" \
                 -e "s|RUN_USER|${USER}|g" \
                 -e "s|COMPOSE|${compose_cmd}|g" \
+                -e "s|FINSTONE_PROFILE|${INGEST_PROFILE}|g" \
                 "$REPO_ROOT/infra/systemd/${name}" \
                 | sudo tee "/etc/systemd/system/${name}" >/dev/null
             note "installed ${name}"
@@ -148,6 +160,15 @@ if [ "$WITH_SYSTEMD" = 1 ]; then
         sudo cp "$REPO_ROOT/infra/systemd/finstone-backup.timer" \
                 /etc/systemd/system/finstone-backup.timer
         note "installed finstone-backup.timer"
+
+        # Written but not enabled. Until Phase 2 fetches statements on its own,
+        # a file lands in uploads/ because a person put it there — and that
+        # person has the Import tab. This is here for the install where a sync
+        # client or a mail rule does the putting.
+        install_unit finstone-ingest.service
+        sudo cp "$REPO_ROOT/infra/systemd/finstone-ingest.timer" \
+                /etc/systemd/system/finstone-ingest.timer
+        note "installed finstone-ingest.timer (not enabled — see infra/systemd/README.md)"
 
         sudo systemctl daemon-reload
         # --now on the timer only. The stack is already up, and `systemctl

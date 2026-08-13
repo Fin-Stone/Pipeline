@@ -42,24 +42,33 @@ description of the current implementation.
 
 ## Known gaps
 
-- **No growth chart.** `/growth` returns `501`, because net worth over time must
-  come from statement balances and summing transactions would make a transfer
-  between your own accounts look like growth. The overview says so rather than
-  drawing a plausible line, and there is no arrow or percentage yet — the
-  calm-or-concern signal in §5.1(D) waits on a real number.
-- **Decisions are not applied.** The review screen records them; writing them
-  through the ledger is still a CLI pass.
+- **Not yet a PWA.** No manifest or service worker, so no home-screen install
+  and no offline read. The name is aspirational until then.
+- **No `/tv` route.** The 10-foot layout in §5 is not built, and there is no
+  router here at all — the screens are tabs.
 - **No authentication.** There is none in the API yet. Do not expose either
   beyond a trusted network.
-- **Not yet a PWA.** No manifest or service worker, so no home-screen install
-  and no offline read.
-- **No `/tv` route.** The 10-foot layout in §5 is not built.
+- **Nothing surfaces reconciliation.** `GET /reconciliation` says whether the
+  ledger still agrees with the balances the banks declared, and no screen asks
+  it yet.
+
+Two entries that used to be here are done, and are recorded because the shape
+of the fix is the useful part:
+
+- The growth chart exists. `/growth` derives net worth from declared statement
+  balances rather than by summing transactions — which would read a transfer
+  between your own accounts as growth on one side and loss on the other — and
+  `NetWorth.tsx` carries the arrow and percentage §5.1(D) asks for, with `—`
+  where the window opened at zero or in debt and a percentage would mean
+  nothing.
+- Decisions reach the ledger. `POST /review/decide` applies the rules before it
+  returns and says how many rows moved, so a decision is true on every screen
+  the moment it is made.
 
 ## What has been verified
 
-`npm install` and `npm run build` both pass, and the endpoints this client calls
-were exercised against a running API against real data — `/health`, `/summary`
-with a date range, and `/review`.
+`npm run build` passes, which includes `tsc -b`, and the endpoints this client
+calls were exercised against a running API on real data.
 
 Not verified: the rendered screens. Nothing here has been opened in a browser,
 so layout, responsiveness and the interaction on the review table are unproven.

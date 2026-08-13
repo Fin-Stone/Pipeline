@@ -765,6 +765,122 @@ class TestUploading:
         ).json()
         assert body == {"sha256": "f" * 64, "deleted": False, "transfers": None}
 
+    def test_a_quarantined_document_says_why_it_failed(self, client):
+        """Half an answer otherwise. A client that can show a statement failed
+        and cannot show why sends its operator to a terminal, and an operator
+        who has to open a terminal does not have a self-hosted product."""
+        self._post(client, ("statement.pdf", b"%PDF-1.4 nonsense", "application/pdf"))
+
+        body = client.get(
+            f"{PREFIX}/documents",
+            params={"profile": "dummy", "parse_status": "quarantined"},
+        ).json()
+
+        assert body["total"] == 1
+        reason = body["documents"][0]["reason"]
+        assert reason["failure_class"]
+        assert reason["message"]
+        # The traceback belongs in `finstone report`, not in a document list.
+        assert "traceback" not in reason
+
+    def test_an_imported_document_carries_no_reason(self, client):
+        body = client.get(f"{PREFIX}/documents", params={"profile": "dummy"}).json()
+        assert all("reason" not in d for d in body["documents"])
+
+
+class TestScanningTheUploadsFolder:
+    """The other way people hold statements: a folder, not a drag-and-drop.
+
+    Eleven years of PDFs on a disk used to need `docker compose run … finstone
+    run` — a shell, on a box, to do the ordinary thing.
+    """
+
+    def test_an_empty_folder_is_not_an_error(self, client):
+        body = client.post(f"{PREFIX}/documents/scan", params={"profile": "dummy"}).json()
+        assert body["discovered"] == 0
+        assert body["imported"] == 0
+
+    def test_it_stages_and_imports_what_is_there(self, client, config):
+        """Staged out of uploads/, never moved: the operator's own files are
+        not the pipeline's to rearrange."""
+        source = config.uploads_for("dummy") / "MyBank" / "june.pdf"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"%PDF-1.4 not a layout anything knows")
+
+        body = client.post(f"{PREFIX}/documents/scan", params={"profile": "dummy"}).json()
+
+        assert body["discovered"] == 1
+        assert body["staged"] == 1
+        assert body["processed"] == 1
+        # No adapter claims it, so it is set aside with a reason — the designed
+        # behaviour, and still a successful scan.
+        assert body["quarantined"] == 1
+        assert source.exists(), "uploads/ is the operator's, and is never emptied"
+
+    def test_running_it_twice_imports_nothing_the_second_time(self, client, config):
+        source = config.uploads_for("dummy") / "june.pdf"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"%PDF-1.4 the same bytes")
+
+        client.post(f"{PREFIX}/documents/scan", params={"profile": "dummy"})
+        again = client.post(f"{PREFIX}/documents/scan", params={"profile": "dummy"}).json()
+
+        assert again["staged"] == 0
+        assert again["imported"] == 0
+
+    def test_the_prod_guard_is_not_something_this_endpoint_can_waive(self, client):
+        """Rule 2 of the development rules. An API that could switch the guard
+        off would be the way around it."""
+        response = client.post(f"{PREFIX}/documents/scan", params={"profile": "prod"})
+        assert response.status_code == 409
+        assert "FINSTONE_ALLOW_PROD" in response.json()["detail"]
+
+
+class TestReparsingOverTheApi:
+    """Quarantine is only half a design if replaying needs a shell."""
+
+    def test_it_refuses_to_reparse_everything_by_accident(self, client):
+        response = client.post(f"{PREFIX}/documents/reparse", params={"profile": "dummy"})
+        assert response.status_code == 422
+
+    def test_a_digest_and_a_sweep_are_not_the_same_request(self, client):
+        response = client.post(
+            f"{PREFIX}/documents/reparse",
+            params={"profile": "dummy", "sha256": "a" * 64, "quarantined_only": True},
+        )
+        assert response.status_code == 422
+
+    def test_an_unknown_digest_is_404_not_a_silent_no_op(self, client):
+        response = client.post(
+            f"{PREFIX}/documents/reparse",
+            params={"profile": "dummy", "sha256": "f" * 64},
+        )
+        assert response.status_code == 404
+
+    def test_a_sweep_over_an_empty_quarantine_reports_nothing_done(self, client):
+        body = client.post(
+            f"{PREFIX}/documents/reparse",
+            params={"profile": "dummy", "quarantined_only": True},
+        ).json()
+        assert body["processed"] == 0
+        assert body["decisions"] == {"restored": 0, "dropped": 0}
+
+    def test_replaying_a_layout_still_unknown_leaves_it_quarantined(self, client):
+        """The honest outcome, and the one that matters most: a reparse that
+        cannot do better than last time must not report success."""
+        client.post(
+            f"{PREFIX}/documents",
+            params={"profile": "dummy"},
+            files=[("files", ("statement.pdf", b"%PDF-1.4 nonsense", "application/pdf"))],
+        )
+        body = client.post(
+            f"{PREFIX}/documents/reparse",
+            params={"profile": "dummy", "quarantined_only": True},
+        ).json()
+        assert body["processed"] == 1
+        assert body["quarantined"] == 1
+        assert body["imported"] == 0
+
 
 class TestRematchingTransfers:
     def test_it_reports_and_does_not_write_by_default(self, client):
@@ -926,6 +1042,169 @@ class TestTrend:
             assert point["net_minor"] == point["out_minor"] + point["in_minor"]
             assert set(point["rolling"]) == {"out_minor", "in_minor", "net_minor"}
             assert 1 <= point["rolling_of"] <= body["rolling_window"]
+
+
+class TestCurrency:
+    """Every endpoint that reports money says what the money is.
+
+    It used to say `SGD` unconditionally, which is right for the household this
+    was built for and wrong for everyone else — wrong in the way that looks
+    like it works, because the numbers are correct and only the symbol lies.
+    The ledger has carried a currency per account since migration `0001`; it
+    was the API layer that overrode it with a constant.
+    """
+
+    def _seed(self, repository, *currencies):
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        for n, currency in enumerate(currencies):
+            account = AccountRecord(
+                institution=f"Bank {currency}", account_ref_masked=str(n),
+                sub_account_label="", currency=currency, kind=DEPOSIT,
+            )
+            repository.insert_document(
+                context,
+                DocumentRecord(
+                    sha256=f"{n}" * 64, institution=f"Bank {currency}", doc_type="acc",
+                    period_start=date(2025, 6, 1), period_end=date(2025, 6, 30),
+                    storage_path="x", parse_status="imported",
+                    source_profile="dummy", source_relpath=f"{n}.pdf",
+                    fetched_at=datetime.now(timezone.utc),
+                ),
+                [],
+                [TxnRecord(
+                    account_key=account, posted_date=date(2025, 6, 15),
+                    amount_minor=-1000, currency=currency,
+                    description_raw="Coffee", description_norm="COFFEE",
+                    counterparty_norm="COFFEE", dedupe_key=f"k{n}", seq=0,
+                )],
+            )
+
+    @pytest.mark.parametrize("endpoint", ["summary", "trend", "recurring", "growth"])
+    def test_it_comes_from_the_ledger(self, client, repository, endpoint):
+        self._seed(repository, "USD")
+        body = client.get(f"{PREFIX}/{endpoint}", params={"profile": "dummy"}).json()
+        assert body["currency"] == "USD"
+
+    def test_an_empty_ledger_reports_no_currency_rather_than_a_default(self, client):
+        """There are no figures, so there is nothing for a currency to
+        describe. Naming one here is exactly how the constant got in."""
+        body = client.get(f"{PREFIX}/summary", params={"profile": "dummy"}).json()
+        assert body["currency"] is None
+
+    def test_mixing_currencies_is_refused_with_the_reason(self, client, repository):
+        """Promise 6: a figure that cannot be computed correctly is a 501 with
+        the reason. SGD plus USD is a number that is not money."""
+        self._seed(repository, "SGD", "USD")
+        response = client.get(f"{PREFIX}/summary", params={"profile": "dummy"})
+        assert response.status_code == 501
+        detail = response.json()["detail"]
+        assert detail["error"] == "mixed currencies"
+        assert detail["currencies"] == ["SGD", "USD"]
+
+    def test_narrowing_to_one_account_makes_it_answerable_again(self, client, repository):
+        """The refusal has to come with a way through it, or a household with
+        one foreign account loses the dashboard entirely."""
+        self._seed(repository, "SGD", "USD")
+        accounts = client.get(f"{PREFIX}/accounts", params={"profile": "dummy"}).json()
+        sgd = next(a for a in accounts["accounts"] if a["currency"] == "SGD")
+
+        body = client.get(
+            f"{PREFIX}/summary", params={"profile": "dummy", "account_id": sgd["id"]},
+        ).json()
+        assert body["currency"] == "SGD"
+
+
+class TestReconciliation:
+    """§8.2's ultimate check, reachable without a shell.
+
+    Import-time validation proves a statement consistent with itself at the
+    moment it was parsed. Nothing could ask afterwards whether the ledger still
+    agreed with the banks — which is the question a monitor needs to ask every
+    month, and the one the `dedupe` limitation is written against.
+    """
+
+    def _seed(self, repository, *, sha, month, opening, closing, txns):
+        from datetime import date, datetime, timezone
+
+        from app.domain.models import DEPOSIT
+        from app.ports.repository import AccountRecord, BalanceRecord, DocumentRecord, TxnRecord
+
+        context = repository.resolve_context("default-dummy", "owner@localhost")
+        account = AccountRecord(
+            institution="Test", account_ref_masked="1", sub_account_label="",
+            currency="SGD", kind=DEPOSIT,
+        )
+        repository.insert_document(
+            context,
+            DocumentRecord(
+                sha256=sha, institution="Test", doc_type="acc",
+                period_start=date(2025, month, 1), period_end=date(2025, month, 28),
+                storage_path="x", parse_status="imported",
+                source_profile="dummy", source_relpath=f"{sha}.pdf",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            [BalanceRecord(
+                account_key=account,
+                opening_balance_minor=opening, closing_balance_minor=closing,
+            )],
+            [
+                TxnRecord(
+                    account_key=account, posted_date=on, amount_minor=amount,
+                    currency="SGD", description_raw="Thing", description_norm="THING",
+                    counterparty_norm="THING", dedupe_key=key, seq=0,
+                )
+                for on, amount, key in txns
+            ],
+        )
+
+    def test_an_empty_ledger_is_clean(self, client):
+        body = client.get(f"{PREFIX}/reconciliation", params={"profile": "dummy"}).json()
+        assert body == {"clean": True, "currency": None, "drifts": []}
+
+    def test_a_ledger_that_agrees_is_clean(self, client, repository):
+        self._seed(repository, sha="a" * 64, month=5, opening=100_00, closing=150_00,
+                   txns=[(date(2025, 5, 10), 50_00, "may-1")])
+        self._seed(repository, sha="b" * 64, month=6, opening=150_00, closing=130_00,
+                   txns=[(date(2025, 6, 10), -20_00, "jun-1")])
+
+        body = client.get(f"{PREFIX}/reconciliation", params={"profile": "dummy"}).json()
+        assert body["clean"] is True
+        assert body["drifts"] == []
+
+    def test_drift_is_reported_with_both_claims_and_the_span(self, client, repository):
+        """Both numbers, because the difference alone does not say which side
+        to go and look at."""
+        self._seed(repository, sha="a" * 64, month=5, opening=100_00, closing=100_00, txns=[])
+        self._seed(repository, sha="b" * 64, month=6, opening=100_00, closing=55_00,
+                   txns=[(date(2025, 6, 12), -45_00, "jun-1"),
+                         (date(2025, 6, 12), -45_00, "jun-1-again")])
+
+        body = client.get(f"{PREFIX}/reconciliation", params={"profile": "dummy"}).json()
+
+        assert body["clean"] is False
+        drift = body["drifts"][0]
+        assert drift["kind"] == "movement"
+        assert drift["declared_minor"] == -45_00
+        assert drift["observed_minor"] == -90_00
+        assert drift["difference_minor"] == -45_00
+        assert drift["since"] and drift["until"]
+
+    def test_every_amount_is_an_integer(self, client, repository):
+        """Promise 1. Postgres widens SUM(bigint) to numeric, which arrives as
+        a string, and this endpoint sums."""
+        self._seed(repository, sha="a" * 64, month=5, opening=100_00, closing=100_00, txns=[])
+        self._seed(repository, sha="b" * 64, month=6, opening=100_00, closing=55_00,
+                   txns=[(date(2025, 6, 12), -10_00, "jun-1")])
+
+        body = client.get(f"{PREFIX}/reconciliation", params={"profile": "dummy"}).json()
+        for drift in body["drifts"]:
+            for field in ("declared_minor", "observed_minor", "difference_minor"):
+                assert isinstance(drift[field], int), field
 
 
 class TestShape:

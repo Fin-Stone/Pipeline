@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..config import PROFILE_PROD, Config, load_config
+from ..config import PROFILE_PROD, Config, ConfigError, load_config
 from ..domain.categories import (
     DEFAULT_CATEGORIES,
     Rule,
@@ -54,7 +54,11 @@ from ..domain.recurrence import (
     matching,
 )
 from ..domain.transfers import Window
+# Stdlib-only, unlike the rest of `pipeline`: reading why a document failed must
+# not drag the parser stack into a process that only serves the ledger.
+from ..pipeline import quarantine
 from ..pipeline.transfers import preview, realign, save_window, window_for
+from ..ports.repository import STATUS_QUARANTINED
 from ..storage.factory import build_repository
 from ..storage.sqlalchemy_repo import choose_bucket, rolling_window, trend_centre
 
@@ -200,6 +204,38 @@ def _filters(
 Filters = Annotated[dict, Depends(_filters)]
 
 
+def _currency(handle: "_Session", account_ids=None) -> str | None:
+    """What the figures in this response are denominated in.
+
+    Read from the accounts rather than declared, because the ledger has always
+    known: every account carries a currency and every parser fills it in. This
+    endpoint layer used to answer `SGD` unconditionally, which is correct for
+    the household it was built for and silently wrong for anyone else — the
+    worst kind of wrong, because the numbers look fine.
+
+    `null` on an empty ledger: there are no figures, so there is nothing for a
+    currency to describe, and inventing one here is how the hardcode got in.
+
+    **More than one is a refusal, not a guess.** Adding SGD to USD gives a
+    number that is not money in any currency, and promise 6 of the contract
+    says a figure that cannot be computed correctly is a `501` with the reason.
+    Per-currency breakdowns are the real answer and are a larger piece of work
+    than lying about it.
+    """
+    found = handle.repository.currencies(handle.context, account_ids)
+    if len(found) > 1:
+        raise HTTPException(501, {
+            "error": "mixed currencies",
+            "currencies": found,
+            "reason": (
+                "these accounts are held in more than one currency, and summing "
+                "them would produce a number that is not money. Filter to one "
+                "currency with account_id."
+            ),
+        })
+    return found[0] if found else None
+
+
 #: Where a built client lives, when this image carries one.
 #:
 #: Carrying it is what makes **one container** enough — the shape a self-hoster
@@ -307,7 +343,7 @@ def summary(handle: Session, filters: Filters, direction: Direction = "out") -> 
     days = ((until - since).days + 1) if since and until else None
 
     return {
-        "currency": "SGD",
+        "currency": _currency(handle, filters["account_ids"]),
         "direction": direction,
         # Echoed so a client can say "these figures describe a search", and
         # so a null range is explained rather than looking like a bug.
@@ -373,7 +409,7 @@ def trend(
         handle.context, bucket=chosen, rolling=window, **filters
     )
     return {
-        "currency": "SGD",
+        "currency": _currency(handle, filters["account_ids"]),
         "bucket": chosen,
         "rolling_window": window,
         "q": filters["q"],
@@ -559,7 +595,7 @@ def recurring(
         }
 
     return {
-        "currency": "SGD",
+        "currency": _currency(handle),
         "monthly_commitment_minor": sum(s.monthly_equivalent_minor for s in live),
         "series": [_out(s) for s in live],
         "due_soon": [_out(s) for s in live if s.is_due_within(today, due_within)],
@@ -920,9 +956,173 @@ def documents(
 
     An upload adds transactions to every figure on the dashboard. Without a way
     to see what is in the ledger and take one back out, that is a one-way door.
+
+    **A quarantined document carries the reason it failed**, in the words the
+    pipeline used. The reason lives in a file beside the ledger rather than in
+    a column, because it holds a traceback and the expected-versus-actual
+    numbers — but a client that can see something failed and cannot see why has
+    to send its operator to a terminal, which is not a self-hosted product, it
+    is a developer's build with a web page on it.
     """
     rows = handle.repository.list_documents(handle.context, parse_status)
-    return {"total": len(rows), "documents": rows[:limit]}
+    shown = rows[:limit]
+    quarantine_dir = handle.config.quarantine_dir_for(handle.profile)
+    for row in shown:
+        if row.get("parse_status") == STATUS_QUARANTINED:
+            row["reason"] = _reason_summary(
+                quarantine.read_reason(quarantine_dir, row["sha256"])
+            )
+    return {"total": len(rows), "documents": shown}
+
+
+def _reason_summary(payload: dict | None) -> dict | None:
+    """The half of a reason file that belongs on a screen.
+
+    The traceback stays out. It is the right thing in a report an operator
+    pastes to somebody and the wrong thing in a list of documents, and a client
+    that has to know which fields to ignore is one that will show the wrong
+    one. `finstone report` is still where the whole record lives.
+    """
+    if not payload:
+        return None
+    return {
+        "failure_class": payload.get("failure_class"),
+        "message": payload.get("message"),
+        "quarantined_at": payload.get("quarantined_at"),
+        "detail": payload.get("detail") or {},
+    }
+
+
+@app.post(f"{PREFIX}/documents/scan", tags=["ledger"], status_code=201)
+def scan_uploads(handle: Session) -> dict:
+    """Import whatever is sitting in the uploads folder for this profile.
+
+    The dashboard's upload button covers a handful of statements dragged into
+    a browser. It does not cover the other way people actually hold their
+    documents: a folder of eleven years of PDFs, mounted into the container,
+    which until now needed `docker compose run … finstone run` — a shell, on a
+    box, to do the ordinary thing.
+
+    Staging copies out of `uploads/` and never writes to it; the operator's own
+    files are not the pipeline's to move. Re-running is safe and is the point:
+    documents already in the ledger are recognised by digest and skipped, so
+    this is a sync rather than an import.
+    """
+    from ..pipeline.ingest import ingest_inbox
+    from ..pipeline.stage import stage
+    from ..storage.factory import build_blob_store, build_notifier
+
+    config = handle.config
+    try:
+        staged = stage(
+            config, handle.profile, repository=handle.repository, context=handle.context,
+        )
+    except ConfigError as exc:
+        # The prod guard. Deliberately not something this endpoint can waive:
+        # it is the mechanism that keeps real statements away from anything
+        # running unattended, and an API that could switch it off would be the
+        # way around it. See the development rules, Rule 2.
+        raise HTTPException(409, str(exc)) from exc
+
+    summary = ingest_inbox(
+        config, handle.context, handle.repository,
+        build_blob_store(config), build_notifier(config), profile=handle.profile,
+    )
+
+    repaired = None
+    if summary.imported or summary.unverified:
+        outcome = realign(handle.repository, handle.context)
+        repaired = {
+            "added": len(outcome.added),
+            "removed": len(outcome.removed),
+            "linked": len(outcome.result.links),
+        }
+
+    return {
+        "discovered": staged.discovered,
+        "staged": staged.staged,
+        "already_imported": staged.already_known,
+        "processed": summary.processed,
+        "imported": summary.imported,
+        "duplicates": summary.duplicates,
+        "quarantined": summary.quarantined,
+        "transactions": summary.txns_inserted,
+        "transfers": repaired,
+    }
+
+
+@app.post(f"{PREFIX}/documents/reparse", tags=["ledger"])
+def reparse_documents(
+    handle: Session,
+    sha256: Annotated[str | None, Query(description="One document, by digest")] = None,
+    quarantined_only: Annotated[bool, Query(description="Everything that failed")] = False,
+) -> dict:
+    """Read the stored originals again, after an adapter fix.
+
+    The counterpart to quarantining: a document set aside with a readable
+    reason is only half an answer if replaying it means shelling into the box.
+    Nothing is re-downloaded — the bytes are in the content-addressed store and
+    have never been touched, which is the whole reason they are kept.
+
+    **Not an inverse, and rule 2a does not ask it to be.** A reparse does not
+    undo anything; it replaces one reading of the same bytes with another, and
+    the way back is to fix the adapter and run it again. What rule 2a does
+    require is that it never costs the operator a decision, and it does not:
+    hand-set categories, hidden rows, manual transfer marks and paybacks are
+    carried across by `dedupe_key`. `decisions.dropped` counts the ones whose
+    row the new reading changed too much to recognise, and a client should say
+    so rather than let it pass as a clean run.
+    """
+    if sha256 and quarantined_only:
+        raise HTTPException(422, "give a digest or ask for the quarantined ones, not both")
+    if not sha256 and not quarantined_only:
+        raise HTTPException(
+            422, "give sha256=<digest> or quarantined_only=true; "
+            "reparsing the whole ledger from here is not offered",
+        )
+
+    # Locally, as the upload route does: the parser stack is a heavy import and
+    # a server that never parses anything should not pay for it.
+    from ..pipeline.ingest import reparse
+    from ..storage.factory import build_blob_store, build_notifier
+
+    config = handle.config
+    try:
+        summary = reparse(
+            config, handle.context, handle.repository,
+            build_blob_store(config), build_notifier(config),
+            sha256=sha256, quarantined_only=quarantined_only,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    repaired = None
+    if summary.imported or summary.unverified:
+        # The rows a pair was anchored to were replaced, so the pairs have to be
+        # made again — the same reason an upload realigns.
+        outcome = realign(handle.repository, handle.context)
+        repaired = {
+            "added": len(outcome.added),
+            "removed": len(outcome.removed),
+            "linked": len(outcome.result.links),
+        }
+
+    return {
+        "processed": summary.processed,
+        "imported": summary.imported,
+        "unverified": summary.unverified,
+        "quarantined": summary.quarantined,
+        "transactions": summary.txns_inserted,
+        "decisions": {
+            "restored": summary.decisions_restored,
+            "dropped": summary.decisions_dropped,
+        },
+        "documents": [
+            {"sha256": o.sha256, "status": o.status, "reason": o.reason}
+            for o in summary.outcomes
+        ],
+        "transfers": repaired,
+    }
 
 
 @app.delete(f"{PREFIX}/documents/{{sha256}}", tags=["ledger"])
@@ -949,6 +1149,41 @@ def delete_document(handle: Session, sha256: str) -> dict:
         outcome = realign(handle.repository, handle.context)
         repaired = {"linked": len(outcome.result.links), "removed": len(outcome.removed)}
     return {"sha256": sha256, "deleted": bool(removed), "transfers": repaired}
+
+
+@app.get(f"{PREFIX}/reconciliation", tags=["ledger"])
+def reconciliation(handle: Session) -> dict:
+    """Whether the ledger still agrees with the balances the banks declared.
+
+    Import-time validation proves each statement consistent with itself, at the
+    moment it was parsed. It cannot see what happens afterwards — a row two
+    overlapping statements both list, deduplicated correctly or not; a period
+    with no statement in it. Architecture §8.2 calls this the ultimate check
+    and puts a deadline on it: drift is something you want to know about that
+    month, not next year.
+
+    `clean` is the field a monitor should watch. The list is for the person who
+    then has to open two statements and find out which one is right — this
+    endpoint never corrects anything, because a ledger that adjusts itself to
+    match a number it cannot explain has stopped being a record.
+    """
+    from ..pipeline.reconcile import check
+
+    found = check(handle.repository, handle.context)
+    return {
+        "clean": not found,
+        "currency": _currency(handle),
+        "drifts": [
+            {
+                "account_id": d.account_id, "account": d.account, "kind": d.kind,
+                "since": d.since, "until": d.until,
+                "declared_minor": d.declared_minor,
+                "observed_minor": d.observed_minor,
+                "difference_minor": d.difference_minor,
+            }
+            for d in found
+        ],
+    }
 
 
 @app.get(f"{PREFIX}/review", tags=["categorisation"])
@@ -1517,7 +1752,7 @@ def growth(
         every=every,
     )
     return {
-        "currency": "SGD",
+        "currency": _currency(handle),
         "window_months": months,
         "since": since,
         "points": [

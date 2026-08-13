@@ -217,6 +217,35 @@ Existing rows for the document are deleted first, so a reparse is a replacement 
 a second import, and the stale `reason.json` is cleared so `finstone report` stops
 describing a failure that has since been fixed. The stored bytes are never touched.
 
+#### What a person decided survives it
+
+A reparse assigns new transaction ids, so a hand-set category, a hidden row, a manual
+transfer mark and a payback cannot follow their transaction across on their own. Those four
+are the only things in this ledger that no amount of reparsing regenerates — the rows come
+back from the store; the decisions about them exist in exactly one place.
+
+So they are captured before the delete and reattached after the replacement lands, matched
+on **`dedupe_key`**: it is derived from what the statement says, not from where the row sat,
+and is therefore the same before and after. That is what the key is for.
+
+A decision whose row did **not** come back — because the adapter fix legitimately changed
+what that row says, and a changed description is a changed key — is dropped, counted, and
+printed:
+
+```
+  kept:     14 operator decision(s) reattached to the replacement rows
+  LOST:      1 operator decision(s) had no row to return to
+```
+
+Putting the category on whatever now sits in that position would be worse than losing it: it
+would be wrong, and it would be silent. This is also why `cards --backfill` exists rather
+than being folded into a reparse — collecting card numbers needs no new reading of the rows,
+so it should not risk one.
+
+Deleting a document through `DELETE /documents/{sha256}` still takes its decisions with it,
+and that is correct: a delete is somebody saying they want the document and everything about
+it gone.
+
 ---
 
 ## 4. Routing to an adapter
@@ -473,6 +502,44 @@ verified one; treating them alike would quietly discard the only end-to-end corr
 guarantee the system has. If a bank offers both a CSV without balances and a PDF with them,
 the PDF is the better source despite being harder to parse.
 
+### 5.1 Reconciliation across statements
+
+Everything above proves one document consistent **with itself**, at the moment it was
+parsed. It cannot see what happens afterwards, and two things do:
+
+- overlapping statements are deduplicated into the ledger, and §6's `seq` limitation says
+  outright that a row can import twice if an institution reorders same-key rows;
+- a period with no statement in it at all.
+
+```
+finstone reconcile --profile prod       exits 1 if anything drifted
+GET /api/v1/reconciliation              { "clean": true, "drifts": [] }
+```
+
+Two claims about the same money are compared, per account, between consecutive statements:
+
+| Check | Reads | A failure means |
+|---|---|---|
+| `continuity` | one statement's closing against the next one's opening | usually a statement nobody has imported yet |
+| `movement` | the two closings against the ledger's own transactions in between | the ledger disagrees with the banks about what happened — a row imported twice, or one lost |
+
+Each transaction is counted **once**, whichever document delivered it, which is what makes
+the check correct on overlapping statements and what makes a double import visible.
+Statements declaring no balances are skipped rather than read as zero, and a gap in the
+corpus is reported as continuity rather than invented as movement.
+
+**A row posted after its own statement's period end counts in that period**, because that is
+where the bank counted it. OCBC's month-end interest credit is the case: value date 31 JUL,
+posting date 01 AUG, and inside the balance the July statement carries forward. Read on its
+own posting date it lands in August, whose declared movement does not expect it, and the
+account reports drift every month on a ledger that is exactly right. The clamp is one-sided
+— a date inside the period is never moved — so a row genuinely held twice still shows.
+
+Nothing here writes. The answer to real drift is a person opening the two statements; a
+ledger that adjusts itself to match a number it cannot explain has stopped being a record.
+The rules are in `app/domain/reconcile.py` and take no database, so the awkward cases are
+tested directly.
+
 ---
 
 ## 6. Idempotency and deduplication
@@ -498,10 +565,13 @@ group **as ordered in the source document**. This matters more than it looks:
 
 **Known limitation.** If an institution reorders same-key rows between two overlapping
 statements, `seq` assignment can differ and a transaction may import twice. This is rare —
-statement ordering is nearly always stable — and monthly reconciliation against the stated
-closing balance (architecture §8.2) catches the resulting drift. The alternative designs
-(assigning `seq` from what is already in the database) break idempotency outright, which is
-a worse trade.
+statement ordering is nearly always stable — and the alternative designs (assigning `seq`
+from what is already in the database) break idempotency outright, which is a worse trade.
+
+**What catches it is §5.1**, `finstone reconcile`: a row held twice is movement the banks
+never declared, between two closing balances that both know better. That check exists
+because this limitation does, rather than the limitation being excused by a check nobody
+had written.
 
 ### Reading the transaction table
 
@@ -709,9 +779,14 @@ and is not restated here, to avoid the two drifting apart.
 
 Phase 1 additions on top of it:
 
-- The initial migration creates the **full** §1 model. Phase 1 populates `source_document`,
-  `account`, `txn` and `statement_balance`; `txn_enrichment`, `recurrence_series` and
-  `txn_series_link` sit empty until the enrichment phase.
+- The initial migration creates the **full** §1 model. Ingestion populates `source_document`,
+  `account`, `txn` and `statement_balance`. Categorisation since filled in `txn_enrichment`,
+  though its `beneficiary` columns are still empty — the "for whom" label of §3.1 has no pass
+  and no endpoint. `recurrence_series` and `txn_series_link` remain empty **by design**:
+  detection is a pure function over the ledger, recomputed per request, and a stored series
+  would be a cached answer that a reparse silently invalidates. They are kept for the series
+  states of §3.2a rather than dropped and re-added. `app/storage/schema.py` says which tables
+  are written, beside the tables themselves.
 - **`statement_balance`** is a new table holding each account's stated opening and closing
   balance per document. Per-pocket balances need somewhere to live, and without them the
   monthly reconciliation in architecture §8.2 has nothing to compare against later.
@@ -798,13 +873,17 @@ the development rules in [the README](../README.md), Rule 3.
 | `finstone reparse --quarantined \| --sha256 <hash>` | Replay from the immutable store after an adapter fix |
 | `finstone cards [--backfill]` | The card numbers each card account has been known by |
 | `finstone status` | Document, account and transaction counts; quarantine depth; unverified count |
+| `finstone reconcile` | Check the ledger against every balance the banks declared |
 
 `cards --backfill` re-reads the stored card statements and records **only** the numbers they
 name. It exists so that a ledger built before those were collected does not have to be
-reparsed to gain them: a reparse assigns new transaction ids, and every categorisation,
-hidden row and manual transfer mark hanging off the old ones goes with them. It locates
-originals by digest rather than by the path recorded at import, so a ledger moved onto
-another box — or into a container — still finds them.
+reparsed to gain them: a reparse re-reads every row, and re-reading rows that are already
+correct is a risk taken for nothing. It locates originals by digest rather than by the path
+recorded at import, so a ledger moved onto another box — or into a container — still finds
+them.
+
+`reconcile` is the check architecture §8.2 calls the ultimate one, and it exits `1` when
+anything drifted so a timer can act on it. See §5.1 below.
 
 ---
 

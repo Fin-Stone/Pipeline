@@ -118,12 +118,10 @@ def validate(document: ParsedDocument, *, amount_ceiling_minor: int) -> Validati
             detail={"declared": document.declared_txn_count, "parsed": document.txn_count},
         ))
 
-    if failures:
-        status = STATUS_IMPORTED  # unused; the caller quarantines on failures
-    elif unverified:
-        status = STATUS_IMPORTED_UNVERIFIED
-    else:
-        status = STATUS_IMPORTED
+    # `status` describes a document that passed. A failure quarantines it and
+    # the caller never reads this, which is why the failure branch here said
+    # `imported` — true only in the sense that nothing looked at it.
+    status = STATUS_IMPORTED_UNVERIFIED if unverified else STATUS_IMPORTED
 
     return ValidationResult(
         status=status,

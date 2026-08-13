@@ -741,6 +741,14 @@ than sufficient at this volume. Adding Redis or RabbitMQ here is pure operationa
   balance per account against the statement's stated closing balance. Any drift means the
   pipeline is lying to you, and you want to know that month, not next year.
 
+  *Built:* `finstone reconcile` and `GET /api/v1/reconciliation`, with the rules in
+  `app/domain/reconcile.py`. It compares consecutive statements per account on two axes —
+  one statement's closing against the next one's opening, and the ledger's own movement
+  between the two closings — counting each transaction once regardless of how many
+  overlapping statements delivered it. That second axis is what catches the `seq` limitation
+  in `app/domain/dedupe.py`. It reports and never corrects. What is still missing is the
+  *alerting* on it, which waits on the notifier below.
+
 ---
 
 ## 9. Data protection and backups

@@ -32,6 +32,28 @@ same ledger then answers `/summary` with a number on SQLite and a string on
 Postgres. Every money sum is cast back to an integer in SQL. A client is
 entitled to `typeof === "number"` on every `_minor` field.
 
+**1a. The currency is the ledger's, and is never assumed.** Every response that
+reports money carries `currency`, read from the accounts in scope — not
+declared by the server and not compiled into the client. It is `null` only on
+an empty ledger, where there are no figures for a currency to describe.
+
+Where the accounts in scope are held in **more than one** currency, the
+response is `501` with the list and the reason, because adding SGD to USD gives
+a number that is not money in any currency:
+
+```json
+{ "detail": { "error": "mixed currencies", "currencies": ["SGD", "USD"],
+              "reason": "…Filter to one currency with account_id." } }
+```
+
+The refusal comes with the way through it — `account_id` narrows the scope — so
+a household with one foreign account does not lose the dashboard. Per-currency
+breakdowns are the real answer and are not built.
+
+This was `SGD`, unconditionally, in four endpoints. Correct for the household
+this was built for and wrong for every other one, in the way that looks like it
+works: the numbers were right and only the symbol lied.
+
 **2. Amounts are signed by effect on the account.** Spending is **negative**,
 money in is positive, and card balances are stored negated so one formula
 covers both. The API does not flip signs for presentation.
@@ -51,6 +73,7 @@ nobody can reach is not an undo:
 | `POST /review/decide` | `DELETE /review/decide?counterparty=` | `GET /rules` |
 | `POST /rules` | `DELETE /rules/{id}` | `GET /rules?origin=all` |
 | `POST /documents` | `DELETE /documents/{sha256}` | `GET /documents` |
+| `POST /documents/scan` | `DELETE /documents/{sha256}`, per document | `GET /documents` |
 | `POST /recurring/dismiss` | `DELETE /recurring/dismiss` | `GET /recurring/dismissed` |
 | `POST /recurring/mark` | `DELETE /recurring/mark` | `GET /recurring/marked` |
 | `POST /transfers/rematch?apply=true` | run it again with the old window | `GET /transfers` |
@@ -60,6 +83,12 @@ transfer had the inverse and not the listing for a while: the row vanished from
 every screen, the totals moved, and nothing in any client could name it again.
 It was undoable in principle and unreachable in practice, which is the failure
 mode this rule exists to catch.
+
+`POST /documents/reparse` is deliberately not in the table, and is the one
+exception worth naming: it replaces one reading of a document's own bytes with
+another, so there is nothing to invert — the way back is to fix the adapter and
+run it again. What the rule's spirit does demand of it is that it never costs
+the operator a decision, and it does not; see the endpoint.
 
 Where the reverse would destroy something — deleting a category that
 transactions are filed under — the API **refuses and says how much is in the
@@ -235,6 +264,99 @@ way to carry a file. `201`.
 `{ "total": 246, "documents": [...] }` — what is in the ledger. The listing half
 of rule 2a: an upload moves every figure on the dashboard, so there has to be
 somewhere to see what was added and take one back out.
+
+**A quarantined document carries `reason`**, in the words the pipeline used:
+
+```json
+{ "failure_class": "unknown_layout", "message": "no adapter claims this layout",
+  "quarantined_at": "2026-08-13T02:11:07Z", "detail": { ... } }
+```
+
+The traceback is deliberately not in it — that belongs in `finstone report`,
+which is the whole record and is meant to be pasted to somebody. A client that
+had to know which fields to ignore would eventually show the wrong one.
+
+Imported documents carry no `reason` key at all, rather than a null one.
+
+### `POST /api/v1/documents/scan`
+
+Stage and import whatever is sitting in the uploads folder for this profile.
+
+```json
+{ "discovered": 246, "staged": 3, "already_imported": 243, "processed": 3,
+  "imported": 3, "duplicates": 0, "quarantined": 0, "transactions": 191,
+  "transfers": { "added": 2, "removed": 0, "linked": 209 } }
+```
+
+For the folder of statements too large to drag into a browser, which until this
+existed meant `docker compose run … finstone run` — a shell, on a box, to do
+the ordinary thing.
+
+- **Safe to repeat, and meant to be.** Documents already in the ledger are
+  recognised by digest and skipped, so this is a sync rather than an import.
+- **`uploads/` is never written to.** Files are copied out of it. They belong
+  to the operator, not to the pipeline.
+- **`409` for the prod profile without `FINSTONE_ALLOW_PROD`**, with the
+  variable named in the message. This endpoint cannot waive that guard: an API
+  that could switch it off would be the way around it.
+
+### `POST /api/v1/documents/reparse?sha256=&quarantined_only=`
+
+Read the stored originals again, after an adapter fix.
+
+```json
+{ "processed": 1, "imported": 1, "unverified": 0, "quarantined": 0,
+  "transactions": 82, "decisions": { "restored": 14, "dropped": 0 },
+  "documents": [{ "sha256": "…", "status": "imported", "reason": null }],
+  "transfers": { "added": 0, "removed": 0, "linked": 209 } }
+```
+
+Give a digest **or** ask for the quarantined ones; both together is `422`, and
+so is neither — reparsing the whole ledger is not offered from here. An unknown
+digest is `404`. Nothing is re-downloaded: the bytes are in the
+content-addressed store and have never been touched.
+
+**Not an inverse, and rule 2a does not ask it to be.** A reparse does not undo
+anything — it replaces one reading of the same bytes with another, and the way
+back is to fix the adapter and run it again.
+
+**What rule 2a does require is that it never costs a decision.** Hand-set
+categories, hidden rows, manual transfer marks and paybacks are captured by
+`dedupe_key` before the rows are replaced and reattached afterwards; the key is
+derived from what the statement says and is stable across a reparse, which is
+what it exists for. `decisions.dropped` counts the ones whose row the new
+reading changed too much to recognise — a category is never moved onto a
+neighbouring transaction to avoid the loss, because wrong and silent is worse
+than gone and counted. **A client should surface a non-zero `dropped`.**
+
+### `GET /api/v1/reconciliation`
+
+Whether the ledger still agrees with the balances the banks declared.
+
+```json
+{ "clean": false, "currency": "SGD",
+  "drifts": [{ "account_id": 3, "account": "OCBC 1234/360", "kind": "movement",
+               "since": "2025-05-28", "until": "2025-06-28",
+               "declared_minor": -4500, "observed_minor": -9000,
+               "difference_minor": -4500 }] }
+```
+
+Validation at import proves one statement consistent with itself, at the moment
+it was parsed. This is the half that can only be asked afterwards: whether the
+ledger still agrees once overlapping documents have been deduplicated into it.
+Architecture §8.2 calls it the ultimate check and puts a deadline on it — drift
+is something you want to know that month, not next year.
+
+- `clean` is the field a monitor watches. Everything else is for the person who
+  then opens two statements.
+- `kind` is `continuity` — one statement's closing balance disagreeing with the
+  next one's opening, usually a statement nobody has imported yet — or
+  `movement`, the ledger disagreeing with the banks about what happened in
+  between. The second is what catches a transaction imported twice.
+- Both claims are given, never only the difference: the difference alone does
+  not say which side to go and look at.
+- **It never corrects anything.** A ledger that adjusts itself to match a
+  number it cannot explain has stopped being a record.
 
 ### `DELETE /api/v1/documents/{sha256}`
 
@@ -1005,11 +1127,20 @@ name is not one.
 
 Named so that their absence is a decision rather than an oversight.
 
-| Missing | Why it matters |
-|---|---|
-| Surviving a reparse | `reparse` deletes and rewrites a document's rows with new ids, so hidden rows, hand-set categories, manual transfer marks and paybacks are **silently discarded**. Re-matching them by `dedupe_key` — which is stable across a reparse and exists for exactly this — is the fix and is not built. |
-| Splitting one payback across two charges | A link consumes the whole inflow. The schema carries an amount so this can be added without a migration; the unallocated remainder would then have to keep counting as income. |
-| Renaming or merging a category | `POST` adds; neither rename nor merge exists, and both must rewrite the enrichments that named the old one. |
-| A category weight or budget | Categories carry `position` and nothing else, so no endpoint can say a month was over or under. |
-| Reviewing what is *already* categorised | `/review` lists only unmatched counterparties, so a wrong rule among the 398 is invisible until someone happens to see the row. |
-| Authentication | There is none. See §5.2: per-server, OIDC, no password ever stored. **Do not deploy this beyond a trusted network until it exists.** |
+Each of these is scheduled in [roadmap.md](roadmap.md); the phase is named so
+the absence has a date attached rather than only a reason.
+
+| Missing | Why it matters | When |
+|---|---|---|
+| Authentication | There is none. See §5.2: per-server, OIDC, no password ever stored. **Do not deploy this beyond a trusted network until it exists.** | Alpha 4 |
+| Renaming or merging a category | `POST` adds; neither rename nor merge exists. A rule references a category by id so a rename cannot orphan it, but a merge must rewrite every enrichment naming both. | Alpha 2 |
+| A category weight or budget | Categories carry `position` and nothing else, so no endpoint can say a month was over or under. | Alpha 2 |
+| Reviewing what is *already* categorised | `/review` lists only unmatched counterparties, so a wrong rule among the existing set is invisible until someone happens to see the row. | Alpha 2 |
+| A series state, and alerts on it | `detected` / `declared` / `watching` / `confirmed` (§3.2a). Dismiss and mark exist; nothing alerts, and nothing can explain a break in a pattern. | Alpha 2 |
+| A per-currency breakdown | Mixed-currency scopes are refused rather than summed — see promise 1a. The honest total is one figure per currency, and no endpoint emits that shape. | Alpha 4 |
+| Splitting one payback across two charges | A link consumes the whole inflow. The schema carries an amount so this can be added without a migration; the unallocated remainder would then have to keep counting as income. | Beta 2 |
+
+One entry that used to be here is gone: **surviving a reparse**. Hand-set
+categories, hidden rows, manual transfer marks and paybacks are now carried
+across by `dedupe_key`, and what cannot be carried is counted and reported
+rather than dropped in silence. See `POST /documents/reparse`.

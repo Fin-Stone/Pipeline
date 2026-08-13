@@ -1,0 +1,99 @@
+# Run the suite, on both engines.
+#
+# The dual run is not thoroughness for its own sake — it is the enforcement
+# mechanism for Rule 1 of the development rules. Shared code has to be portable
+# SQL: a Postgres-ism breaks the SQLite job, a SQLite assumption breaks the
+# Postgres one. Two real bugs reached the ledger before this workflow existed
+# and both were invisible on a single engine: a NUL byte in a description that
+# SQLite stores happily and Postgres refuses outright, and SUM(bigint) widening
+# to numeric so the same ledger answered /summary with a number on one engine
+# and a string on the other.
+#
+# The image workflow next door proves it builds. This proves it works.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # pgvector rather than plain postgres, so this is the same image the
+    # deployment runs and the later vector-search phase needs no change here.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: finstone
+          POSTGRES_PASSWORD: finstone
+          POSTGRES_DB: finstone
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U finstone"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.12, matching the container. pdfplumber and psycopg wheels on 3.14 are
+      # still patchy, and the parser is the last thing worth debugging against
+      # a moving toolchain.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # `postgres` too: the driver is an optional extra so a headless parsing
+      # box does not carry it, but the second half of this job is nothing
+      # without it — and a missing driver would skip the Postgres run silently,
+      # which is the failure this workflow exists to prevent.
+      - run: pip install -e ".[dev,api,postgres]"
+
+      # The suite adds the Postgres engine only when TEST_DATABASE_URL is set,
+      # and skips the migration test without it — so a database that is not
+      # actually reachable would turn the dual-engine run into a single-engine
+      # one that still reports green. Proving the connection first is what
+      # stops this workflow quietly becoming half of itself.
+      - name: prove the Postgres half is real
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://finstone:finstone@localhost:5432/finstone
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+          with create_engine(os.environ["TEST_DATABASE_URL"]).connect() as conn:
+              print(conn.execute(text("select version()")).scalar_one())
+          PY
+
+      # uploads/dummy is gitignored, so the adapter tests that need real
+      # layouts skip cleanly here. Everything else runs, on both engines.
+      - name: pytest
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://finstone:finstone@localhost:5432/finstone
+        run: python -m pytest -q
+
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/pwa/package-lock.json
+      # `npm ci` from the lockfile, and the build runs `tsc -b` first — so a
+      # type error in the client fails here rather than in the image build,
+      # where the message is buried in a layer.
+      - run: npm ci
+        working-directory: ui/pwa
+      - run: npm run build
+        working-directory: ui/pwa

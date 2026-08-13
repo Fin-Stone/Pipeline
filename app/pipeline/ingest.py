@@ -70,6 +70,11 @@ class IngestSummary:
     #: rename. Surfaced because an automatic adaptation should be reviewable,
     #: not invisible.
     healed: int = 0
+    #: What a reparse carried across, and what it could not. Both halves are
+    #: reported: a decision that did not survive is the one thing here nobody
+    #: can regenerate, so it is told rather than counted silently.
+    decisions_restored: int = 0
+    decisions_dropped: int = 0
     outcomes: tuple[IngestOutcome, ...] = ()
 
 
@@ -415,6 +420,13 @@ def reparse(
     bugfix can be applied to years of history without re-downloading anything.
     Existing rows for the document are deleted first, so a reparse is a
     replacement rather than a second import.
+
+    **What a person decided is carried across it.** The rows are regenerable
+    and the decisions about them are not, so hand-set categories, hidden rows,
+    manual transfer marks and paybacks are captured by `dedupe_key` before the
+    delete and reattached after the replacement lands. Anything whose row did
+    not come back is reported rather than approximated — see
+    `decisions_for_document`.
     """
     registry = registry or build_default_registry(config.learned_rules_path)
 
@@ -428,6 +440,7 @@ def reparse(
         targets = repository.list_documents(context)
 
     outcomes = []
+    restored = dropped = 0
     for target in targets:
         # By digest first, exactly as `backfill_card_numbers` does and for the
         # same reason: `storage_path` records where the file sat on whichever
@@ -449,6 +462,12 @@ def reparse(
             ))
             continue
 
+        # Read before the delete, restored after the replacement rows land.
+        # A reparse assigns new transaction ids, so a hand-set category, a
+        # hidden row, a manual transfer mark and a payback cannot follow their
+        # transaction across on their own — and those four are the only things
+        # in this ledger that no amount of reparsing can regenerate.
+        decisions = repository.decisions_for_document(context, target["sha256"])
         repository.delete_document(context, target["sha256"])
         # The profile comes off the row being replaced rather than from an
         # argument: `reparse` is scoped by tenant already, and the document
@@ -471,6 +490,24 @@ def reparse(
             provenance=(target["source_profile"], target["source_relpath"]),
         ))
 
+        # Unconditionally, including when the replay quarantined: there are no
+        # rows to reattach to then, and the operator needs to hear that their
+        # decisions went with the document rather than discover it on the
+        # dashboard.
+        report = repository.reapply_decisions(context, decisions)
+        restored += sum(report["restored"].values())
+        # Per document, not the running total: the notification names a digest,
+        # and attributing every earlier document's losses to this one would
+        # send the operator to the wrong statement.
+        lost = sum(report["dropped"].values())
+        dropped += lost
+        if lost:
+            notifier.notify(
+                "Decisions did not survive a reparse",
+                f"{lost} operator decision(s) had no row to return to",
+                severity=SEVERITY_WARNING, sha256=target["sha256"],
+            )
+
     return IngestSummary(
         processed=len(outcomes),
         imported=sum(1 for o in outcomes if o.status == STATUS_IMPORTED),
@@ -479,6 +516,8 @@ def reparse(
         quarantined=sum(1 for o in outcomes if o.status == STATUS_QUARANTINED_OUT),
         txns_inserted=sum(o.txns_inserted for o in outcomes),
         healed=sum(1 for o in outcomes if o.detail.get("healed_vendor")),
+        decisions_restored=restored,
+        decisions_dropped=dropped,
         outcomes=tuple(outcomes),
     )
 

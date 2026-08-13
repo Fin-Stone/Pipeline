@@ -1,0 +1,25 @@
+# One ingest pass over uploads/. Driven by finstone-ingest.timer.
+#
+#     sudo systemctl start finstone-ingest.service
+#     journalctl -u finstone-ingest.service
+#
+# Idempotent by construction: staging skips what the ledger already holds by
+# digest, and ingestion skips what is already in the store. Running it hourly
+# on a folder nobody has touched does nothing at all, which is what makes it
+# safe to schedule rather than remember.
+
+[Unit]
+Description=Finstone ingest from uploads
+Requires=docker.service
+After=docker.service finstone.service
+
+[Service]
+Type=oneshot
+User=RUN_USER
+WorkingDirectory=INSTALL_DIR
+
+# The script, not a bare `docker compose run`, because the prod profile needs
+# FINSTONE_ALLOW_PROD set for exactly one command — see infra/scripts/ingest.sh.
+# Putting the variable in this unit's Environment= would leave it set for
+# anything else the unit ever grows, which is how a guard stops guarding.
+ExecStart=INSTALL_DIR/infra/scripts/ingest.sh --profile FINSTONE_PROFILE

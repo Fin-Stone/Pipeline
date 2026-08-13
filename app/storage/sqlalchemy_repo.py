@@ -876,6 +876,100 @@ class SqlAlchemyLedgerRepository:
         with self._engine.connect() as conn:
             return [dict(row._mapping) for row in conn.execute(stmt)]
 
+    def declared_balances(self, context: TenantContext) -> list[dict]:
+        """Every opening and closing balance a statement stated, with its period.
+
+        `balance_history` next door answers "what was the household worth" and
+        carries closings only. This answers "does the ledger agree with the
+        banks", which needs both ends and the dates they bracket.
+        """
+        balance, document, account = (
+            schema.statement_balance.c, schema.source_document.c, schema.account.c,
+        )
+        stmt = (
+            select(
+                balance.account_id,
+                account.institution, account.account_ref_masked, account.sub_account_label,
+                document.period_start, document.period_end,
+                balance.opening_balance_minor, balance.closing_balance_minor,
+            )
+            .select_from(
+                schema.statement_balance
+                .join(schema.source_document, balance.source_document_id == document.id)
+                .join(schema.account, balance.account_id == account.id)
+            )
+            .where(balance.tenant_id == context.tenant_id)
+            .order_by(balance.account_id, document.period_end)
+        )
+        with self._engine.connect() as conn:
+            return [dict(row._mapping) for row in conn.execute(stmt)]
+
+    def daily_movement(self, context: TenantContext) -> dict[tuple[int, object], int]:
+        """What the ledger says moved, per account per day.
+
+        Per day rather than per span, so the arithmetic that decides which
+        transactions fall inside which statement period lives in the domain
+        with the rest of the reconciliation rules — and can be tested without
+        a database.
+
+        **Every transaction once**, whichever document delivered it: two
+        overlapping statements listing the same purchase describe one purchase,
+        and the whole point of the check is to notice when the ledger holds it
+        twice.
+
+        **Dated no later than the statement that counted it.** OCBC posts a
+        month-end interest credit on the following day — value date 31 JUL,
+        posting date 01 AUG — and counts it in the balance the July statement
+        carries forward. Bucketing that row on its own posting date puts it in
+        August, whose declared movement does not expect it, and the account
+        then reports drift every month on a ledger that is perfectly correct.
+        So a posting date past its own document's period end is read as landing
+        on that period end, which is where the balances already put it.
+
+        The clamp is one-sided. A date inside the period is never moved, and
+        `dates_within_period` has already refused anything dated before it.
+        """
+        txn, document = schema.txn.c, schema.source_document.c
+        stmt = (
+            select(
+                txn.account_id, txn.posted_date, document.period_end,
+                cast(func.sum(txn.amount_minor), BigInteger),
+            )
+            .select_from(
+                schema.txn.join(schema.source_document, txn.source_document_id == document.id)
+            )
+            .where(txn.tenant_id == context.tenant_id)
+            .group_by(txn.account_id, txn.posted_date, document.period_end)
+        )
+        movement: dict[tuple[int, object], int] = {}
+        with self._engine.connect() as conn:
+            for account_id, on, period_end, total in conn.execute(stmt):
+                # `min` in Python rather than a SQL LEAST: SQLite spells that
+                # `min` and Postgres `least`, and Rule 1's seam is worth more
+                # than saving one line here.
+                key = (account_id, min(on, period_end) if period_end else on)
+                movement[key] = movement.get(key, 0) + int(total or 0)
+        return movement
+
+    def currencies(self, context: TenantContext, account_ids=None) -> list[str]:
+        """Every currency the accounts in scope are denominated in.
+
+        The ledger has held one per account since migration `0001`, and the
+        parsers have always read it off the statement. It was the API that
+        printed `SGD` beside every total regardless — which is right for this
+        household and a lie for the first one with a foreign-currency account,
+        in the direction that looks like it works.
+
+        More than one answer here means no single total is meaningful, and the
+        caller is expected to say so rather than add them together.
+        """
+        columns = schema.account.c
+        stmt = select(columns.currency.distinct()).where(columns.tenant_id == context.tenant_id)
+        if account_ids:
+            stmt = stmt.where(columns.id.in_(list(account_ids)))
+        with self._engine.connect() as conn:
+            return sorted(conn.execute(stmt).scalars())
+
     def list_recurrence_dismissals(self, context: TenantContext) -> list[dict]:
         """Series the operator has said are not subscriptions."""
         dismissal = schema.recurrence_dismissal.c
@@ -1648,6 +1742,309 @@ class SqlAlchemyLedgerRepository:
                 .where(schema.transfer_link.c.tenant_id == context.tenant_id)
             ).scalar_one()
 
+    #: The shape both halves of the carry agree on. Named once so a caller can
+    #: rely on every key being present even when a document has no decisions on
+    #: it at all, and so adding a fifth kind is one edit rather than four.
+    DECISION_KINDS = ("categories", "hidden", "transfers", "paybacks")
+
+    def decisions_for_document(self, context: TenantContext, sha256: str) -> dict:
+        """Everything a person decided about this document's rows.
+
+        **Keyed by `dedupe_key`, never by transaction id**, because the ids are
+        exactly what a reparse throws away: it deletes a document's rows and
+        writes new ones with new ids. The key is derived from what the statement
+        says and is stable across that, which is the reason it exists.
+
+        Read before the delete and handed to `reapply_decisions` after the
+        replacement rows land. Links carry the key of *both* legs, including a
+        leg belonging to some other document: resolving all of them the same way
+        costs nothing and is what makes a statement holding both halves of its
+        own transfer come back intact.
+
+        Only what a person decided. The matcher's own links are derived and are
+        rebuilt by running the pass again, so carrying them would be preserving
+        a cached answer across the very change that invalidates it.
+        """
+        txn = schema.txn.c
+        empty = {kind: [] for kind in self.DECISION_KINDS}
+        with self._engine.connect() as conn:
+            document_id = conn.execute(
+                select(schema.source_document.c.id).where(
+                    (schema.source_document.c.tenant_id == context.tenant_id)
+                    & (schema.source_document.c.sha256 == sha256)
+                )
+            ).scalar_one_or_none()
+            if document_id is None:
+                return empty
+
+            doomed = select(txn.id).where(
+                (txn.tenant_id == context.tenant_id)
+                & (txn.source_document_id == document_id)
+            )
+
+            enrichment = schema.txn_enrichment.c
+            categories = [
+                {
+                    "key": r.dedupe_key, "category": r.category,
+                    "subcategory": r.subcategory, "beneficiary": r.beneficiary,
+                    "beneficiary_member_id": r.beneficiary_member_id,
+                }
+                for r in conn.execute(
+                    select(
+                        txn.dedupe_key, enrichment.category, enrichment.subcategory,
+                        enrichment.beneficiary, enrichment.beneficiary_member_id,
+                    )
+                    .select_from(
+                        schema.txn_enrichment.join(schema.txn, enrichment.txn_id == txn.id)
+                    )
+                    .where(
+                        (enrichment.tenant_id == context.tenant_id)
+                        & (enrichment.source == "human")
+                        & enrichment.txn_id.in_(doomed)
+                    )
+                )
+            ]
+
+            hidden = schema.hidden_txn.c
+            hidden_rows = [
+                {"key": r.dedupe_key, "note": r.note}
+                for r in conn.execute(
+                    select(txn.dedupe_key, hidden.note)
+                    .select_from(schema.hidden_txn.join(schema.txn, hidden.txn_id == txn.id))
+                    .where(
+                        (hidden.tenant_id == context.tenant_id)
+                        & hidden.txn_id.in_(doomed)
+                    )
+                )
+            ]
+
+            link = schema.transfer_link.c
+            out_leg, in_leg = schema.txn.alias("out_leg"), schema.txn.alias("in_leg")
+            transfers = [
+                {
+                    "out_key": r.out_key, "in_key": r.in_key,
+                    "amount_minor": r.amount_minor, "days_apart": r.days_apart,
+                    "evidence": r.evidence,
+                }
+                for r in conn.execute(
+                    select(
+                        out_leg.c.dedupe_key.label("out_key"),
+                        in_leg.c.dedupe_key.label("in_key"),
+                        link.amount_minor, link.days_apart, link.evidence,
+                    )
+                    .select_from(
+                        schema.transfer_link
+                        .join(out_leg, link.out_txn_id == out_leg.c.id)
+                        # Outer: a manual mark may be one-sided, and dropping
+                        # those would silently un-exclude money the operator
+                        # said had left the household.
+                        .outerjoin(in_leg, link.in_txn_id == in_leg.c.id)
+                    )
+                    .where(
+                        (link.tenant_id == context.tenant_id)
+                        & (link.origin == "manual")
+                        & (link.out_txn_id.in_(doomed) | link.in_txn_id.in_(doomed))
+                    )
+                )
+            ]
+
+            payback = schema.payback_link.c
+            expense_leg, income_leg = schema.txn.alias("expense_leg"), schema.txn.alias("income_leg")
+            paybacks = [
+                {
+                    "expense_key": r.expense_key, "income_key": r.income_key,
+                    "amount_minor": r.amount_minor, "note": r.note,
+                }
+                for r in conn.execute(
+                    select(
+                        expense_leg.c.dedupe_key.label("expense_key"),
+                        income_leg.c.dedupe_key.label("income_key"),
+                        payback.amount_minor, payback.note,
+                    )
+                    .select_from(
+                        schema.payback_link
+                        .join(expense_leg, payback.expense_txn_id == expense_leg.c.id)
+                        .join(income_leg, payback.income_txn_id == income_leg.c.id)
+                    )
+                    .where(
+                        (payback.tenant_id == context.tenant_id)
+                        & (
+                            payback.expense_txn_id.in_(doomed)
+                            | payback.income_txn_id.in_(doomed)
+                        )
+                    )
+                )
+            ]
+
+        return {
+            "categories": categories, "hidden": hidden_rows,
+            "transfers": transfers, "paybacks": paybacks,
+        }
+
+    def reapply_decisions(self, context: TenantContext, decisions: dict) -> dict:
+        """Reattach what `decisions_for_document` captured, matching by key.
+
+        A decision whose row did not come back is **dropped and counted**, never
+        approximated. An adapter fix can legitimately change what a row says,
+        and a category silently landing on the neighbouring transaction would be
+        a worse outcome than the loss it was avoiding — so the report is the
+        feature here, not a diagnostic. The caller prints it.
+
+        Idempotent in the way that matters: re-running it over rows that already
+        carry the decision changes nothing and counts nothing as restored.
+        """
+        restored = {kind: 0 for kind in self.DECISION_KINDS}
+        dropped = {kind: 0 for kind in self.DECISION_KINDS}
+        if not any(decisions.get(kind) for kind in self.DECISION_KINDS):
+            return {"restored": restored, "dropped": dropped}
+
+        wanted = set()
+        for row in decisions.get("categories", ()):
+            wanted.add(row["key"])
+        for row in decisions.get("hidden", ()):
+            wanted.add(row["key"])
+        for row in decisions.get("transfers", ()):
+            wanted.update(k for k in (row["out_key"], row["in_key"]) if k)
+        for row in decisions.get("paybacks", ()):
+            wanted.update((row["expense_key"], row["income_key"]))
+
+        ids = self._ids_for_keys(context, wanted)
+        now = datetime.now(timezone.utc)
+        tenant = context.tenant_id
+
+        with self._engine.begin() as conn:
+            enrichment = schema.txn_enrichment.c
+            for row in decisions.get("categories", ()):
+                txn_id = ids.get(row["key"])
+                if txn_id is None:
+                    dropped["categories"] += 1
+                    continue
+                # Replaces whatever else names the row, exactly as
+                # `set_human_category` does: a correction is the last word.
+                conn.execute(schema.txn_enrichment.delete().where(
+                    (enrichment.tenant_id == tenant) & (enrichment.txn_id == txn_id)
+                ))
+                conn.execute(schema.txn_enrichment.insert(), [{
+                    "tenant_id": tenant, "txn_id": txn_id,
+                    "category": row["category"], "subcategory": row["subcategory"],
+                    "beneficiary": row["beneficiary"],
+                    "beneficiary_member_id": row["beneficiary_member_id"],
+                    "confidence": 1.0, "source": "human", "computed_at": now,
+                }])
+                restored["categories"] += 1
+
+            hidden = schema.hidden_txn.c
+            for row in decisions.get("hidden", ()):
+                txn_id = ids.get(row["key"])
+                if txn_id is None:
+                    dropped["hidden"] += 1
+                    continue
+                already = conn.execute(select(hidden.id).where(
+                    (hidden.tenant_id == tenant) & (hidden.txn_id == txn_id)
+                )).first()
+                if already:
+                    continue
+                conn.execute(schema.hidden_txn.insert(), [{
+                    "tenant_id": tenant, "txn_id": txn_id,
+                    "note": row["note"], "hidden_at": now,
+                }])
+                restored["hidden"] += 1
+
+            link = schema.transfer_link.c
+            for row in decisions.get("transfers", ()):
+                out_id = ids.get(row["out_key"])
+                in_id = ids.get(row["in_key"]) if row["in_key"] else None
+                # A one-sided mark stays one-sided; a two-sided one needs both
+                # halves or it is a different claim from the one made.
+                if out_id is None or (row["in_key"] and in_id is None):
+                    dropped["transfers"] += 1
+                    continue
+                legs = [i for i in (out_id, in_id) if i is not None]
+                taken = conn.execute(select(link.id).where(
+                    (link.tenant_id == tenant)
+                    & (link.out_txn_id.in_(legs) | link.in_txn_id.in_(legs))
+                )).first()
+                if taken:
+                    # The matcher reached it first and said the same thing. Not
+                    # a loss, and not a second link either — one row belongs to
+                    # at most one movement.
+                    continue
+                conn.execute(schema.transfer_link.insert(), [{
+                    "tenant_id": tenant, "out_txn_id": out_id, "in_txn_id": in_id,
+                    "amount_minor": row["amount_minor"], "days_apart": row["days_apart"],
+                    "evidence": row["evidence"], "origin": "manual", "linked_at": now,
+                }])
+                restored["transfers"] += 1
+
+            payback = schema.payback_link.c
+            for row in decisions.get("paybacks", ()):
+                expense_id = ids.get(row["expense_key"])
+                income_id = ids.get(row["income_key"])
+                if expense_id is None or income_id is None:
+                    dropped["paybacks"] += 1
+                    continue
+                amounts = dict(conn.execute(
+                    select(schema.txn.c.id, schema.txn.c.amount_minor).where(
+                        (schema.txn.c.tenant_id == tenant)
+                        & schema.txn.c.id.in_([expense_id, income_id])
+                    )
+                ).all())
+                # The reparse may have changed the signs the link relied on. A
+                # payback against something that is no longer a charge is not a
+                # payback, and re-linking it would discount the wrong row.
+                charge = amounts.get(expense_id, 0)
+                if charge >= 0 or amounts.get(income_id, 0) <= 0:
+                    dropped["paybacks"] += 1
+                    continue
+                taken = conn.execute(select(payback.id).where(
+                    (payback.tenant_id == tenant) & (payback.income_txn_id == income_id)
+                )).first()
+                if taken:
+                    continue
+                # And it may have changed the amount. `link_paybacks` refuses to
+                # discount a charge by more than the charge; restoring must not
+                # be the way around that, or a corrected statement could come
+                # back with a transaction reading as negative spending.
+                already = conn.execute(
+                    select(func.coalesce(func.sum(payback.amount_minor), 0)).where(
+                        (payback.tenant_id == tenant)
+                        & (payback.expense_txn_id == expense_id)
+                    )
+                ).scalar_one()
+                if already + row["amount_minor"] > abs(charge):
+                    dropped["paybacks"] += 1
+                    continue
+                conn.execute(schema.payback_link.insert(), [{
+                    "tenant_id": tenant, "expense_txn_id": expense_id,
+                    "income_txn_id": income_id, "amount_minor": row["amount_minor"],
+                    "note": row["note"], "linked_at": now,
+                }])
+                restored["paybacks"] += 1
+
+        return {"restored": restored, "dropped": dropped}
+
+    def _ids_for_keys(self, context: TenantContext, keys) -> dict[str, int]:
+        """Resolve dedupe keys back to the rows that now carry them.
+
+        `(tenant_id, dedupe_key)` is unique, so this is a one-to-one map and a
+        key that resolves to nothing simply did not come back.
+        """
+        keys = list(keys)
+        found: dict[str, int] = {}
+        if not keys:
+            return found
+        with self._engine.connect() as conn:
+            for start in range(0, len(keys), _KEY_CHUNK):
+                chunk = keys[start:start + _KEY_CHUNK]
+                rows = conn.execute(
+                    select(schema.txn.c.dedupe_key, schema.txn.c.id).where(
+                        (schema.txn.c.tenant_id == context.tenant_id)
+                        & (schema.txn.c.dedupe_key.in_(chunk))
+                    )
+                ).all()
+                found.update({key: txn_id for key, txn_id in rows})
+        return found
+
     def delete_document(self, context: TenantContext, sha256: str) -> bool:
         """Remove a document and everything derived from it, atomically.
 
@@ -1673,13 +2070,13 @@ class SqlAlchemyLedgerRepository:
             # died with a constraint violation, and by then the prod ledger held
             # nearly two thousand enrichment rows.
             #
-            # **This loses operator decisions, and that is a known defect rather
-            # than a design.** A reparse assigns new `txn.id` values, so a hidden
-            # row, a hand-set category or a manual transfer mark cannot follow
-            # its transaction across. Re-matching them by `dedupe_key` — which is
-            # stable across a reparse and is exactly what it exists for — is the
-            # fix, and it is its own piece of work. Recorded in
-            # docs/api-contracts.md so it is a decision and not an oversight.
+            # **This deletes operator decisions, which is right here and wrong
+            # in a reparse.** Deleting a document is someone saying they want it
+            # and everything about it gone. A reparse is someone replacing how
+            # the same bytes are read, and there the decisions have to survive —
+            # so `reparse` captures them with `decisions_for_document` before
+            # calling this and puts them back with `reapply_decisions` after.
+            # The seam is deliberate: this method stays the blunt one.
             doomed = select(schema.txn.c.id).where(
                 (schema.txn.c.tenant_id == context.tenant_id)
                 & (schema.txn.c.source_document_id == document_id)

@@ -176,6 +176,20 @@ class LedgerRepository(Protocol):
         derived from them.
         """
 
+    def decisions_for_document(self, context: TenantContext, sha256: str) -> dict:
+        """What a person decided about this document's rows, keyed by dedupe key.
+
+        Read before `delete_document`, because the ids those decisions hang on
+        are what the delete destroys and the dedupe key is what survives it.
+        """
+
+    def reapply_decisions(self, context: TenantContext, decisions: dict) -> dict:
+        """Reattach captured decisions to whatever rows now carry those keys.
+
+        Returns `{"restored": {...}, "dropped": {...}}` per kind. Anything whose
+        row did not come back is dropped and counted rather than approximated.
+        """
+
     def existing_dedupe_keys(self, context: TenantContext, keys: list[str]) -> set[str]:
         """Return the subset of `keys` already present for this tenant."""
 

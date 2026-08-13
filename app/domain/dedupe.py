@@ -44,7 +44,12 @@ def assign_seq(txns: Sequence[ParsedTxn]) -> list[int]:
     reorders same-key rows between two overlapping statements, seq assignment
     can differ and a row may import twice. The alternative — deriving seq from
     what is already in the database — breaks idempotency outright, which is a
-    worse trade. Monthly balance reconciliation catches the resulting drift.
+    worse trade.
+
+    What catches the resulting drift is `app.domain.reconcile`, reachable as
+    `finstone reconcile` and `GET /api/v1/reconciliation`: a row the ledger
+    holds twice is movement the banks never declared, between two closing
+    balances that both know better.
     """
     counters: dict[tuple, int] = defaultdict(int)
     out = []

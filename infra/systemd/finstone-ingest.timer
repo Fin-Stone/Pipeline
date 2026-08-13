@@ -1,0 +1,29 @@
+# Look in uploads/ for anything new, on a schedule.
+#
+# Not installed by default, and that is deliberate: until Phase 2 fetches
+# statements on its own, something has to *put* a document in that folder, and
+# on most installs that something is a person — who has just as easily pressed
+# the button on the Import tab. This exists for the setup where a sync client,
+# a scanner, or a mail rule drops files there instead.
+#
+#     sudo systemctl enable --now finstone-ingest.timer
+#
+# Hourly rather than nightly: the cost of a pass over an unchanged folder is a
+# directory walk, and a statement that lands at nine in the morning showing up
+# on the dashboard at nine is the difference between a system that feels live
+# and one that feels like a batch job.
+
+[Unit]
+Description=Finstone hourly ingest from uploads
+
+[Timer]
+OnCalendar=hourly
+
+# The box may be off. A statement that arrived while it slept is still worth
+# importing when it wakes.
+Persistent=true
+
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
