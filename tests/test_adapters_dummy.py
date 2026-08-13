@@ -583,10 +583,10 @@ class TestOcbcCardVariants:
     """Four card statements, four things one sample could not have shown."""
 
     @pytest.mark.parametrize("relpath", [
-        "OCBC Bank/cc/OCBC+REWARDS+CARD-0000-Jan-26.pdf",
+        "OCBC Bank/cc/OCBC+REWARDS+CARD-*-Jan-26.pdf",
         "OCBC Bank/cc/0f16e5c9.pdf",
         "OCBC Bank/cc/5d61df4f.pdf",
-        "OCBC Bank/cc/OCBC REWARDS CARD-0000-May-26.pdf",
+        "OCBC Bank/cc/OCBC REWARDS CARD-*-May-26.pdf",
     ])
     def test_every_variant_reconciles(self, dummy_root, relpath):
         from app.parsers.ocbc.cc import OcbcCardAdapter
@@ -603,7 +603,7 @@ class TestOcbcCardVariants:
         from app.parsers.ocbc.cc import OcbcCardAdapter
 
         parsed = OcbcCardAdapter().parse(
-            _require(dummy_root, "OCBC Bank/cc/OCBC REWARDS CARD-0000-May-26.pdf")
+            _require(dummy_root, "OCBC Bank/cc/OCBC REWARDS CARD-*-May-26.pdf")
         )
         assert [a.account_ref_masked for a in parsed.accounts] == ["Ocbc Rewards Card"]
 
