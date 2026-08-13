@@ -85,17 +85,21 @@ class TestTrustSavings:
         a threshold of exactly 9.0 measured from the row.
 
         So neither line attached, both were held over, and the row beneath —
-        that month's interest credit — was recorded as "SAMPLE CIRCLE #01-01
-        GROCER HUB SINGAPORE 000000 ..ID:T00XX0000X Interest". Two
-        descriptions wrong from one wrap, and `description_norm` feeds the
-        dedupe key.
+        that month's interest credit — was recorded as the merchant's address
+        followed by "Interest". Two descriptions wrong from one wrap, and
+        `description_norm` feeds the dedupe key.
+
+        The address belongs to the operator's statement, so this asserts its
+        shape: a unit number off the first continuation line and a UEN off the
+        second, which together prove both lines stayed with their own row.
         """
         account = TrustAccountAdapter().parse(_require(dummy_root, TRUST_ACC_2024)).accounts[0]
         by_start = {t.description_raw.split()[0]: t.description_raw for t in account.txns}
 
         assert by_start["Interest"] == "Interest"
-        assert "SAMPLE CIRCLE" in by_start["NTUC"]
-        assert "ID:T00XX0000X" in by_start["NTUC"]
+        merchant = next(d for d in by_start.values() if "..ID:" in d)
+        assert re.search(r"#\d{2}-\d{2,4}\b", merchant)
+        assert re.search(r"\.\.ID:\w+$", merchant.strip())
 
     def test_both_years_route_to_the_same_adapter(self, dummy_root):
         """Layout identity must survive a change in pocket count (1 vs 3)."""
@@ -424,13 +428,18 @@ class TestMariBankCard:
         assert build_default_registry().resolve(document).name == "maribank.cc"
 
     def test_routing_does_not_depend_on_customer_data(self, dummy_root):
+        """Routing keys on what the bank prints, never on whose statement it is.
+
+        Asserted by shape rather than by listing the operator's own name and
+        address: naming the tokens to prove their absence would put them in the
+        repository, which is the thing being guarded against.
+        """
         from app.parsers.maribank.cc import SIGNATURE
 
-        assert not any(
-            token in line
-            for line in SIGNATURE.requires
-            for token in ("example", "sim", "example avenue", "000000")
-        )
+        for line in SIGNATURE.requires:
+            assert not re.search(r"\b\d{6}\b", line)          # a postcode
+            assert not re.search(r"#\d{2}-\d{2,4}\b", line)   # a unit number
+            assert not re.search(r"(?i)\b(avenue|ave|street|st|road|rd|block|blk|drive|crescent|lane)\b", line)
 
 
 MARI_ACC = "Maribank/acc/Aug2025_MariBank_e-Statement.pdf"
@@ -617,8 +626,9 @@ class TestOcbcCardVariants:
 
         `line.top` restarts at the top of each page, so a footer at y=823 read
         as sitting "above" the first row of the page after it and was held to
-        lead into it: "HCBS250101(000000) 7624 LAZADA SINGAPORE" went into the
-        ledger as a merchant, and `description_norm` feeds the dedupe key.
+        lead into it: "HCBS250101(000000) 0000 EXAMPLE MERCHANT SINGAPORE" went
+        into the ledger as a merchant, and `description_norm` feeds the dedupe
+        key.
         """
         from app.parsers.ocbc.cc import OcbcCardAdapter
 

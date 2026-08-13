@@ -279,8 +279,8 @@ def assemble_rows(
     - **A fragment stays on its own page.** `pending` used to survive a page
       break, and `line.top` resets at the top of a page, so the previous page's
       footer read as sitting "above" the first row of the next one — OCBC card
-      statements imported "HCBS250101(000000) 7624 LAZADA SINGAPORE" as a
-      merchant.
+      statements imported "HCBS250101(000000) 0000 EXAMPLE MERCHANT SINGAPORE"
+      as a merchant.
     - **A lead-in must actually be above its row.** The distance test had no
       lower bound, so anything left pending qualified however far below it sat.
     """
