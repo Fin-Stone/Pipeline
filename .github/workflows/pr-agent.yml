@@ -1,12 +1,14 @@
 # Automated review on the way into `dev`.
 #
 # PR-Agent is Apache-2.0 and runs as an ordinary action; public-repository
-# minutes are unlimited, and the model is Gemini's free tier through Google AI
-# Studio. So this costs nothing to run and needs no server.
+# minutes are unlimited, and the default model is Gemini's free tier through
+# Google AI Studio. So this costs nothing to run and needs no server.
 #
 # Advisory on purpose — it is not in the required checks. A free-tier rate
 # limit or a provider outage would otherwise block every merge, and a review
-# bot that can stop the world is a review bot that gets removed.
+# bot that can stop the world is a review bot that gets removed. The `verdict`
+# job below fails when any of the tools produced nothing, and that is safe for
+# exactly the same reason: it goes red, and nothing waits on it.
 #
 # The diff it sends to the model is already public by the time this runs: the
 # staging gate in the private repository is what decides whether anything is
@@ -50,34 +52,101 @@ jobs:
       # is reviewing is a bigger change than a review bot, and not one being
       # made here.
       contents: read
+    outputs:
+      model: ${{ steps.provider.outputs.model }}
     steps:
-      # The action swallows a failed model call and exits 0. So a missing key
-      # is indistinguishable from a successful review: a green check, and one
-      # comment reading "Failed to generate code suggestions for PR". That is
-      # what pull requests #1, #3 and #4 each got — three green ticks, no
-      # review, and nothing anywhere saying the key had never been added.
+      # Which model, whose key, and does that key exist — decided here rather
+      # than in the action, because the action treats every one of those as a
+      # reason to post a comment and exit 0.
       #
-      # A check that cannot fail reads as coverage. This one can now fail, and
-      # it fails here rather than in the middle of a review nobody receives.
+      # The free Gemini tier answers `503 UNAVAILABLE — high demand` often
+      # enough that a review is not guaranteed, so the provider is a variable:
+      # a paid Anthropic or OpenAI key can be dropped in for one pull request
+      # and taken out again. See docs/contributing.md for that procedure, and
+      # in particular for why the key is a secret and never a dispatch input.
       #
       # The secrets context is not available to `if:`, which is why this is a
-      # step body rather than a condition — the same shape publish.yml uses to
-      # check PUBLISH_KEY.
-      - name: The model key has to exist
+      # step body rather than a job condition — the same shape publish.yml uses
+      # to check PUBLISH_KEY.
+      - name: Choose a provider and prove its key is present
+        id: provider
         env:
-          KEY: ${{ secrets.GEMINI_API_KEY }}
+          PROVIDER: ${{ vars.PR_AGENT_PROVIDER }}
+          MODEL_OVERRIDE: ${{ vars.PR_AGENT_MODEL }}
+          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -eu
-          if [ -z "${KEY:-}" ]; then
-            echo "::error::GEMINI_API_KEY is not set on this repository, so the"
-            echo "::error::review below would post 'Failed to generate code"
-            echo "::error::suggestions for PR' and still report success."
-            echo "::error::"
-            echo "::error::Add it under Settings -> Secrets and variables -> Actions"
-            echo "::error::(a Google AI Studio key, free tier), or set the repository"
-            echo "::error::variable ENABLE_PR_AGENT to 'false' to switch this off."
+          provider="${PROVIDER:-gemini}"
+
+          # The Gemini chain is four models rather than two, and deliberately
+          # spans generations and sizes. Every failure so far has been capacity
+          # rather than configuration, and capacity is not shared between them,
+          # so the chain is the retry. gemini-2.0-flash is absent because it
+          # has been shut down: a retired model in a fallback list is a slot
+          # that cannot work, and it is worse than an empty one because it
+          # looks like cover.
+          case "$provider" in
+            gemini)
+              key="${GEMINI_KEY:-}"
+              secret=GEMINI_API_KEY
+              model='gemini/gemini-2.5-flash'
+              fallbacks='["gemini/gemini-3.5-flash","gemini/gemini-2.5-flash-lite","gemini/gemini-2.5-pro"]'
+              ;;
+            # Untested here, because testing it costs a paid key. If this name
+            # is wrong the call returns 404 and the verdict job below will say
+            # a model in the chain is retired, which points at the right fix
+            # even though it is the wrong word. Check the current ids at
+            # https://docs.anthropic.com/en/docs/about-claude/models before
+            # trusting this line.
+            anthropic)
+              key="${ANTHROPIC_KEY:-}"
+              secret=ANTHROPIC_API_KEY
+              model='anthropic/claude-sonnet-5'
+              fallbacks='[]'
+              ;;
+            openai)
+              key="${OPENAI_KEY:-}"
+              secret=OPENAI_API_KEY
+              # No default on purpose — see the error below.
+              model=''
+              fallbacks='[]'
+              ;;
+            *)
+              echo "::error::PR_AGENT_PROVIDER is '$provider'. Expected gemini,"
+              echo "::error::anthropic or openai, or unset for gemini."
+              exit 1
+              ;;
+          esac
+
+          # An explicit name wins, and takes the fallbacks with it. Falling back
+          # from a model somebody chose on purpose to one they did not is how a
+          # run you meant to put on a paid key quietly lands somewhere else.
+          if [ -n "${MODEL_OVERRIDE:-}" ]; then
+            model="$MODEL_OVERRIDE"
+            fallbacks='[]'
+          fi
+
+          if [ -z "$model" ]; then
+            echo "::error::provider '$provider' has no default model here, on"
+            echo "::error::purpose: this file would be guessing at a name and a"
+            echo "::error::price. Set the repository variable PR_AGENT_MODEL to"
+            echo "::error::a litellm model id, for example openai/<model>."
             exit 1
           fi
+
+          if [ -z "$key" ]; then
+            echo "::error::PR_AGENT_PROVIDER is '$provider', but the secret"
+            echo "::error::${secret} is empty. Add it under Settings -> Secrets"
+            echo "::error::and variables -> Actions, or unset PR_AGENT_PROVIDER"
+            echo "::error::to go back to the free Gemini tier."
+            exit 1
+          fi
+
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "fallbacks=$fallbacks" >> "$GITHUB_OUTPUT"
+          echo "provider $provider, model $model, fallbacks $fallbacks"
 
       # Pinned to the commit behind v0.42.0 — not @main, and not the tag
       # either, because a tag can be repointed by whoever owns that repository
@@ -90,6 +159,136 @@ jobs:
       - uses: the-pr-agent/pr-agent@f6af7d77554ff8d26adffded077e6461329e92fa # v0.42.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          config.model: "gemini/gemini-2.5-flash"
-          config.fallback_models: '["gemini/gemini-2.0-flash"]'
+          # The lowercase keys are right, despite looking like a mistake beside
+          # the uppercase ones. pr-agent reads these as settings paths —
+          # `config.model` is `[config] model` in its TOML — while the keys are
+          # `[section] key` from the same file. A failing run confirmed it: the
+          # log named exactly the two models that were set here, so the values
+          # were read.
+          #
+          # All three keys are passed and the unused ones arrive empty, because
+          # only the selected provider's key is ever consulted, and a step-level
+          # `env:` cannot omit a name conditionally.
+          config.model: ${{ steps.provider.outputs.model }}
+          config.fallback_models: ${{ steps.provider.outputs.fallbacks }}
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC.KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI.KEY: ${{ secrets.OPENAI_API_KEY }}
+
+  # What the review bot actually managed, said out loud.
+  #
+  # The action catches its own model failure, posts "Failed to generate code
+  # suggestions for PR" as a pull request comment, and exits 0. Four pull
+  # requests went through that way — four green ticks, no reviews — and the
+  # reason existed only in a log nobody opens under a green tick.
+  #
+  # A partial run is the case worth naming. The first pull request to reach
+  # this job got a real review and no code suggestions, so a comment thread
+  # that looks answered can still be missing a tool's entire output.
+  #
+  # It is a second job because a job cannot download its own log while it is
+  # still running. Failing here blocks nothing: pr-agent is not a required
+  # check, which is the whole reason it is allowed to be honest.
+  verdict:
+    needs: review
+    if: always() && needs.review.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      # Only to read this run's own log.
+      actions: read
+    steps:
+      - name: Say whether the model answered, and if not, whether waiting helps
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          MODEL: ${{ needs.review.outputs.model }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+        run: |
+          set -eu
+
+          if [ "$REVIEW_RESULT" != "success" ]; then
+            echo "::error::the review job ended '$REVIEW_RESULT', so it failed"
+            echo "::error::before or during the call and its own log says why."
+            exit 1
+          fi
+
+          job_id=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+                     --jq '.jobs[] | select(.name == "review") | .id' | head -1)
+          if [ -z "$job_id" ]; then
+            echo "::error::could not find the review job in run ${RUN_ID}."
+            exit 1
+          fi
+          if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" > log.txt 2> err.txt; then
+            echo "::error::could not download the review job log:"
+            cat err.txt
+            exit 1
+          fi
+
+          # pr-agent runs several tools in one invocation and each fails on its
+          # own. The first run after this job existed posted a review and failed
+          # only the code suggestions, so "did anything fail" and "was there a
+          # review" are different questions, and an answer that conflates them
+          # is the same sort of lie as the green tick this job replaced.
+          failed=$(grep -o 'Failed to [^"]\{0,60\}' log.txt | sort -u | head -5 || true)
+          if [ -z "$failed" ]; then
+            echo "every pr-agent tool completed, model ${MODEL}"
+            printf '### pr-agent\n\nAll tools completed with `%s`.\n' "$MODEL" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "these did not complete:"
+          printf '%s\n' "$failed" | sed 's/^/  /'
+
+          # Both can be true at once — the primary busy and the fallback
+          # retired is precisely what happened the first time this was
+          # diagnosed — so report every signal rather than picking one and
+          # sending the reader off after half the problem.
+          retired=no
+          busy=no
+          if grep -Eqi "no longer available|NOT_FOUND|404" log.txt; then
+            retired=yes
+          fi
+          if grep -Eqi "high demand|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|rate.?limit|503|429" log.txt; then
+            busy=yes
+          fi
+
+          {
+            echo '### pr-agent did not complete every tool'
+            echo
+            printf 'Primary model: `%s`. The review job log lists the full chain.\n\n' "$MODEL"
+            echo 'Did not complete:'
+            echo
+            printf '%s\n' "$failed" | sed 's/^/- `/; s/$/`/'
+            echo
+            printf 'A tool missing here is a tool whose output is absent from the pull request, whatever the other comments say.\n\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$retired" = yes ]; then
+            echo "::error::A model in the chain no longer exists. Waiting will"
+            echo "::error::not fix this — it needs an edit to this workflow."
+            echo "::error::https://ai.google.dev/gemini-api/docs/models lists"
+            echo "::error::what is current and what has been shut down."
+            echo '- **A model in the chain is retired.** Waiting will not help; edit `.github/workflows/pr-agent.yml`.' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$busy" = yes ]; then
+            echo "::error::The provider was busy or rate limited. Nothing is"
+            echo "::error::misconfigured and this is expected on a free tier:"
+            echo "::error::comment /review on the pull request to try again, or"
+            echo "::error::switch PR_AGENT_PROVIDER to a paid key for this one."
+            echo '- **The provider was busy or rate limited.** Transient. Comment `/review` to retry, or see [switching the review bot to a paid model](../../blob/main/docs/contributing.md#switching-the-review-bot-to-a-paid-model).' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$retired" = no ] && [ "$busy" = no ]; then
+            echo "::error::pr-agent produced no review, and the log matched"
+            echo "::error::neither a retired model nor a busy one. The first"
+            echo "::error::few matching lines follow; read the review job log."
+            grep -Ei "error|failed" log.txt | head -5 || true
+            echo '- Unrecognised failure. Read the `review` job log.' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          exit 1

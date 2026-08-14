@@ -200,7 +200,7 @@ it is worth knowing why the button is missing.
 | `sync` (staging) | every six hours | Fast-forwards staging's `main` and `dev` from the public repository, so the branch you start from is not stale. Refuses rather than forces if the two have diverged. |
 | `pr-checks` | PR into `dev` | ruff, `tsc --noEmit`, SQLite-only pytest, commit grammar, personal data, pip-audit + gitleaks. |
 | `regression` | PR into `main`, push to `dev`/`main` | The suite on **both** engines, the client build, and the branch guard. |
-| `pr-agent` | PR into `dev` | Automated review. Advisory — not a required check. |
+| `pr-agent` | PR into `dev` | Automated review, plus a `verdict` job that goes red when any of its tools produced nothing. Advisory — neither is a required check. |
 | `release` | push to `main` | Tags and releases when the version changed. |
 | `image` | push to `main`, and dispatched by `release` on the new tag | Builds, asserts no real data is in the image, publishes to GHCR. |
 
@@ -208,6 +208,59 @@ The dual-engine run in `regression` is the enforcement mechanism for Rule 1: a
 Postgres-ism fails the SQLite job and a SQLite assumption fails the Postgres
 one. Two real bugs reached the ledger before it existed and both were invisible
 on a single engine.
+
+### When the review bot comes up short
+
+`pr-agent` catches its own model failures, posts *"Failed to generate code
+suggestions for PR"* as a comment, and exits 0. Four pull requests took a green
+tick that way. The `verdict` job reads the review job's log afterwards, lists
+every tool that did not complete, and says which of two very different things
+happened:
+
+- **busy or rate limited** — nothing is wrong with the configuration. The free
+  Gemini tier answers `503 UNAVAILABLE — high demand` under load. Comment
+  `/review` on the pull request to try again.
+- **a model in the chain is retired** — waiting will not help. `gemini-2.0-flash`
+  was shut down while still listed here as the fallback, so the spare was
+  already broken when the tyre went. Edit the workflow;
+  [Google's model page](https://ai.google.dev/gemini-api/docs/models) lists what
+  is current.
+
+The Gemini chain is four models across two generations and two sizes, because
+capacity is not shared between them, so the chain *is* the retry.
+
+A run can be partly successful, and that is the case worth watching for: the
+first pull request to reach this job got a full review and no code suggestions.
+The comment thread looked answered. One tool's entire output was missing, and
+only the `verdict` job said so.
+
+It is also worth remembering what the reviewer cannot know. Its first act here
+was to report two model names in this repository as invalid typos, citing
+replacements that were themselves a year out of date — a model cannot recognise
+a model released after it was trained. Treat its factual claims as prompts to
+check, not as findings.
+
+### Switching the review bot to a paid model
+
+Two repository variables move it off the free tier without editing the workflow:
+
+| Variable | Effect |
+|---|---|
+| `PR_AGENT_PROVIDER` | `gemini` (default), `anthropic` or `openai`. Picks which secret and which default model are used. |
+| `PR_AGENT_MODEL` | An explicit litellm model id. Overrides the default **and clears the fallback chain**, so a run you meant to put on a paid key cannot quietly land elsewhere. |
+
+The matching secret must exist — `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY`. The job fails naming the missing one, before calling anything.
+
+For a one-off, such as a large pull request you want reviewed properly: add the
+paid key as a secret, set `PR_AGENT_PROVIDER`, comment `/review`, then delete
+the secret and unset the variable.
+
+**Never pass a key as a `workflow_dispatch` input.** Inputs are recorded in the
+run's metadata, this repository is public, and anyone can read them — a key that
+goes in that way has to be revoked, not deleted. The same reasoning as
+[Why there are two repositories](#why-there-are-two-repositories): the exposure
+happens at submission, and nothing downstream takes it back.
 
 ## Running the checks locally
 
