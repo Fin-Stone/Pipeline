@@ -251,15 +251,27 @@ for the first and inherits its layers, which is what the concurrency group in
 built everything from scratch.
 
 To publish an image for a tag that missed one, dispatch `image` manually and
-pick that tag under **Run workflow → Use workflow from**.
+pick that tag under **Run workflow → Use workflow from**. Note what that
+setting does: the run uses `image.yml` **as it stood at that tag**, not as it
+stands now. So the `latest` protection described below covers tags cut after it
+landed, and not `v0.1.0` — re-dispatching that one will move `latest` back onto
+v0.1.0 again however this file reads today. Backfilling v0.1.0 is what taught
+us the rule, and it is the one tag the rule cannot reach.
 
-`latest` moves only on a push to the **default branch** — `image.yml` asks
-`docker/metadata-action` for `is_default_branch`, and that is a literal
-comparison against whatever the repository's default is set to right now. So
-changing the default branch stops `latest` updating, silently and with every
-check still green. It has happened once already. If `docker pull` is serving
-something older than the last release, check that setting before checking the
-workflow.
+`latest` moves only on a push to the **default branch**, and it takes two
+settings in `image.yml` to mean that. The visible one is
+`type=raw,value=latest,enable={{is_default_branch}}` — a literal comparison
+against whatever the repository's default is set to right now, so changing the
+default branch stops `latest` updating, silently and with every check green.
+The easily missed one is `flavor: latest=false`, which switches off
+`docker/metadata-action`'s own default of appending `latest` to any
+non-prerelease `type=semver` match. Without it a tag build moves `latest` too,
+whatever the `enable=` says, so backfilling an old tag publishes a `latest`
+older than `main`.
+
+Each of those has gone wrong once. If `docker pull` serves something older than
+the last release, check the default branch setting first and the ref of the last
+`image` run second.
 
 Below 1.0 the minor is the compatibility signal: a breaking change and a
 feature both move it, and the changelog is where the difference is recorded.

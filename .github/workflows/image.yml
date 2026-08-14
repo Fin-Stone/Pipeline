@@ -85,11 +85,28 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          # This action moves `latest` by two independent routes, and only one
+          # of them is written below.
+          #
+          # The other is this input's own default, `latest=auto`, under which
+          # any non-prerelease `type=semver` match appends `latest` by itself —
+          # `procSemver` sets `latest = true` and `generateTags` acts on it.
+          # The `enable=` on the raw tag has no say in that path at all.
+          #
+          # So backfilling the v0.1.0 image did what it was asked and also
+          # republished `latest` from a four-commit-old tree: the tag resolved
+          # 0.1.0, and `auto` did the rest. `docker pull` served v0.1.0 while
+          # `main` stood at ad76fbf, with a green tick on the run that did it.
+          # Setting this to false leaves the raw tag below as the only thing in
+          # this file that can produce `latest`, which is what the comment
+          # under it always claimed and did not enforce.
+          flavor: latest=false
           # Two triggers, two jobs. A push to main moves `latest` and records
           # `sha-<short>`; the dispatch on `refs/tags/vX.Y.Z` is what makes
           # type=semver resolve, so that is where 0.1.0 and 0.1 come from.
-          # is_default_branch is false on a tag ref, which is why `latest` is
-          # the push's to move and not the tag's.
+          # is_default_branch is false on a tag ref, so this line is skipped
+          # there — necessary for `latest` to belong to the push, and, as
+          # above, never sufficient on its own.
           #
           # It is worth knowing exactly how literal that rule is: the action
           # compares this ref against the repository's *configured* default
