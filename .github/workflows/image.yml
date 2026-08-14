@@ -27,6 +27,22 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# One build per commit at a time, queued rather than cancelled.
+#
+# A release makes two runs on the same commit: the push to `main`, and the
+# dispatch on the tag that was just cut from it. They used to start about
+# twelve seconds apart, because release.yml finishes in seven seconds and this
+# build takes four minutes — so both ran cold, in parallel, and the claim that
+# the second reused the first's cache was simply false.
+#
+# Serialising them makes it true. cancel-in-progress is false because the
+# second run is the one that publishes the version tags; cancelling it would
+# leave a release with no 0.x.y image behind it, which is the exact failure
+# this dispatch path was added to fix.
+concurrency:
+  group: image-${{ github.sha }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE: ${{ github.repository_owner }}/finstone
@@ -35,6 +51,15 @@ jobs:
   build:
     if: github.repository == 'Fin-Stone/Pipeline'
     runs-on: ubuntu-latest
+    # A build here takes four to five minutes. The default job timeout is six
+    # hours, and on the push of 6fd4094 this step sat on `Build and push` for
+    # sixty-two minutes before a human cancelled it. Without a bound, a hung
+    # build costs a runner most of a day and — worse — nobody learns the image
+    # failed to publish until they go looking.
+    #
+    # Thirty minutes is six times the normal run: generous enough that a slow
+    # arm64 build under emulation still finishes, tight enough to be news.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -66,10 +91,20 @@ jobs:
           # is_default_branch is false on a tag ref, which is why `latest` is
           # the push's to move and not the tag's.
           #
+          # It is worth knowing exactly how literal that rule is: the action
+          # compares this ref against the repository's *configured* default
+          # branch, so pointing the default at something other than `main`
+          # stops `latest` moving without failing anything. That is not
+          # hypothetical either — while the default was briefly `dev`, the
+          # push of 3fde335 published `sha-3fde335` and left `latest` on a
+          # build from before the history rewrite. Nothing went red; `docker
+          # pull` just kept serving a three-day-old image.
+          #
           # A release therefore builds twice, from the same commit — once for
-          # `latest`, once for the version. The second run reuses the first's
-          # layer cache, and paying that once per release is the price of the
-          # version tags naming the commit that was actually released.
+          # `latest`, once for the version. The concurrency group above makes
+          # the second run wait for the first, so it inherits the layers rather
+          # than rebuilding them, and paying a manifest push is the price of
+          # the version tags naming the commit that was actually released.
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -86,8 +121,16 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: finstone:inspect
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Its own cache scope, and this is not tidiness.
+          #
+          # `type=gha` defaults to one scope per ref, so both build steps in
+          # this job were reading and writing the same entry: an amd64-only
+          # export, then a two-architecture one, each overwriting the other
+          # every run. The arm64 layers were evicted by the step that never
+          # builds them, so the step that does started from nothing more often
+          # than the cache configuration suggested it would.
+          cache-from: type=gha,scope=inspect
+          cache-to: type=gha,mode=max,scope=inspect
 
       # Asserts against the built image rather than trusting .dockerignore.
       # The rules live in infra/scripts/check-image-data.sh, which reads the
@@ -121,5 +164,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # See the inspection build above: separate scope, so the multi-arch
+          # layers are not overwritten by the single-arch step next door.
+          cache-from: type=gha,scope=publish
+          cache-to: type=gha,mode=max,scope=publish
