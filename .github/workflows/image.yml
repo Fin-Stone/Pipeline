@@ -69,32 +69,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # .dockerignore already excludes uploads/, data/, category/ and the
-      # proposal/residual dumps, with a comment naming this exact threat. But
-      # nothing verifies it, and a later negation or a restructure that moves
-      # real data outside those prefixes would start baking statements into a
-      # published layer — first noticed as a public image, which is the one
-      # place it cannot be taken back from.
+      # Asserts against the built image rather than trusting .dockerignore.
+      # The rules live in infra/scripts/check-image-data.sh, which reads the
+      # listing on stdin, so they can be tested without a Docker daemon.
       #
-      # So this asserts against the built image rather than trusting the file.
+      # As root, not as the image's own uid 10001: `find /` run unprivileged
+      # cannot read every directory in the image, so it exits non-zero for that
+      # reason alone. With stderr discarded and `set -e` in force, that killed
+      # the step before a single assertion ran — a silent failure with no
+      # output to explain it.
+      #
+      # stderr is kept, and pipefail is set, because the only thing worse than
+      # this step failing for an unrelated reason is it passing for one.
       - name: No real data in the image
         run: |
-          set -eu
-          contents=$(docker run --rm --entrypoint sh finstone:inspect -c \
-            'find / -xdev \( -path /proc -o -path /sys \) -prune -o -print 2>/dev/null')
-          status=0
-          for forbidden in /uploads /data /category; do
-            if printf '%s\n' "$contents" | grep -qE "^${forbidden}/.+"; then
-              echo "::error::${forbidden} is present in the image. Check .dockerignore."
-              printf '%s\n' "$contents" | grep -E "^${forbidden}/.+" | head -n 20
-              status=1
-            fi
-          done
-          if printf '%s\n' "$contents" | grep -qE '/(proposal|residual)[^/]*\.json$'; then
-            echo "::error::a proposal/residual dump is in the image. Check .dockerignore."
-            status=1
-          fi
-          exit "$status"
+          set -euo pipefail
+          docker run --rm --user 0 --entrypoint sh finstone:inspect -c \
+            'find / -xdev \( -path /proc -o -path /sys \) -prune -o -print' \
+            | sh infra/scripts/check-image-data.sh
 
       - name: Build and push
         uses: docker/build-push-action@v6
