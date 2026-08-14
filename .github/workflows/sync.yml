@@ -1,0 +1,85 @@
+# Keep the staging repository's `main` and `dev` level with the public one.
+#
+# Work only ever travels one way — staging publishes feature branches through
+# the gate, and they become commits on public `dev` and then public `main` by
+# merge. Nothing pushes those merges back. So staging's own `main` drifts
+# further behind with every release, and staging had no `dev` at all: the two
+# branches the contributing guide tells you to branch from were, on the
+# repository you are told to clone, either stale or absent.
+#
+# That is worse than untidy. A feature cut from a stale `main` starts from
+# history that predates the CI and the personal-data gate, and the first thing
+# the author sees is conflicts that have nothing to do with their change.
+#
+# Reading the public repository needs no credential — it is public — and
+# writing here needs nothing beyond the token Actions already has. So this
+# costs one secret fewer than it looks like it should.
+
+name: sync
+
+on:
+  # Six-hourly rather than on every push: nothing here is urgent, and the
+  # branches only move when something merges on the public side, which this
+  # repository cannot observe.
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    # Both repositories hold this file, because the gate publishes the whole
+    # tree. Without the guard it would run on the public side too and try to
+    # fast-forward `main` onto itself.
+    if: github.repository == 'Fin-Stone/Pipeline-staging'
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials stays on, unlike publish.yml. There the checkout
+      # credential silently outranked the one the job meant to push with; here
+      # GITHUB_TOKEN *is* the credential this job pushes with, and the only
+      # other remote it touches is a public repository it reads anonymously.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fast-forward main and dev from the public repository
+        run: |
+          set -eu
+          git remote add public https://github.com/Fin-Stone/Pipeline.git
+          git fetch --no-tags --quiet public main dev
+
+          moved=no
+          for branch in main dev; do
+            here=$(git rev-parse -q --verify "refs/remotes/origin/$branch" || true)
+            there=$(git rev-parse "refs/remotes/public/$branch")
+
+            if [ "$here" = "$there" ]; then
+              echo "$branch: already at $(git rev-parse --short "$there")"
+              continue
+            fi
+
+            # Fast-forward or nothing. A push that is not one means the two
+            # repositories have genuinely diverged — someone committed to
+            # staging's `main`, or the public history was rewritten — and
+            # quietly overwriting either side of that is how work disappears.
+            # Fail and let a human look.
+            if [ -n "$here" ] && ! git merge-base --is-ancestor "$here" "$there"; then
+              echo "::error::staging $branch is not an ancestor of public $branch."
+              echo "::error::staging: $here"
+              echo "::error::public : $there"
+              echo "::error::Refusing to force. Reconcile the two by hand."
+              exit 1
+            fi
+
+            git push origin "$there:refs/heads/$branch"
+            echo "$branch: $here -> $there"
+            moved=yes
+          done
+
+          [ "$moved" = no ] && echo "nothing to do" || true
