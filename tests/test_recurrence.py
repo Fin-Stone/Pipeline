@@ -12,7 +12,6 @@ from datetime import date, timedelta
 from app.domain.recurrence import (
     PERIOD_LABELS,
     Occurrence,
-    Series,
     declared_series,
     find_series,
     matching,

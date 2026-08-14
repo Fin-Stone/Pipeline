@@ -13,15 +13,13 @@ from pathlib import Path
 import pytest
 
 from app.domain.models import DEPOSIT, DOC_TYPE_ACCOUNT, ParsedAccount, ParsedDocument, ParsedTxn
-from app.parsers import fingerprint as fingerprinting
 from app.parsers import pdfio
 from app.parsers.registry import AdapterRegistry, AmbiguousLayout, UnknownLayout
 from app.pipeline.ingest import ingest_inbox, reparse
 from app.pipeline.quarantine import REASON_SUFFIX
 from app.pipeline.stage import stage
 from app.pipeline.validate import validate
-from app.ports.parser import ParseError
-from app.ports.repository import STATUS_IMPORTED, STATUS_IMPORTED_UNVERIFIED
+from app.ports.repository import STATUS_IMPORTED_UNVERIFIED
 
 from .fixtures.make_pdf import synthetic_signature, synthetic_statement, write_pdf
 
@@ -44,7 +42,7 @@ class SyntheticAdapter:
         document = pdfio.load(Path(path), password=password)
         period_start, period_end = base.find_period(document, "Statement period")
         bands = base.header_bands(base.find_header(document))
-        lines = [l for l in base.transaction_lines(document) if not base.is_skippable(l)]
+        lines = [line for line in base.transaction_lines(document) if not base.is_skippable(line)]
 
         opening = closing = None
         txns = []
@@ -290,7 +288,7 @@ class TestReparse:
     inbox: once the inbox copy is gone, the store is the only way back."""
 
     def _quarantine_one(self, config, repository, context, blob_store, notifier):
-        path = _statement_pdf(
+        _statement_pdf(
             config.inbox_dir / "dummy" / "a.pdf",
             [("03 Jun", "Salary", "+2,000.00")],
             opening="1,000.00", closing="3,000.00",
@@ -382,6 +380,7 @@ class TestReparse:
         not be applied to a single year of history.
         """
         from sqlalchemy import update
+
         from app.storage import schema
 
         path = _statement_pdf(

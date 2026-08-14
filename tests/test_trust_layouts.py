@@ -25,7 +25,7 @@ def _rows(tmp_path, placements, name="stmt.pdf"):
     path = write_pdf(tmp_path / name, placements)
     document = pdfio.load(path)
     bands = base.header_bands(base.find_header(document))
-    lines = [l for l in base.transaction_lines(document) if not base.is_skippable(l)]
+    lines = [line for line in base.transaction_lines(document) if not base.is_skippable(line)]
     return base.assemble_rows(lines, bands)
 
 

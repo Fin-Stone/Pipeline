@@ -101,6 +101,7 @@ class TestTwoMembersUploadingOneStatement:
         ingest_inbox(config, context, repository, blob_store, notifier, registry)
 
         from sqlalchemy import func, select
+
         from app.storage import schema
 
         with repository.engine.connect() as conn:

@@ -1,4 +1,10 @@
-# Run the suite, on both engines.
+# Run the suite, on both engines. The gate on the way to `main`.
+#
+# pr-checks.yml runs the fast SQLite half on every pull request into `dev`.
+# This is the expensive half, and it runs where the cost is worth paying: on
+# the release pull request, and on every push to `dev` so a merge that breaks
+# the Postgres engine is found when it lands rather than at release time with
+# several features in play.
 #
 # The dual run is not thoroughness for its own sake — it is the enforcement
 # mechanism for Rule 1 of the development rules. Shared code has to be portable
@@ -11,17 +17,39 @@
 #
 # The image workflow next door proves it builds. This proves it works.
 
-name: test
+name: regression
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 jobs:
-  test:
+  # Only `dev` and a hotfix may open a pull request against `main`. The pull
+  # request form defaults to the default branch, so without this a feature
+  # branch reaches `main` by nobody doing anything wrong — just by accepting
+  # what GitHub proposed.
+  guard:
+    if: github.repository == 'Fin-Stone/Pipeline' && (github.event_name == 'pull_request')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the source branch
+        env:
+          SOURCE: ${{ github.head_ref }}
+        run: |
+          case "$SOURCE" in
+            dev|hotfix/*) echo "$SOURCE -> main: allowed" ;;
+            *)
+              echo "::error::'$SOURCE' cannot merge into main. Changes reach main"
+              echo "::error::through dev. Re-target this pull request at dev, or"
+              echo "::error::branch as hotfix/<name> if this is an emergency fix."
+              exit 1 ;;
+          esac
+
+  suite:
+    if: github.repository == 'Fin-Stone/Pipeline'
     runs-on: ubuntu-latest
 
     # pgvector rather than plain postgres, so this is the same image the
@@ -82,6 +110,7 @@ jobs:
         run: python -m pytest -q
 
   client:
+    if: github.repository == 'Fin-Stone/Pipeline'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

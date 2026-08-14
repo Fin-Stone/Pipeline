@@ -18,8 +18,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.api.main import (  # noqa: E402
     API_VERSION,
     PREFIX,
-    app,
     _config,
+    app,
     reset_repositories,
 )
 
@@ -1443,9 +1443,8 @@ class TestSayingItIsASubscription:
         readings: the monthly total is the number this page exists to state."""
         self._seed(repository, [date(2024, 1, 10), date(2024, 2, 10), date(2024, 3, 10)])
         detected = self._recurring(client)
-        every = lambda body: [
-            s["merchant"] for s in body["series"] + body["lapsed"]
-        ]
+        def every(body):
+            return [s["merchant"] for s in body["series"] + body["lapsed"]]
         assert self.MERCHANT in every(detected)
 
         self._mark(client, period="monthly")

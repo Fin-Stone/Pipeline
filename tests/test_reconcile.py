@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
-
 from app.domain.reconcile import CONTINUITY, MOVEMENT, Declaration, drifts
 from app.pipeline.reconcile import check
 

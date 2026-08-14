@@ -1,0 +1,208 @@
+# The gate. Lives in the private staging repository, and is the only road to
+# the public one.
+#
+# A public repository publishes at `git push`, not at merge: the objects are on
+# GitHub before any workflow starts, a deleted branch's commits stay fetchable
+# by sha, opening a pull request creates a permanent public refs/pull/N/head,
+# and push events carry commit subjects into third-party archives within
+# seconds. Nothing downstream of the push can undo it. So the check has to sit
+# on the boundary into public, and that boundary is here.
+#
+# handoff.md is the reason this exists rather than a policy note: a Luhn-valid
+# card number, an account number and an address reached tracked files, four
+# days after a scrub had removed the same class of data, with nothing anywhere
+# to object.
+#
+# The squash is load-bearing, not tidiness — see the publish job.
+
+name: publish
+
+on:
+  push:
+    branches: ['feature/**', 'fix/**', 'chore/**', 'docs/**']
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PUBLIC_REPO: Fin-Stone/Pipeline
+  STAGING_REPO: Fin-Stone/Pipeline-staging
+
+jobs:
+  # Both repositories hold this file — the public one receives it along with
+  # everything else the gate publishes. Without this guard it would fire there
+  # too, on every branch it had just published, and fail for want of a token
+  # that only exists on the private side.
+  gate:
+    if: github.repository == 'Fin-Stone/Pipeline-staging'
+    runs-on: ubuntu-latest
+    outputs:
+      range: ${{ steps.range.outputs.range }}
+    steps:
+      # Full history: the check reads the commits being published, and a
+      # shallow clone has none of them.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Same reason as the publish job below — this one only reads from the
+          # public repository, so it would work either way, but there is no
+          # reason to leave a credential lying in the config that silently
+          # outranks the one we mean to use.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # No pip install: the detector imports only the standard library,
+      # deliberately, so this job cannot be broken by a dependency.
+      - name: Establish what this push adds
+        id: range
+        env:
+          SSH_KEY: ${{ secrets.PUBLISH_KEY }}
+        run: |
+          set -eu
+          if [ -z "${SSH_KEY:-}" ]; then
+            echo "::error::PUBLISH_KEY is not set on this repository."
+            echo "::error::Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/publish"
+          chmod 600 "$HOME/.ssh/publish"
+          ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/publish -o IdentitiesOnly=yes"
+          git remote add public "git@github.com:${PUBLIC_REPO}.git"
+
+          # Reachability and "does dev exist" are two different questions, and
+          # conflating them is dangerous: a bad credential would otherwise look
+          # like a fresh repository, and the gate would quietly scan a
+          # different range than the one it is about to publish. So prove the
+          # remote answers first, and fail loudly if it does not.
+          #
+          # Over ssh this proves rather more than reachability. The public
+          # repository is world-readable, so an https read succeeds with a
+          # broken credential, a missing one, or none at all — which is how a
+          # dead token stayed invisible here until the push failed. Ssh has no
+          # anonymous mode: with IdentitiesOnly=yes this either authenticates
+          # as the deploy key or it fails, so the credential is verified in the
+          # gate rather than discovered to be wrong two jobs later.
+          if ! refs=$(git ls-remote --heads public 2>&1); then
+            echo "::error::cannot reach ${PUBLIC_REPO} as the deploy key. Check that"
+            echo "::error::PUBLISH_KEY holds the *private* half, complete and unmodified,"
+            echo "::error::and that its public half is on ${PUBLIC_REPO} under"
+            echo "::error::Settings -> Deploy keys with 'Allow write access' ticked."
+            printf '%s\n' "$refs"
+            exit 1
+          fi
+
+          if printf '%s\n' "$refs" | grep -q 'refs/heads/dev$'; then
+            git fetch --no-tags --quiet public dev
+            echo "range=public/dev..HEAD" >> "$GITHUB_OUTPUT"
+          else
+            # Genuinely a first run, before dev exists on the public side.
+            # Everything is new, so everything is scanned.
+            echo "no dev branch on ${PUBLIC_REPO} yet; scanning all of HEAD"
+            echo "range=HEAD" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The blobs and the commit messages. A subject naming a real merchant is
+      # as published as a line of code, and travels further.
+      - name: Refuse personal data
+        run: python tests/test_no_personal_data.py ${{ steps.range.outputs.range }}
+
+      # The tree scan as well. The two answer different questions — one about
+      # what is being published, one about what is there now — and the gate
+      # wants both.
+      #
+      # Not via pytest: collecting that file imports tests/conftest.py, which
+      # imports `app`, which imports SQLAlchemy. This job installs nothing on
+      # purpose, so pytest never reaches the assertion — it dies loading
+      # conftest having checked nothing, which is a check that reports failure
+      # for the wrong reason and, worse, could report success for one.
+      - name: Refuse personal data in the working tree
+        run: python tests/test_no_personal_data.py --tree
+
+  publish:
+    needs: gate
+    if: github.repository == 'Fin-Stone/Pipeline-staging'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Without this, checkout leaves its own credential in the git config
+          # as `http.https://github.com/.extraheader` — scoped to github.com as
+          # a whole, not to the repository it cloned. Any https url to any
+          # repository on that host then carries github-actions[bot] instead of
+          # the credential this job means to use, and the push is refused:
+          # "Permission to Fin-Stone/Pipeline.git denied".
+          #
+          # Reads hide it, because the public repository is readable by anyone,
+          # so the fetch succeeds and only the push fails.
+          #
+          # The remote below is ssh now, which that header cannot reach, so
+          # this is no longer what stands between the job and a working push.
+          # It stays because leaving a broader credential in the config than
+          # the job intends to use is how the last three failures happened.
+          persist-credentials: false
+
+      - name: Publish as a single squashed commit
+        env:
+          SSH_KEY: ${{ secrets.PUBLISH_KEY }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -eu
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # A deploy key rather than a personal access token, after the token
+          # was refused three different ways. A token carries a *user's*
+          # identity, so the push has to survive everything attached to that
+          # user: which resource owner the fine-grained token was scoped to,
+          # whether the organisation permits classic tokens, whether the
+          # account has push on this particular repository, whether SSO has
+          # been authorised, and the separate Workflows permission that GitHub
+          # requires before a token may write anything under .github/workflows
+          # — which this branch does, five times over.
+          #
+          # A deploy key is attached to the repository, not to a person. It is
+          # granted by whoever administers that repository, it is scoped to
+          # exactly that one repository so it is also the smaller grant, and
+          # none of the five conditions above apply to it.
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/publish"
+          chmod 600 "$HOME/.ssh/publish"
+          ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/publish -o IdentitiesOnly=yes"
+          git remote add public "git@github.com:${PUBLIC_REPO}.git"
+          git fetch --no-tags public dev
+
+          # Why squash rather than mirror the commits.
+          #
+          # `dev` takes squash merges, so these commits are discarded at merge
+          # time anyway. Publishing one commit instead means a value that was
+          # added in commit three and removed in commit seven never exists on
+          # the public side at all — it is not detected and cleaned up, it is
+          # never published. That is the failure in handoff.md section B, made
+          # impossible rather than merely visible.
+          subject=$(git log -1 --format=%s HEAD)
+          sh infra/scripts/check-commit-msg.sh "$subject"
+
+          git checkout -q -B publish public/dev
+          git merge --squash --no-commit "$GITHUB_SHA"
+          # The original subjects go in the body so nothing is lost. They were
+          # scanned by the gate, so they are safe to carry across.
+          {
+            printf '%s\n\n' "$subject"
+            printf 'Squashed from %s:\n\n' "$BRANCH"
+            git log --reverse --format='  %s' public/dev.."$GITHUB_SHA"
+          } > /tmp/message
+          git commit -q --file /tmp/message
+
+          # Force, because republishing a rebased branch rewrites this commit.
+          # Only this job writes these refs, so there is nothing to race with.
+          git push --force public "publish:refs/heads/${BRANCH}"
+          echo "published ${BRANCH} to ${PUBLIC_REPO}"

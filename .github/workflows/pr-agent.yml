@@ -1,0 +1,56 @@
+# Automated review on the way into `dev`.
+#
+# PR-Agent is Apache-2.0 and runs as an ordinary action; public-repository
+# minutes are unlimited, and the model is Gemini's free tier through Google AI
+# Studio. So this costs nothing to run and needs no server.
+#
+# Advisory on purpose — it is not in the required checks. A free-tier rate
+# limit or a provider outage would otherwise block every merge, and a review
+# bot that can stop the world is a review bot that gets removed.
+#
+# The diff it sends to the model is already public by the time this runs: the
+# staging gate in the private repository is what decides whether anything is
+# published at all. That ordering is deliberate, and it is why this workflow
+# lives on the public side and nowhere else.
+
+name: pr-agent
+
+on:
+  pull_request:
+    branches: [dev]
+    types: [opened, reopened, ready_for_review]
+  # /review, /describe, /improve and /ask arrive as issue comments. Without
+  # this trigger the interactive half of the tool silently does nothing.
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # The Bot check stops it answering its own comments in a loop. The variable
+    # is a kill switch rather than an opt-in: unset means enabled.
+    if: >-
+      github.event.sender.type != 'Bot' &&
+      vars.ENABLE_PR_AGENT != 'false'
+    runs-on: ${{ vars.PR_AGENT_RUNNER || 'ubuntu-latest' }}
+    permissions:
+      pull-requests: write
+      issues: write
+      # Read, not write. Upstream asks for write so /improve can commit its
+      # suggestions back to the branch; an agent that can push to the branch it
+      # is reviewing is a bigger change than a review bot, and not one being
+      # made here.
+      contents: read
+    steps:
+      # TODO before enabling: replace @main with a release tag. An unpinned
+      # third-party action holding `pull-requests: write` is a supply chain
+      # hole, and this one runs on every pull request.
+      - uses: the-pr-agent/pr-agent@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          config.model: "gemini/gemini-2.5-flash"
+          config.fallback_models: '["gemini/gemini-2.0-flash"]'
+          GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

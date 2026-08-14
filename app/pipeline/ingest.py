@@ -30,8 +30,7 @@ from ..config import DOCUMENT_EXTENSIONS, Config
 from ..domain.dedupe import assign_seq, dedupe_key, sha256_file, statement_key
 from ..domain.models import DOC_TYPE_CARD, IngestOutcome, ParsedDocument
 from ..domain.normalise import clean_raw, normalise_counterparty, normalise_description
-from ..parsers import fingerprint as fingerprinting
-from ..parsers import pdfio
+from ..parsers import fingerprint as fingerprinting, pdfio
 from ..parsers.registry import (
     AdapterRegistry,
     AmbiguousLayout,

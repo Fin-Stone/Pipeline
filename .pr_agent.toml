@@ -1,0 +1,62 @@
+# What the reviewer needs to know that it cannot read off the diff.
+#
+# A general-purpose review bot will find the ordinary things and miss every one
+# of the invariants this repository is actually built on — money as integers,
+# portable SQL, tenant scoping, the API contract. Those are the reasons to run
+# one here at all, so they are what it is told to look for.
+#
+# Sources: AGENTS.md, docs/development-rules.md, docs/api-contracts.md.
+
+[pr_reviewer]
+require_tests_review = true
+require_security_review = true
+num_code_suggestions = 4
+
+extra_instructions = """
+Check these invariants first. They are binding on this repository and a change
+that breaks one is wrong even if it passes the tests.
+
+Money and correctness
+- Money is always an integer of minor units, with the currency in a separate
+  column. A float anywhere near an amount is a defect, not a style preference.
+- Watch for SUM over a bigint widening to numeric: it makes the same ledger
+  answer with a number on one engine and a string on the other.
+
+Portability (Rule 1)
+- Shared code must contain no dialect-specific SQL. The suite runs on SQLite
+  and Postgres precisely so this stays true; a Postgres-ism breaks the SQLite
+  run and vice versa.
+- New external dependencies should be reachable only through a port in
+  app/ports/. Flag any that are not.
+- An abstraction measured above 15% overhead must be flagged with a real
+  number in the change summary.
+
+Tenancy (Rule 3)
+- Every repository method takes a TenantContext, and every ledger query filters
+  on tenant_id. A query that touches a ledger table without that filter is a
+  data leak between households.
+- No password column may be added to `member`. Authentication belongs to the
+  identity provider.
+
+Personal data (Rule 2)
+- Nothing may read from uploads/prod/, data/store/, or data/quarantine/files/.
+- Test fixtures use synthetic values. A card number, account number, NRIC, UEN,
+  address or phone number that looks real is a defect regardless of whether the
+  automated scanner allowed it — the scanner only knows shapes, not whose data
+  it is.
+
+Contracts and documentation
+- A change under app/api/ must update docs/api-contracts.md in the same commit.
+  The contract is what other people's installations are written against.
+- Changes to architecture, repo layout, the data model, or the delivery flow
+  must update the markdown listed in the AGENTS.md doc-sync checklist.
+
+Be concise. Prefer naming a concrete line over restating the diff.
+"""
+
+[pr_description]
+publish_labels = true
+add_original_user_description = true
+
+[pr_code_suggestions]
+num_code_suggestions = 4
