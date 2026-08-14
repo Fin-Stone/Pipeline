@@ -6,10 +6,11 @@
 # that quietly disagrees with its own changelog is worse than a failed build,
 # because it ships.
 #
-# The tag it pushes matches image.yml's existing `tags: ["v*"]` trigger, so the
-# semver tagging that workflow already declares finally has something producing
-# tags. Nothing here needs write access to `main`: a tag is not a branch push,
-# so the ruleset that locks `main` does not have to make an exception.
+# Nothing here needs write access to `main`: a tag is not a branch push, so the
+# ruleset that locks `main` does not have to make an exception.
+#
+# Pushing the tag is not enough to get an image out of it, which is what the
+# last step is for — see the comment there.
 
 name: release
 
@@ -34,6 +35,8 @@ concurrency:
 
 permissions:
   contents: write
+  # Only to dispatch image.yml on the tag, which is the last step.
+  actions: write
 
 jobs:
   release:
@@ -127,3 +130,27 @@ jobs:
           git tag -a "$TAG" -m "$TAG"
           git push origin "$TAG"
           gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md
+
+      # The tag above was pushed by GITHUB_TOKEN, and GitHub does not start
+      # workflow runs from events raised by that token. So image.yml's old
+      # `on: push: tags:` trigger could never fire, and this file's own header
+      # used to claim it fed it. v0.1.0 is the proof: tagged, released, and no
+      # image published for it.
+      #
+      # workflow_dispatch is the documented exception — it always creates a
+      # run — and it takes a ref, so the build runs against the commit that was
+      # tagged rather than whatever `main` has become by the time it starts.
+      # That ref is also what makes image.yml's type=semver rules resolve.
+      #
+      # Deliberately last: a failure here means the release exists without its
+      # image, which is worth a red run, but it must not be able to prevent the
+      # tag and release themselves.
+      - name: Build the image for this tag
+        if: steps.check.outputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          gh workflow run image.yml --ref "$TAG"
+          echo "dispatched image.yml on $TAG"
