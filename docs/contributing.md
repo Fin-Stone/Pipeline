@@ -11,7 +11,7 @@ Everything else follows from it.
 
 | Where | What lives there |
 |---|---|
-| `Fin-Stone/Pipeline-staging` — **private** | Where the work happens. Feature branches, commits, rewrites. |
+| `Fin-Stone/Pipeline-staging` — **private** | Where the work happens. Feature branches, commits, rewrites. `main` and `dev` are read-only mirrors of the public ones — branch from them, never commit to them. |
 | `Fin-Stone/Pipeline` — **public** | `dev`, `main`, releases, the published image, and feature branches once they have passed the gate. |
 
 ```
@@ -60,8 +60,15 @@ anywhere objected. The gap was never care. It was enforcement.
 git clone git@github.com:Fin-Stone/Pipeline-staging.git
 cd Pipeline-staging
 ./bootstrap.sh          # or ./bootstrap.ps1 — this also installs the git hooks
-git switch -c feature/read-the-interest-line
+git switch -c feature/read-the-interest-line origin/dev
 ```
+
+**Branch from `origin/dev`, explicitly.** Work travels one way — staging
+publishes through the gate, and the merges happen on the public side — so
+nothing pushes those merges back here. `main` and `dev` exist on staging as
+mirrors, kept level by `sync.yml` rather than by anyone working on them, and
+branching from whichever one you happened to land on is how you end up
+rebasing a week later for no reason.
 
 Push when you are ready. The gate scans every commit in the range, squashes the
 branch to a single commit, and publishes that to the public repository. Then
@@ -183,6 +190,7 @@ it is worth knowing why the button is missing.
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `publish` (staging) | push to a feature branch | The gate. Scans, squashes, publishes. |
+| `sync` (staging) | every six hours | Fast-forwards staging's `main` and `dev` from the public repository, so the branch you start from is not stale. Refuses rather than forces if the two have diverged. |
 | `pr-checks` | PR into `dev` | ruff, `tsc --noEmit`, SQLite-only pytest, commit grammar, personal data, pip-audit + gitleaks. |
 | `regression` | PR into `main`, push to `dev`/`main` | The suite on **both** engines, the client build, and the branch guard. |
 | `pr-agent` | PR into `dev` | Automated review. Advisory — not a required check. |
@@ -230,11 +238,21 @@ only way that build ever sees a tag: GitHub does not start workflow runs from
 events raised by `GITHUB_TOKEN`, so a `tags:` trigger on `image.yml` would
 never fire, and for v0.1.0 it did not. So a release builds the image twice from
 the same commit — once from the push to `main`, which moves `latest`, and once
-from the tag, which is what produces `0.2.0` and `0.2`. The second build reuses
-the first's cache.
+from the tag, which is what produces `0.2.0` and `0.2`. The second build waits
+for the first and inherits its layers, which is what the concurrency group in
+`image.yml` is for: without it the two started twelve seconds apart and each
+built everything from scratch.
 
 To publish an image for a tag that missed one, dispatch `image` manually and
 pick that tag under **Run workflow → Use workflow from**.
+
+`latest` moves only on a push to the **default branch** — `image.yml` asks
+`docker/metadata-action` for `is_default_branch`, and that is a literal
+comparison against whatever the repository's default is set to right now. So
+changing the default branch stops `latest` updating, silently and with every
+check still green. It has happened once already. If `docker pull` is serving
+something older than the last release, check that setting before checking the
+workflow.
 
 Below 1.0 the minor is the compatibility signal: a breaking change and a
 feature both move it, and the changelog is where the difference is recorded.
