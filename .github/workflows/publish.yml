@@ -193,13 +193,35 @@ jobs:
 
           git checkout -q -B publish public/dev
           git merge --squash --no-commit "$GITHUB_SHA"
-          # The original subjects go in the body so nothing is lost. They were
-          # scanned by the gate, so they are safe to carry across.
-          {
-            printf '%s\n\n' "$subject"
-            printf 'Squashed from %s:\n\n' "$BRANCH"
-            git log --reverse --format='  %s' public/dev.."$GITHUB_SHA"
-          } > /tmp/message
+
+          # Carry the messages across whole, bodies included.
+          #
+          # This used to keep the subjects and drop every body, which deleted
+          # precisely the thing docs/contributing.md asks contributors to
+          # write: "the prose goes in the body ... the body is for the next
+          # person." Seven commits' worth went that way on the first branch
+          # published here, and nothing said so, because the subjects it kept
+          # looked exactly right.
+          #
+          # Everything below was scanned by the gate, bodies as well as
+          # subjects, so it is all safe to carry.
+          count=$(git rev-list --count public/dev.."$GITHUB_SHA")
+          if [ "$count" -eq 1 ]; then
+            # Nothing is being squashed, so there is nothing to summarise and
+            # no reason to rewrite anything. Take the message as it was
+            # written, verbatim.
+            git log -1 --format=%B "$GITHUB_SHA" > /tmp/message
+          else
+            {
+              printf '%s\n\n' "$subject"
+              printf 'Squashed from %s:\n' "$BRANCH"
+              # %w(0,4,4) indents without re-wrapping. The author chose those
+              # line breaks; reflowing them here would be this job editing
+              # prose it has no business editing.
+              git log --reverse --format='%n  %s%n%n%w(0,4,4)%b' \
+                public/dev.."$GITHUB_SHA"
+            } > /tmp/message
+          fi
           git commit -q --file /tmp/message
 
           # Force, because republishing a rebased branch rewrites this commit.
