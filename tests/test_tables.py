@@ -312,6 +312,7 @@ class TestDbsPeriodAndTotals:
         cycle runs from the day after the previous statement. Assuming the
         first of the month rejected six correctly-read statements."""
         from datetime import date
+
         from app.domain.models import DEPOSIT, ParsedAccount, ParsedTxn
         from app.parsers.dbs.acc import _period_start
 
@@ -328,6 +329,7 @@ class TestDbsPeriodAndTotals:
 
     def test_an_ordinary_month_still_starts_on_the_first(self):
         from datetime import date
+
         from app.domain.models import DEPOSIT, ParsedAccount, ParsedTxn
         from app.parsers.dbs.acc import _period_start
 
@@ -342,6 +344,7 @@ class TestDbsPeriodAndTotals:
         """As a validation failure rather than a parse error, the balance check
         still runs and the report shows the rows that disagree."""
         from datetime import date
+
         from app.domain.models import DEPOSIT, ParsedAccount, ParsedDocument, ParsedTxn
         from app.pipeline.validate import validate
 
@@ -365,6 +368,7 @@ class TestDbsPeriodAndTotals:
 
     def test_matching_declared_totals_pass(self):
         from datetime import date
+
         from app.domain.models import DEPOSIT, ParsedAccount, ParsedDocument, ParsedTxn
         from app.pipeline.validate import validate
 
@@ -431,6 +435,7 @@ class TestReversals:
         sign of the amount put it on the wrong side and every statement holding
         a reversal disagreed with its own arithmetic."""
         from datetime import date
+
         from app.domain.models import DEPOSIT, ParsedAccount, ParsedDocument, ParsedTxn
         from app.pipeline.validate import validate
 
@@ -461,9 +466,10 @@ class TestReversals:
 
     def test_a_layout_with_one_amount_column_still_works(self):
         """Where nothing was recorded, the amount's sign is all there is."""
-        from app.pipeline.validate import _printed_under
         from datetime import date
+
         from app.domain.models import ParsedTxn
+        from app.pipeline.validate import _printed_under
 
         out = ParsedTxn(posted_date=date(2025, 9, 4), amount_minor=-100,
                         currency="SGD", description_raw="a")

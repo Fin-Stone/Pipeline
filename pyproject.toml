@@ -20,6 +20,10 @@ postgres = ["psycopg[binary]>=3.1"]
 # upload route fails at import rather than at request time.
 api = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "python-multipart>=0.0.9"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
+# Pinned exactly, not floored. A new ruff minor adds rules, and an unpinned
+# linter turns a green branch red with no change to the code — which is how a
+# required check becomes the check everyone learns to override.
+lint = ["ruff==0.14.1"]
 
 [project.scripts]
 finstone = "app.cli:main"
@@ -50,3 +54,48 @@ testpaths = ["tests"]
 markers = [
     "requires_dummy: needs operator-supplied documents in uploads/dummy/ (skipped when absent)",
 ]
+
+# Deliberately narrow. This codebase reached 28k lines with no linter, so the
+# question is not which rules are defensible but which can be turned on today
+# without a diff that buries the history.
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+# Alembic writes its revisions from a template that imports what it does not
+# always use; those files are generated, and reformatting them by hand is how
+# a migration stops matching the revision it claims to be.
+extend-exclude = ["app/migrations/versions", "dist", "ui"]
+
+[tool.ruff.lint]
+# E4/E7/E9 rather than plain E, which is what keeps E501 out. 678 lines here
+# are over 88 characters and 106 are over 100 — nearly all of them prose in a
+# comment explaining why something is the way it is. Reflowing them would
+# rewrite the most useful part of the file to satisfy a number.
+#
+# F is the one that finds real mistakes, B the one that finds real bugs, and I
+# only reorders imports. UP is deliberately absent: it is a good rule set, but
+# it rewrites annotations across all 104 files and belongs in its own commit
+# where the diff can be read.
+select = ["E4", "E7", "E9", "F", "I", "B"]
+
+# B905 is `zip()` without `strict=`, and it is right that a silent truncation
+# on mismatched lengths is a bug worth finding — in a parser it is how you get
+# a row whose columns came from two different rows. But `strict=True` *raises*,
+# so turning it on is a runtime behaviour change at ten call sites across the
+# parsers, recurrence and reconciliation, and it cannot be validated here
+# without the operator's documents. It is a change with its own commit and its
+# own test run, not a side effect of adding a linter.
+ignore = ["B905"]
+
+[tool.ruff.lint.isort]
+# Keep `from .ocbc.cc import SIGNATURE as OCBC_CC_SIGNATURE, OcbcCardAdapter` on
+# one line. Without this, isort splits every aliased import in two and the
+# adapter table in parsers/registry.py — one line per institution, which is the
+# point of it — doubles in height to say the same thing.
+combine-as-imports = true
+
+[tool.ruff.lint.flake8-bugbear]
+# `Depends(...)` in an argument default is how FastAPI declares a dependency,
+# not the mutable-default bug B008 is looking for. Rewriting it would break
+# the injection it exists to perform.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.File", "fastapi.Form"]

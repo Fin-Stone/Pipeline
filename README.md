@@ -157,9 +157,24 @@ depends on them:
    tables with SSO identity fields, but runs single-tenant and single-member until the
    pipeline is proven end to end.
 
+## Contributing
+
+Work happens in a private staging repository and reaches this one only through
+a gate that scans every commit being published for personal data — because on a
+public repository the push *is* the publication, and no check that runs after it
+can take it back. Feature branches then go to `dev` behind static analysis and
+the fast suite, and `dev` to `main` behind the dual-engine regression run.
+
+[docs/contributing.md](docs/contributing.md) is the whole of it: the branch
+model, the hooks, the commit grammar, and what to do when the personal-data
+check fires (deleting the value in a new commit is not the fix).
+
 ## Documentation
 
 - [finance-pipeline-architecture.md](finance-pipeline-architecture.md) is the design and architecture source of truth.
+- [docs/contributing.md](docs/contributing.md) is how a change gets from your machine into a release, and what stops personal data travelling with it.
+- [AGENTS.md](AGENTS.md) is the operating contract for anyone running an agent against this repository, and [docs/development-rules.md](docs/development-rules.md) states the three binding rules in full, with the reasoning and the enforcement behind each.
+- [docs/repo-structure.md](docs/repo-structure.md) is what lives where, and [docs/agent-doc-sync.md](docs/agent-doc-sync.md) is which documents a change is obliged to update.
 - [docs/roadmap.md](docs/roadmap.md) is what is next, in the order it happens.
 - [docs/ingestion.md](docs/ingestion.md) is the Phase 1 ingestion and storage design of record.
 - [docs/api-contracts.md](docs/api-contracts.md) is what a client is written against, and binding.

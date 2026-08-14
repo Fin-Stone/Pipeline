@@ -9,18 +9,13 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
+from app.parsers.registry import AdapterRegistry
 from app.pipeline import diagnostics
 from app.pipeline.ingest import ingest_inbox
 from app.pipeline.quarantine import REASON_SUFFIX
 
 from .fixtures.make_pdf import synthetic_signature, synthetic_statement, write_pdf
 from .test_pipeline import SyntheticAdapter
-
-from app.parsers import fingerprint as fingerprinting
-from app.parsers import pdfio
-from app.parsers.registry import AdapterRegistry
 
 
 def _registry_for(path=None):

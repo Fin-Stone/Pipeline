@@ -22,16 +22,25 @@ data/*.sqlite3
 !data/store/README.md
 !data/quarantine/README.md
 
-# Working notes for whoever is building this, agent or otherwise. Kept on disk
-# and out of the repository: what is published is what builds and installs, and
-# an operating contract for contributors is neither. The three binding rules
-# they refer to are stated in full in README.md, which is published.
-AGENTS.md
+# The operating contract is published now, deliberately reversing the earlier
+# call to keep it on disk.
+#
+# The reasoning then was that what ships is what builds and installs. But this
+# repository expects contributors to run agents against it, and an agent with
+# no access to the three binding rules cannot honour them — it will read
+# uploads/prod/ because nothing told it not to, and paste what it finds into a
+# fixture. The rules are only load-bearing if they arrive with the checkout.
+#
+# Reviewed for personal data before publishing: they describe the categories in
+# the abstract and contain no instance of any of them. They are tracked now, so
+# tests/test_no_personal_data.py scans them on every run like anything else.
 .claude/
-docs/development-rules.md
-docs/repo-structure.md
-docs/agent-doc-sync.md
-scripts/
+# Anchored. Unanchored, this matched every directory named `scripts` at any
+# depth — including infra/scripts/, which is published infrastructure. The
+# files already there were tracked before the rule existed so nothing broke,
+# but a *new* one was silently skipped by `git add -A`, with no warning, and
+# only surfaced as a workflow failing to find a script it referenced.
+/scripts/
 
 # Secrets and environment
 .env

@@ -9,15 +9,13 @@ Values asserted here were read directly out of the PDFs.
 
 from __future__ import annotations
 
-
 import re
 from datetime import date
 from decimal import Decimal
 
 import pytest
 
-from app.parsers import fingerprint as fingerprinting
-from app.parsers import pdfio
+from app.parsers import fingerprint as fingerprinting, pdfio
 from app.parsers.registry import build_default_registry
 from app.parsers.trust.acc import TrustAccountAdapter
 from app.parsers.trust.cc import PRODUCT, TrustCardAdapter
@@ -206,6 +204,7 @@ class TestDbsSavings:
     def test_period_is_inferred_from_the_as_at_date(self, dummy_root):
         """DBS prints no period, only "as at 31 Dec 2021"."""
         from datetime import date as _date
+
         from app.parsers.dbs.acc import DbsAccountAdapter
 
         parsed = DbsAccountAdapter().parse(_require(dummy_root, DBS_ACC))

@@ -1,0 +1,129 @@
+# Tag and release what `main` now holds.
+#
+# The version is written by a human in the release pull request, not computed
+# here. This job's job is to check that the number a human wrote is the number
+# the commits imply, and to refuse rather than tag the wrong one — a version
+# that quietly disagrees with its own changelog is worse than a failed build,
+# because it ships.
+#
+# The tag it pushes matches image.yml's existing `tags: ["v*"]` trigger, so the
+# semver tagging that workflow already declares finally has something producing
+# tags. Nothing here needs write access to `main`: a tag is not a branch push,
+# so the ruleset that locks `main` does not have to make an exception.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Serialised, and deliberately not cancelled.
+#
+# Two pushes to `main` close together — a release merge and a docs commit —
+# would otherwise run two of these at once, both reading the same version and
+# both racing to create the same tag. The "already tagged" check below does not
+# save you there, because both read the tag list before either writes.
+#
+# cancel-in-progress is false, the opposite of pr-checks: cancelling a
+# superseded check is right, cancelling a release between pushing the tag and
+# creating the release leaves a tag with no release behind it.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.repository == 'Fin-Stone/Pipeline'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read the version
+        id: version
+        run: |
+          set -eu
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -n 1)
+          [ -n "$version" ] || { echo "::error::no version in pyproject.toml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      # Every push to main runs this workflow; only the ones carrying a bump
+      # should release. Nothing to do is a success, not a failure.
+      - name: Skip if this version is already tagged
+        id: check
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null; then
+            echo "${{ steps.version.outputs.tag }} already exists; nothing to release"
+            echo "release=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The server and the client ship as one artifact, so a disagreement here
+      # means one of them is mislabelled wherever it lands.
+      - name: The client version must agree
+        if: steps.check.outputs.release == 'yes'
+        run: |
+          set -eu
+          client=$(node -p "require('./ui/pwa/package.json').version")
+          if [ "$client" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::pyproject says ${{ steps.version.outputs.version }}, ui/pwa/package.json says $client"
+            exit 1
+          fi
+
+      - name: The version must match what the commits imply
+        if: steps.check.outputs.release == 'yes'
+        run: |
+          set -eu
+          previous=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          if [ -z "$previous" ]; then
+            # First release: there is no previous tag to measure from, and the
+            # script would start from the already-bumped pyproject version and
+            # bump it again. Nothing to compare against, so take the number.
+            echo "no previous tag; accepting ${{ steps.version.outputs.version }} as the first release"
+            exit 0
+          fi
+          expected=$(sh infra/scripts/next-version.sh "$previous")
+          if [ "$expected" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::the commits since $previous imply $expected, but the tree says ${{ steps.version.outputs.version }}."
+            echo "::error::Fix the version in pyproject.toml and ui/pwa/package.json, or explain the difference in the changelog."
+            exit 1
+          fi
+
+      - name: Extract this version's changelog section
+        if: steps.check.outputs.release == 'yes'
+        run: |
+          set -eu
+          if [ -f CHANGELOG.md ]; then
+            awk -v v="## ${{ steps.version.outputs.version }}" '
+              $0 ~ "^"v {found=1; next}
+              found && /^## / {exit}
+              found {print}
+            ' CHANGELOG.md > /tmp/notes.md
+          fi
+          # An empty section is not fatal — a release with thin notes still
+          # beats a release that did not happen — but it is worth saying.
+          if [ ! -s /tmp/notes.md ]; then
+            echo "::warning::no CHANGELOG.md section for ${{ steps.version.outputs.version }}"
+            printf 'Released from %s.\n' "$GITHUB_SHA" > /tmp/notes.md
+          fi
+          cat /tmp/notes.md
+
+      - name: Tag and release
+        if: steps.check.outputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md

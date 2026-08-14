@@ -32,13 +32,23 @@ if ! grep -Eq '^POSTGRES_PASSWORD=.+' "$ENV_FILE"; then
     exit 1
 fi
 
-# 2. Runtime directories. uploads/prod is created but never read by agents.
+# 2. Git hooks, when this is a checkout rather than an unpacked release.
+#
+# Rule 2 was prose on trust until the operator's own card ended up in a test
+# fixture. The pre-push hook is what makes it fail in a second rather than in
+# review, and wiring it here means nobody has to remember a second command.
+if [ -d "$ROOT/.git" ] && [ -d "$ROOT/.githooks" ]; then
+    step 'Installing git hooks'
+    git -C "$ROOT" config core.hooksPath .githooks
+fi
+
+# 3. Runtime directories. uploads/prod is created but never read by agents.
 step 'Preparing data and upload directories'
 for dir in data/inbox data/store data/quarantine uploads/dummy uploads/prod; do
     mkdir -p "$ROOT/$dir"
 done
 
-# 3. Services, then migrations (the app service applies them on start).
+# 4. Services, then migrations (the app service applies them on start).
 step 'Starting Postgres and the pipeline runtime'
 if [ "${1:-}" = "--rebuild" ]; then
     docker compose --env-file "$ENV_FILE" -f "$COMPOSE" up -d --build
@@ -46,7 +56,7 @@ else
     docker compose --env-file "$ENV_FILE" -f "$COMPOSE" up -d
 fi
 
-# 4. Health
+# 5. Health
 step 'Verifying the pipeline is reachable'
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE" exec -T app finstone status
 

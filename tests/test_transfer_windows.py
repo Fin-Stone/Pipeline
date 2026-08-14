@@ -19,7 +19,6 @@ import pytest
 from app.domain.models import CARD, DEPOSIT
 from app.domain.transfers import Leg, Window, find_transfers
 
-
 #: Day 1 of the fixtures. Offsets are added to it rather than to a day number,
 #: so a test can reach past a month end without arithmetic of its own.
 START = date(2026, 6, 1)
@@ -92,7 +91,7 @@ class TestEvidenceOrder:
             leg(3, 30, 1, 50_00),  # equally close, but nothing names it
         ]
         result = find_transfers(legs, window=Window())
-        assert [(l.out_txn_id, l.in_txn_id) for l in result.links] == [(1, 2)]
+        assert [(link.out_txn_id, link.in_txn_id) for link in result.links] == [(1, 2)]
         assert result.links[0].evidence == "names the other account"
 
     def test_an_ambiguity_in_an_early_pass_is_not_reported_if_a_later_one_settles_it(self):

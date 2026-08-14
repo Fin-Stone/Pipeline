@@ -152,7 +152,7 @@ def preview(repository, context, window: Window | None = None) -> Realignment:
     # Only automatic links are comparable. A manual mark is the operator's
     # claim, is not regenerable, and a re-run leaves it alone — counting one as
     # "removed" would offer to undo something this pass will not touch.
-    existing = {(l["out_txn_id"], l["in_txn_id"]) for l in stored if l["origin"] == "auto"}
+    existing = {(link["out_txn_id"], link["in_txn_id"]) for link in stored if link["origin"] == "auto"}
     found = {(link.out_txn_id, link.in_txn_id) for link in result.links}
 
     return Realignment(
@@ -161,7 +161,7 @@ def preview(repository, context, window: Window | None = None) -> Realignment:
         added=tuple(sorted(found - existing)),
         removed=tuple(sorted(existing - found)),
         unchanged=len(found & existing),
-        manual=sum(1 for l in stored if l["origin"] != "auto"),
+        manual=sum(1 for link in stored if link["origin"] != "auto"),
     )
 
 

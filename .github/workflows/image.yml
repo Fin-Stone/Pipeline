@@ -23,6 +23,7 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'Fin-Stone/Pipeline'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -55,7 +56,40 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
 
-      - uses: docker/build-push-action@v6
+      # Built once for this architecture and loaded locally, so the next step
+      # can look inside it before anything is pushed.
+      - name: Build for inspection
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/compose/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: finstone:inspect
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Asserts against the built image rather than trusting .dockerignore.
+      # The rules live in infra/scripts/check-image-data.sh, which reads the
+      # listing on stdin, so they can be tested without a Docker daemon.
+      #
+      # As root, not as the image's own uid 10001: `find /` run unprivileged
+      # cannot read every directory in the image, so it exits non-zero for that
+      # reason alone. With stderr discarded and `set -e` in force, that killed
+      # the step before a single assertion ran — a silent failure with no
+      # output to explain it.
+      #
+      # stderr is kept, and pipefail is set, because the only thing worse than
+      # this step failing for an unrelated reason is it passing for one.
+      - name: No real data in the image
+        run: |
+          set -euo pipefail
+          docker run --rm --user 0 --entrypoint sh finstone:inspect -c \
+            'find / -xdev \( -path /proc -o -path /sys \) -prune -o -print' \
+            | sh infra/scripts/check-image-data.sh
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: infra/compose/Dockerfile

@@ -28,12 +28,11 @@ from __future__ import annotations
 import json
 import tarfile
 import tempfile
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-
-from collections import Counter
 
 from sqlalchemy import Date, DateTime, Numeric, create_engine, func, inspect, select
 

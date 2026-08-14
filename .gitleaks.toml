@@ -1,0 +1,62 @@
+# Credentials, plus the fixed-shape personal identifiers this repository has
+# actually leaked before.
+#
+# This is the second half of a deliberate split, not a duplicate check:
+#
+#   tests/test_no_personal_data.py  owns the card rule, because it needs Luhn
+#                                   and gitleaks has no way to express it. A
+#                                   bare sixteen-digit rule fires on every
+#                                   lockfile hash in the tree, and that false
+#                                   positive rate is how a check gets disabled.
+#   this file                       owns credentials (from the default rules)
+#                                   and the shapes a regex can decide on its own.
+#
+# The Python detector is the source of truth for what counts as synthetic. The
+# allowlist at the bottom mirrors its ALLOWED set; if you add an entry there,
+# add it here too, or gitleaks will fail on a value the suite considers fine.
+
+title = "Finstone personal data"
+
+[extend]
+# Keep the shipped credential rules — AWS keys, tokens, private keys. Losing
+# those to add three of our own would be a poor trade.
+useDefault = true
+
+[[rules]]
+id = "sg-nric-fin"
+description = "Singapore NRIC/FIN"
+regex = '''\b[STFGM]\d{7}[A-Z]\b'''
+tags = ["personal-data"]
+
+[[rules]]
+id = "sg-uen"
+description = "Singapore UEN"
+regex = '''\b[T-Z]\d{2}[A-Z]{2}\d{4}[A-Z]\b'''
+tags = ["personal-data"]
+
+[[rules]]
+id = "sg-unit-number"
+description = "Singapore unit number, as printed on a statement address"
+regex = '''#\d{2}-\d{2,4}\b'''
+tags = ["personal-data"]
+
+[[rules]]
+id = "sg-phone"
+description = "Singapore phone number"
+regex = '''\+65[ -]?\d{4}[ -]?\d{4}\b'''
+tags = ["personal-data"]
+
+[allowlist]
+description = "Synthetic values the suite depends on, and the OCR glyph tables"
+# Keys are glyph hashes. Some pass Luhn by chance, and none of them are a card
+# number — handoff.md flags this explicitly: any scanner added here must not
+# flag them.
+paths = ['''app/parsers/glyph_tables/.*''']
+regexTarget = "match"
+regexes = [
+  '''4111111111\d{6}''',   # standard Visa test numbers
+  '''5555555555554444''',  # standard Mastercard test number
+  '''T00XX0000X''',        # synthetic UEN in the Trust wrap fixtures
+  '''#01-01''',            # synthetic unit number, same fixtures
+  '''S1234567D''',         # the textbook placeholder NRIC; see ALLOWED
+]
