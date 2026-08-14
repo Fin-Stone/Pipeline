@@ -167,6 +167,13 @@ this one blank...
 The subject is machine-readable because the version bump is computed from it.
 The body is for the next person.
 
+The gate carries bodies across intact — it squashes commits, not prose. A
+branch that publishes as one commit keeps its message verbatim; one that
+squashes several keeps every subject **and** every body under a `Squashed
+from` heading. It did not always: every branch published before this change
+kept its subjects and lost every body, and nothing said so, because what it
+kept looked right.
+
 ### The pull request title is the one that matters
 
 `dev` takes squash merges, so **the pull request title becomes the commit
