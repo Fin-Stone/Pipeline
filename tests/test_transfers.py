@@ -204,8 +204,8 @@ class TestTheClosestPairWins:
         ]
         first = find_transfers(legs)
         second = find_transfers(list(reversed(legs)))
-        assert {(l.out_txn_id, l.in_txn_id) for l in first.links} \
-            == {(l.out_txn_id, l.in_txn_id) for l in second.links}
+        assert {(link.out_txn_id, link.in_txn_id) for link in first.links} \
+            == {(link.out_txn_id, link.in_txn_id) for link in second.links}
 
     def test_a_near_proof_still_outranks_a_closer_coincidence(self):
         """Distance orders the pairs *within* a pass, never across them. A row
@@ -354,5 +354,5 @@ class TestRefusals:
         ]
         first = find_transfers(legs)
         second = find_transfers(list(reversed(legs)))
-        assert [(l.out_txn_id, l.in_txn_id) for l in first.links] == \
-               [(l.out_txn_id, l.in_txn_id) for l in second.links]
+        assert [(link.out_txn_id, link.in_txn_id) for link in first.links] == \
+               [(link.out_txn_id, link.in_txn_id) for link in second.links]

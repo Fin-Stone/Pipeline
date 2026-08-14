@@ -36,20 +36,30 @@ if (-not (Select-String -Path $envFile -Pattern '^POSTGRES_PASSWORD=.+' -Quiet))
     exit 1
 }
 
-# 2. Runtime directories. uploads/prod is created but never read by agents.
+# 2. Git hooks, when this is a checkout rather than an unpacked release.
+#
+# Rule 2 was prose on trust until the operator's own card ended up in a test
+# fixture. The pre-push hook is what makes it fail in a second rather than in
+# review, and wiring it here means nobody has to remember a second command.
+if ((Test-Path (Join-Path $root '.git')) -and (Test-Path (Join-Path $root '.githooks'))) {
+    Step 'Installing git hooks'
+    git -C $root config core.hooksPath .githooks
+}
+
+# 3. Runtime directories. uploads/prod is created but never read by agents.
 Step 'Preparing data and upload directories'
 foreach ($dir in 'data/inbox', 'data/store', 'data/quarantine', 'uploads/dummy', 'uploads/prod') {
     New-Item -ItemType Directory -Force (Join-Path $root $dir) | Out-Null
 }
 
-# 3. Services, then migrations (the app service applies them on start).
+# 4. Services, then migrations (the app service applies them on start).
 Step 'Starting Postgres and the pipeline runtime'
 $buildArgs = @('--env-file', $envFile, '-f', $compose, 'up', '-d')
 if ($Rebuild) { $buildArgs += '--build' }
 docker compose @buildArgs
 if ($LASTEXITCODE -ne 0) { throw 'docker compose up failed' }
 
-# 4. Health
+# 5. Health
 Step 'Verifying the pipeline is reachable'
 docker compose --env-file $envFile -f $compose exec -T app finstone status
 if ($LASTEXITCODE -ne 0) { throw 'health check failed' }

@@ -1,0 +1,170 @@
+# Everything a change must pass to enter `dev`.
+#
+# Fast by design. The dual-engine suite lives in regression.yml and runs on the
+# way to `main`; asking every feature to pay for a Postgres service would make
+# the cheap checks feel expensive and the expensive ones get skipped.
+#
+# No `paths:` filters anywhere in this file. A required check that is skipped
+# by a path filter never reports at all, and the pull request waits on a status
+# that is never coming.
+#
+# Unlike regression.yml, release.yml and image.yml, the jobs here carry no
+# `github.repository ==` guard, and that is deliberate. This only triggers on a
+# pull request into `dev`, which the private staging repository does not have,
+# so it cannot fire there. Leaving it unguarded means it still runs on a
+# contributor's fork, which is where it is most needed.
+
+name: pr-checks
+
+on:
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      # The pinned version from pyproject's `lint` extra, so a ruff release
+      # cannot turn this branch red without a commit.
+      - run: pip install -e ".[lint]"
+      - run: ruff check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ui/pwa/package-lock.json
+      - run: npm ci
+        working-directory: ui/pwa
+      # `tsc -b` already runs inside `npm run build`, but a type error there
+      # surfaces as a failed image build with the message buried in a layer.
+      # Here it is a named check with the error on the pull request.
+      - run: npx tsc --noEmit
+        working-directory: ui/pwa
+
+  tests-fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      # No `postgres` extra and no TEST_DATABASE_URL: tests/conftest.py derives
+      # the engine list from that variable, so leaving it unset is what makes
+      # this the SQLite-only run. test_migration skips itself the same way, and
+      # the adapter tests skip because uploads/dummy is gitignored.
+      - run: pip install -e ".[dev,api]"
+      - run: python -m pytest -q
+
+  commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The title first, and it is the one that matters: `dev` takes squash
+      # merges, so the pull request title becomes the commit subject that lands
+      # in the branch history and drives the version bump.
+      - name: Pull request title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: sh infra/scripts/check-commit-msg.sh "$TITLE"
+      - name: Every commit on the branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          status=0
+          while IFS= read -r subject; do
+            sh infra/scripts/check-commit-msg.sh "$subject" || status=1
+          done <<< "$(git log --format=%s "$BASE..$HEAD")"
+          exit "$status"
+
+  privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Defence in depth. The staging gate is what stops the operator's own
+      # data reaching here; this catches anything that arrived by another road
+      # — most realistically a contributor's pull request, which lands on the
+      # public repository without passing that gate at all.
+      - name: Refuse personal data in the range
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python tests/test_no_personal_data.py "$BASE..$HEAD"
+      # Standard library only, and no pytest: collecting the detector imports
+      # tests/conftest.py, which imports `app` and therefore SQLAlchemy. This
+      # job installs nothing, so pytest would fail loading conftest without
+      # running the check. The suite covers the pytest path in tests-fast,
+      # where the dependencies actually exist.
+      - name: Refuse personal data in the working tree
+        run: python tests/test_no_personal_data.py --tree
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -e ".[dev,api,postgres]"
+      - uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: .
+
+      # The binary from the release, not gitleaks/gitleaks-action: that action
+      # requires a paid licence key for organisation-owned repositories, and a
+      # check nobody can run is a check nobody keeps.
+      - name: gitleaks
+        run: |
+          set -eu
+          version=8.21.2
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ui/pwa/package-lock.json
+      - run: npm ci
+        working-directory: ui/pwa
+      # Advisory. Dev-dependency advisories in the vite and MUI trees would
+      # otherwise block changes that have nothing to do with them; the runtime
+      # tree is what `--omit=dev` leaves, and that is what matters here.
+      - name: npm audit (runtime dependencies)
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
+        working-directory: ui/pwa

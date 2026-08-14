@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+# Conventional-commit subject, checked as the message is written.
+#
+# The grammar lives in one place — see infra/scripts/check-commit-msg.sh — so
+# this hook, the pull request title check and CI cannot drift apart.
+
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel)
+CHECK="$ROOT/infra/scripts/check-commit-msg.sh"
+[ -f "$CHECK" ] || exit 0
+
+exec sh "$CHECK" "$1"

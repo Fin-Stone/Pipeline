@@ -101,7 +101,7 @@ class TestPairingAPaymentWithItsCard:
             _leg(3, 3, 3, +100000, "PAYMENT", kind=CARD,
                  numbers=("xxxx-xxxx-xxxx-4321",)),
         ])
-        assert {(l.out_txn_id, l.in_txn_id) for l in result.links} == {(1, 3)}
+        assert {(link.out_txn_id, link.in_txn_id) for link in result.links} == {(1, 3)}
 
     def test_a_card_with_no_number_on_record_still_pairs_structurally(self):
         """Trust prints no card number anywhere on its statement. Nothing

@@ -1,0 +1,52 @@
+#!/usr/bin/env sh
+# Refuse to push personal data.
+#
+# pre-push rather than pre-commit, because the range being pushed is the unit
+# that becomes visible. A value that arrived in one commit and left in the next
+# is still in the history being sent, and a tree-level check at commit time
+# cannot see it — that is precisely how the earlier scrubs were undone.
+#
+# This is fast feedback, not the boundary. `git push --no-verify` skips it, and
+# a clone that has not been bootstrapped does not have it at all. The boundary
+# is the gate in the staging repository's publish.yml, which nothing local can
+# skip. See docs/contributing.md.
+
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel)
+DETECTOR="$ROOT/tests/test_no_personal_data.py"
+[ -f "$DETECTOR" ] || exit 0
+
+# Standard library only, so the virtualenv does not need to be active.
+for candidate in "$ROOT/.venv/Scripts/python.exe" "$ROOT/.venv/bin/python" python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
+done
+if [ -z "${PYTHON:-}" ]; then
+    printf 'pre-push: no python found; cannot check for personal data.\n' >&2
+    printf 'Install python3, or push with --no-verify and accept the risk.\n' >&2
+    exit 1
+fi
+
+ZERO=0000000000000000000000000000000000000000
+remote_name=${1:-origin}
+status=0
+
+# git feeds one line per ref being pushed:  <local ref> <local sha> <remote ref> <remote sha>
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ "$local_sha" = "$ZERO" ] && continue          # deleting a ref, nothing to read
+
+    if [ "$remote_sha" = "$ZERO" ]; then
+        # New branch on the remote. Everything already published anywhere is
+        # excluded, so this is the set of commits this push actually adds
+        # rather than the whole history behind them.
+        range="$local_sha --not --remotes=$remote_name"
+    else
+        range="$remote_sha..$local_sha"
+    fi
+
+    # Unquoted on purpose: the new-branch form is several arguments.
+    # shellcheck disable=SC2086
+    "$PYTHON" "$DETECTOR" $range || status=1
+done
+
+exit "$status"

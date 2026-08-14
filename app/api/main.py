@@ -21,12 +21,11 @@ Design, from architecture §5.2:
 
 from __future__ import annotations
 
+import dataclasses
+import os
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated
-
-import dataclasses
-import os
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
@@ -54,6 +53,7 @@ from ..domain.recurrence import (
     matching,
 )
 from ..domain.transfers import Window
+
 # Stdlib-only, unlike the rest of `pipeline`: reading why a document failed must
 # not drag the parser stack into a process that only serves the ledger.
 from ..pipeline import quarantine

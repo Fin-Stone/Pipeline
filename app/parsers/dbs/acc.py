@@ -22,8 +22,8 @@ balance reconciliation alone would not catch. See `_check_declared_totals`.
 from __future__ import annotations
 
 import re
-from datetime import date
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 from ...domain.dates import DateParseError, parse_full_date, parse_numeric_date

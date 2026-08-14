@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.config import PROFILE_DUMMY, PROFILE_PROD, ConfigError
+from app.parsers.registry import AdapterRegistry
 from app.pipeline.ingest import ingest_inbox
 from app.pipeline.quarantine import REASON_SUFFIX, export_originals
 from app.pipeline.stage import stage
@@ -21,9 +22,6 @@ from app.storage import schema
 
 from .fixtures.make_pdf import synthetic_signature, synthetic_statement, write_pdf
 from .test_pipeline import SyntheticAdapter
-
-from app.parsers.registry import AdapterRegistry
-
 
 ROWS = [("03 Jun", "Salary", "+2,000.00")]
 

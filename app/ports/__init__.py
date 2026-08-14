@@ -16,7 +16,7 @@ from .repository import (
     StatusCounts,
     TxnRecord,
 )
-from .source import DocumentSource, DiscoveredFile
+from .source import DiscoveredFile, DocumentSource
 
 __all__ = [
     "AdapterMatch",

@@ -28,7 +28,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ...domain.dates import DateParseError, parse_full_date, resolve_near_period, resolve_period_date
+from ...domain.dates import (
+    DateParseError,
+    parse_full_date,
+    resolve_near_period,
+    resolve_period_date,
+)
 from ...domain.models import CARD, DOC_TYPE_CARD, ParsedAccount, ParsedDocument, ParsedTxn
 from ...domain.money import AmountParseError, parse_amount
 from ...ports.parser import ParseError

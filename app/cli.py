@@ -17,8 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import PROFILE_DUMMY, PROFILES, ConfigError, load_config
-from .parsers import fingerprint as fingerprinting
-from .parsers import pdfio
+from .parsers import fingerprint as fingerprinting, pdfio
 from .parsers.registry import build_default_registry
 from .pipeline import quarantine
 from .pipeline.ingest import ingest_inbox, reparse
@@ -394,7 +393,7 @@ def cmd_transfers(args) -> int:
         print(f"rows no longer spend {len(outcome.result.linked_txn_ids)}")
         print(f"value moved, not spent{_money(outcome.value_minor)}")
 
-        print(f"\nagainst what is recorded")
+        print("\nagainst what is recorded")
         print(f"  new                {len(outcome.added)}")
         print(f"  no longer found    {len(outcome.removed)}")
         print(f"  unchanged          {outcome.unchanged}")
@@ -563,7 +562,11 @@ def cmd_review(args) -> int:
     this is the thin caller that proves they work. See architecture §5.2.
     """
     from .domain.categories import (
-        DEFAULT_CATEGORIES, Rule, operator_rule, review_queue, rule_origin,
+        DEFAULT_CATEGORIES,
+        Rule,
+        operator_rule,
+        review_queue,
+        rule_origin,
     )
     from .pipeline.diagnostics import _money, describe
 
@@ -807,7 +810,6 @@ def cmd_categorise(args) -> int:
         for r in stored
     )
     report = coverage([t["counterparty_norm"] or "" for t in targets], rules)
-    spend = {t["id"]: t["amount_minor"] for t in targets}
 
     print(f"profile              {args.profile}")
     if seeded:

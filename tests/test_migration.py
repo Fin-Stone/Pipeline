@@ -227,6 +227,7 @@ class TestSchemaVersionGuard:
 
     def test_a_migrated_database_passes(self, tmp_path):
         from sqlalchemy import create_engine
+
         from app.storage.factory import check_schema
         from app.storage.sqlalchemy_repo import SqlAlchemyLedgerRepository
 
@@ -243,6 +244,7 @@ class TestSchemaVersionGuard:
 
     def test_the_message_names_both_revisions(self, tmp_path):
         from sqlalchemy import create_engine, text
+
         from app.storage.factory import SchemaOutOfDate, check_schema, head_revision
         from app.storage.sqlalchemy_repo import SqlAlchemyLedgerRepository
 
