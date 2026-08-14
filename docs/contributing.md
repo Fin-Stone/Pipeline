@@ -187,7 +187,7 @@ it is worth knowing why the button is missing.
 | `regression` | PR into `main`, push to `dev`/`main` | The suite on **both** engines, the client build, and the branch guard. |
 | `pr-agent` | PR into `dev` | Automated review. Advisory — not a required check. |
 | `release` | push to `main` | Tags and releases when the version changed. |
-| `image` | push to `main`, tags | Builds, asserts no real data is in the image, publishes to GHCR. |
+| `image` | push to `main`, and dispatched by `release` on the new tag | Builds, asserts no real data is in the image, publishes to GHCR. |
 
 The dual-engine run in `regression` is the enforcement mechanism for Rule 1: a
 Postgres-ism fails the SQLite job and a SQLite assumption fails the Postgres
@@ -224,6 +224,17 @@ leaving it unset gives you the fast run.
 commits and **fails rather than tagging** if it disagrees with what you wrote —
 a release whose number contradicts its own changelog is worse than a failed
 build, because it ships.
+
+Its last step dispatches `image.yml` on the tag it just pushed, which is the
+only way that build ever sees a tag: GitHub does not start workflow runs from
+events raised by `GITHUB_TOKEN`, so a `tags:` trigger on `image.yml` would
+never fire, and for v0.1.0 it did not. So a release builds the image twice from
+the same commit — once from the push to `main`, which moves `latest`, and once
+from the tag, which is what produces `0.2.0` and `0.2`. The second build reuses
+the first's cache.
+
+To publish an image for a tag that missed one, dispatch `image` manually and
+pick that tag under **Run workflow → Use workflow from**.
 
 Below 1.0 the minor is the compatibility signal: a breaking change and a
 feature both move it, and the changelog is where the difference is recorded.
