@@ -9,10 +9,20 @@
 
 name: image
 
+# A tag push is not a trigger here, and the semver rules further down are not
+# orphaned by that. release.yml creates the tag with GITHUB_TOKEN, and GitHub
+# does not start workflow runs from events raised by that token — so
+# `tags: ["v*"]` sat here reading as coverage while being unable to fire. It
+# took v0.1.0 to show it: tag pushed, release published, no 0.1.0 image behind
+# either of them, and nothing anywhere to say so.
+#
+# workflow_dispatch is the documented exception — those events always create a
+# run, GITHUB_TOKEN or not — and it takes a ref. So release.yml dispatches this
+# workflow on the tag it has just pushed, github.ref is that tag, and
+# type=semver resolves against it exactly as it was always meant to.
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -50,6 +60,16 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          # Two triggers, two jobs. A push to main moves `latest` and records
+          # `sha-<short>`; the dispatch on `refs/tags/vX.Y.Z` is what makes
+          # type=semver resolve, so that is where 0.1.0 and 0.1 come from.
+          # is_default_branch is false on a tag ref, which is why `latest` is
+          # the push's to move and not the tag's.
+          #
+          # A release therefore builds twice, from the same commit — once for
+          # `latest`, once for the version. The second run reuses the first's
+          # layer cache, and paying that once per release is the price of the
+          # version tags naming the commit that was actually released.
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
