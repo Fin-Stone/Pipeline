@@ -401,7 +401,10 @@ export const api = {
       `/transactions/${txn_id}/category`, {}, { method: "DELETE" },
     ),
   decide: (counterparty: string, category: string) =>
-    call<{ created: boolean }>("/review/decide", { counterparty, category }, { method: "POST" }),
+    call<{
+      counterparty: string; category: string; created: boolean; applied: number;
+      replaced: { pattern: string; category: string }[];
+    }>("/review/decide", { counterparty, category }, { method: "POST" }),
   /** Takes a decision back in the words it was made in, so a client never has
    *  to hold a rule id it was not shown. Removing nothing is not an error. */
   undecide: (counterparty: string) =>
