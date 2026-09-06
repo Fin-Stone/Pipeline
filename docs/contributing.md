@@ -56,6 +56,13 @@ anywhere objected. The gap was never care. It was enforcement.
 
 ## Working on a change
 
+### Agent execution boundary
+
+When an AI agent is assisting with a change, it may create or switch branches, stage
+changes, and prepare a commit message. The agent MUST NOT run `git commit` or `git push`,
+including equivalent operations hidden behind scripts, workflows, or remote helpers. The
+human operator reviews the staged diff and performs both actions.
+
 ```bash
 git clone git@github.com:Fin-Stone/Pipeline-staging.git
 cd Pipeline-staging
