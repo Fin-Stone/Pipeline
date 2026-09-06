@@ -150,6 +150,38 @@ export default function Dashboard({ mode }: { mode: Mode }) {
     const was = row?.category ?? null;
     const wasHuman = row?.source === "human";
 
+    // A named, uncategorised row is not a one-off correction: it is the same
+    // merchant decision offered on Recurring and Review. Store it as a rule so
+    // every matching row on this screen, the rest of the ledger, and future
+    // imports agree. Keep existing human corrections individual: they are the
+    // explicit exception to a merchant rule, and the rule pass must not erase
+    // that distinction. Rows with no payee also have nothing a rule can match.
+    if (name !== "" && row?.counterparty_norm && !wasHuman) {
+      const counterparty = row.counterparty_norm;
+      const decided = await api.decide(counterparty, name);
+      const wanted = counterparty.toUpperCase();
+      setTxns((t) => t.map((x) => (
+        x.counterparty_norm.toUpperCase() === wanted && x.source !== "human"
+          ? { ...x, category: decided.category, source: "rule" }
+          : x
+      )));
+      reload();
+
+      offerUndo(
+        `Filed every ${counterparty} transaction under ${decided.category}`,
+        async () => {
+          await api.undecide(counterparty);
+          // `decide` replaces an earlier operator decision. Put that decision
+          // back on undo; imported rules need no help because undeciding lets
+          // the rule pass expose them again automatically.
+          const previous = decided.replaced.at(0);
+          if (previous) await api.decide(counterparty, previous.category);
+          reload();
+        },
+      );
+      return;
+    }
+
     if (name === "") {
       // Back to uncategorised, which the automatic pass may then speak about
       // again. Without this, a correction could be changed but never taken
@@ -394,10 +426,11 @@ export default function Dashboard({ mode }: { mode: Mode }) {
             <Button size="small" onClick={addCategory}>+ category</Button>
           </Stack>
           <Typography variant="caption" color="text.secondary">
-            Changing a category here is a correction: it is kept as yours and no
-            automatic pass will overwrite it. Hiding removes a row from the
-            totals and the bars above, not just from this list — the eye icon
-            lasts until you refresh, “forever” is undone on the Hidden page.
+            Filing an uncategorised merchant updates every matching transaction
+            and future imports, just like Recurring and Review. Existing one-off
+            corrections and rows with no payee stay individual. Hiding removes a
+            row from the totals and bars above, not just from this list — the eye
+            icon lasts until refresh, “forever” is undone on the Hidden page.
           </Typography>
           <Divider sx={{ my: 1 }} />
           <List dense sx={{ maxHeight: 340, overflowY: "auto" }}>

@@ -37,6 +37,11 @@ description of the current implementation.
   rounding error the ledger exists to avoid.
 - **The taxonomy is fetched, never hardcoded.** Categories are tenant data and a
   household may rename or add to them.
+- **A named merchant is categorised once, everywhere.** Choosing a category for
+  an uncategorised transaction on Spending uses the same merchant decision as
+  Recurring and Review, so all matching past rows and future imports follow it.
+  A row with no payee, or an existing one-off human correction, remains an
+  individual transaction edit.
 - **Null is not zero.** An average over an open-ended range has no value, and
   the UI renders `—` rather than `0.00`.
 
