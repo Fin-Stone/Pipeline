@@ -13,6 +13,19 @@ The repository exists to let a user clone the project and bring the platform up 
 
 The system architecture described in [finance-pipeline-architecture.md](finance-pipeline-architecture.md) is the source of truth for design intent.
 
+## Git authority boundary
+
+Agents may create or switch feature branches, stage changes, inspect the worktree, and
+prepare or suggest commit messages. The human operator owns repository publication and
+history changes.
+
+- Agents MUST NOT run `git commit` (including `--amend`, rebase commits, or equivalent).
+- Agents MUST NOT run `git push` (including force-pushes or pushes performed through a
+  script, workflow, or remote helper).
+- Agents MAY leave changes staged and provide the exact commit command and message for the
+  operator to review and execute.
+- The operator MUST review the staged diff and perform the commit and push themselves.
+
 ## Development rules
 
 Three rules are binding on every contributor, human or agent. All are stated in full in
